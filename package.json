@@ -1,0 +1,20 @@
+{
+  "name": "webcontrol4",
+  "version": "1.0.0",
+  "description": "Web client for controlling Control4 lights and thermostats",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [
+    "control4",
+    "home-automation",
+    "smart-home"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.2.1"
+  }
+}

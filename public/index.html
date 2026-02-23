@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebControl4</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --green: #22c55e;
+      --orange: #f59e0b;
+      --red: #ef4444;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* Header */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 { font-size: 20px; font-weight: 600; }
+    header .status {
+      font-size: 13px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    header .status .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+    }
+    header .status .dot.off { background: var(--red); }
+    .btn-logout {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .btn-logout:hover { border-color: var(--red); color: var(--red); }
+
+    /* Views */
+    .view { display: none; }
+    .view.active { display: block; }
+
+    /* Login */
+    #login-view {
+      max-width: 400px;
+      margin: 80px auto;
+      padding: 0 20px;
+    }
+    #login-view h2 {
+      font-size: 28px;
+      margin-bottom: 8px;
+      text-align: center;
+    }
+    #login-view p.sub {
+      color: var(--muted);
+      text-align: center;
+      margin-bottom: 32px;
+      font-size: 14px;
+    }
+    .form-group {
+      margin-bottom: 16px;
+    }
+    .form-group label {
+      display: block;
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .form-group input, .form-group select {
+      width: 100%;
+      padding: 10px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+    }
+    .form-group input:focus, .form-group select:focus {
+      border-color: var(--accent);
+    }
+    .btn {
+      width: 100%;
+      padding: 12px;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .error-msg {
+      background: rgba(239,68,68,0.1);
+      border: 1px solid rgba(239,68,68,0.3);
+      color: var(--red);
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-bottom: 16px;
+      display: none;
+    }
+
+    /* Controller selection */
+    #controller-view {
+      max-width: 500px;
+      margin: 80px auto;
+      padding: 0 20px;
+    }
+    .controller-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 12px;
+      cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    .controller-card:hover { border-color: var(--accent); }
+    .controller-card .name { font-weight: 500; margin-bottom: 4px; }
+    .controller-card .common-name { font-size: 12px; color: var(--muted); font-family: monospace; }
+
+    /* Dashboard */
+    #dashboard-view { padding: 24px; max-width: 1100px; margin: 0 auto; }
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .section-title .icon { font-size: 20px; }
+
+    .device-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+      margin-bottom: 40px;
+    }
+
+    /* Light cards */
+    .light-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      transition: border-color 0.2s;
+    }
+    .light-card.on { border-color: var(--orange); }
+    .light-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .light-name { font-weight: 500; font-size: 15px; }
+    .light-room { font-size: 12px; color: var(--muted); }
+    .toggle {
+      position: relative;
+      width: 44px; height: 24px;
+      background: var(--border);
+      border-radius: 12px;
+      cursor: pointer;
+      transition: background 0.3s;
+      border: none;
+    }
+    .toggle.on { background: var(--orange); }
+    .toggle::after {
+      content: "";
+      position: absolute;
+      top: 3px; left: 3px;
+      width: 18px; height: 18px;
+      background: white;
+      border-radius: 50%;
+      transition: transform 0.3s;
+    }
+    .toggle.on::after { transform: translateX(20px); }
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .slider-row input[type="range"] {
+      flex: 1;
+      -webkit-appearance: none;
+      height: 6px;
+      background: var(--border);
+      border-radius: 3px;
+      outline: none;
+    }
+    .slider-row input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 18px; height: 18px;
+      background: var(--orange);
+      border-radius: 50%;
+      cursor: pointer;
+    }
+    .slider-row .level-label {
+      font-size: 13px;
+      color: var(--muted);
+      min-width: 36px;
+      text-align: right;
+    }
+
+    /* Thermostat cards */
+    .thermo-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .thermo-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 20px;
+    }
+    .thermo-name { font-weight: 500; font-size: 15px; }
+    .thermo-room { font-size: 12px; color: var(--muted); }
+    .current-temp {
+      font-size: 36px;
+      font-weight: 300;
+      line-height: 1;
+    }
+    .current-temp span { font-size: 18px; color: var(--muted); }
+    .thermo-details {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .thermo-detail {
+      background: rgba(255,255,255,0.03);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .thermo-detail .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .thermo-detail .val { font-size: 16px; font-weight: 500; margin-top: 2px; }
+    .setpoint-controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .setpoint-controls button {
+      width: 32px; height: 32px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .setpoint-controls button:hover { border-color: var(--accent); }
+    .setpoint-controls .setpoint-value { font-size: 15px; min-width: 40px; text-align: center; }
+    .mode-select {
+      width: 100%;
+      padding: 8px 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 13px;
+      margin-top: 12px;
+      cursor: pointer;
+    }
+    .mode-select:focus { border-color: var(--accent); outline: none; }
+
+    /* Refresh button */
+    .refresh-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      margin-bottom: 20px;
+    }
+    .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Loading */
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: var(--muted);
+    }
+    .spinner {
+      display: inline-block;
+      width: 20px; height: 20px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* IP form */
+    .ip-note {
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 16px;
+      text-align: center;
+    }
+    .manual-connect {
+      margin-top: 24px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>WebControl4</h1>
+    <div id="header-right" style="display:flex;align-items:center;gap:16px;">
+      <div id="connection-status" class="status" style="display:none;">
+        <div class="dot"></div>
+        <span>Connected</span>
+      </div>
+      <button id="btn-logout" class="btn-logout" style="display:none;" onclick="logout()">Disconnect</button>
+    </div>
+  </header>
+
+  <!-- Login View -->
+  <div id="login-view" class="view active">
+    <h2>Connect to Control4</h2>
+    <p class="sub">Sign in with your Control4 account or connect directly to a controller</p>
+    <div id="login-error" class="error-msg"></div>
+    <form id="login-form">
+      <div class="form-group">
+        <label>Control4 Email</label>
+        <input type="email" id="c4-username" placeholder="you@example.com" autocomplete="username">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="c4-password" placeholder="Your Control4 password" autocomplete="current-password">
+      </div>
+      <button type="submit" class="btn" id="btn-login">Sign In</button>
+    </form>
+    <div class="manual-connect">
+      <div class="form-group">
+        <label>Or connect directly to controller IP</label>
+        <input type="text" id="direct-ip" placeholder="192.168.1.100">
+      </div>
+      <div class="form-group">
+        <label>Director Bearer Token</label>
+        <input type="text" id="direct-token" placeholder="Paste bearer token">
+      </div>
+      <button class="btn" onclick="directConnect()">Connect Directly</button>
+    </div>
+  </div>
+
+  <!-- Controller Selection View -->
+  <div id="controller-view" class="view">
+    <h2 style="margin-bottom:8px;">Select Controller</h2>
+    <p class="sub" style="color:var(--muted);margin-bottom:24px;font-size:14px;">Choose which controller to connect to</p>
+    <div id="controller-list"></div>
+    <div class="form-group" style="margin-top:20px;">
+      <label>Controller IP Address (local network)</label>
+      <input type="text" id="controller-ip" placeholder="192.168.1.100">
+    </div>
+  </div>
+
+  <!-- Dashboard View -->
+  <div id="dashboard-view" class="view">
+    <button class="refresh-btn" onclick="refreshDevices()"><span class="spinner" style="display:none;" id="refresh-spinner"></span>Refresh Devices</button>
+
+    <div class="section-title"><span class="icon">&#x1F4A1;</span> Lights</div>
+    <div id="lights-grid" class="device-grid">
+      <div class="loading"><span class="spinner"></span> Loading lights...</div>
+    </div>
+
+    <div class="section-title"><span class="icon">&#x1F321;</span> Thermostats</div>
+    <div id="thermos-grid" class="device-grid">
+      <div class="loading"><span class="spinner"></span> Loading thermostats...</div>
+    </div>
+  </div>
+
+  <script>
+    // -----------------------------------------------------------------------
+    // State
+    // -----------------------------------------------------------------------
+    let state = {
+      accountToken: null,
+      directorToken: null,
+      controllerIP: null,
+      controllerCommonName: null,
+      lights: [],
+      thermostats: [],
+    };
+
+    // -----------------------------------------------------------------------
+    // View management
+    // -----------------------------------------------------------------------
+    function showView(id) {
+      document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+      document.getElementById(id).classList.add("active");
+      const connected = id === "dashboard-view";
+      document.getElementById("connection-status").style.display = connected ? "flex" : "none";
+      document.getElementById("btn-logout").style.display = connected ? "inline-block" : "none";
+    }
+
+    // -----------------------------------------------------------------------
+    // API helpers
+    // -----------------------------------------------------------------------
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        method: options.method || "GET",
+        headers: { "Content-Type": "application/json", ...options.headers },
+        body: options.body ? JSON.stringify(options.body) : undefined,
+      });
+      return res.json();
+    }
+
+    function directorGet(apiPath) {
+      const params = new URLSearchParams({
+        ip: state.controllerIP,
+        token: state.directorToken,
+      });
+      return api(`/api/director/${apiPath}?${params}`);
+    }
+
+    function directorPost(apiPath, command, tParams = {}) {
+      const params = new URLSearchParams({
+        ip: state.controllerIP,
+        token: state.directorToken,
+      });
+      return api(`/api/director/${apiPath}?${params}`, {
+        method: "POST",
+        body: { async: true, command, tParams },
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // Login flow
+    // -----------------------------------------------------------------------
+    document.getElementById("login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errEl = document.getElementById("login-error");
+      errEl.style.display = "none";
+      const btn = document.getElementById("btn-login");
+      btn.disabled = true;
+      btn.textContent = "Signing in...";
+
+      const username = document.getElementById("c4-username").value.trim();
+      const password = document.getElementById("c4-password").value;
+
+      try {
+        const authRes = await api("/api/auth/login", {
+          method: "POST",
+          body: { username, password },
+        });
+        if (authRes.error) throw new Error(authRes.error);
+        state.accountToken = authRes.accountToken;
+
+        // Get controllers
+        const controllers = await api("/api/auth/controllers", {
+          method: "POST",
+          body: { accountToken: state.accountToken },
+        });
+        if (controllers.error) throw new Error(controllers.error);
+
+        showControllerSelection(Array.isArray(controllers) ? controllers : [controllers]);
+      } catch (err) {
+        errEl.textContent = err.message;
+        errEl.style.display = "block";
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Sign In";
+      }
+    });
+
+    function showControllerSelection(controllers) {
+      const list = document.getElementById("controller-list");
+      list.innerHTML = "";
+      for (const c of controllers) {
+        const card = document.createElement("div");
+        card.className = "controller-card";
+        card.innerHTML = `
+          <div class="name">${c.name || "Controller"}</div>
+          <div class="common-name">${c.controllerCommonName || "unknown"}</div>
+        `;
+        card.addEventListener("click", () => selectController(c));
+        list.appendChild(card);
+      }
+      showView("controller-view");
+    }
+
+    async function selectController(controller) {
+      state.controllerCommonName = controller.controllerCommonName;
+      const ipInput = document.getElementById("controller-ip").value.trim();
+
+      // Get director token
+      try {
+        const tokenRes = await api("/api/auth/director-token", {
+          method: "POST",
+          body: {
+            accountToken: state.accountToken,
+            controllerCommonName: state.controllerCommonName,
+          },
+        });
+        if (tokenRes.error) throw new Error(tokenRes.error);
+        state.directorToken = tokenRes.directorToken;
+
+        if (!ipInput) {
+          // Try to get IP from controller info
+          const info = await api("/api/auth/controllers", {
+            method: "POST",
+            body: { accountToken: state.accountToken },
+          });
+          // The IP must be provided by the user for local connections
+          const ip = prompt("Enter your controller's local IP address:");
+          if (!ip) return;
+          state.controllerIP = ip;
+        } else {
+          state.controllerIP = ipInput;
+        }
+
+        enterDashboard();
+      } catch (err) {
+        alert("Failed to get director token: " + err.message);
+      }
+    }
+
+    function directConnect() {
+      const ip = document.getElementById("direct-ip").value.trim();
+      const token = document.getElementById("direct-token").value.trim();
+      if (!ip || !token) {
+        alert("IP address and bearer token are both required.");
+        return;
+      }
+      state.controllerIP = ip;
+      state.directorToken = token;
+      enterDashboard();
+    }
+
+    function logout() {
+      state = {
+        accountToken: null,
+        directorToken: null,
+        controllerIP: null,
+        controllerCommonName: null,
+        lights: [],
+        thermostats: [],
+      };
+      showView("login-view");
+    }
+
+    // -----------------------------------------------------------------------
+    // Dashboard
+    // -----------------------------------------------------------------------
+    async function enterDashboard() {
+      showView("dashboard-view");
+      await refreshDevices();
+    }
+
+    async function refreshDevices() {
+      const spinner = document.getElementById("refresh-spinner");
+      spinner.style.display = "inline-block";
+      try {
+        await Promise.all([loadLights(), loadThermostats()]);
+      } catch (err) {
+        console.error("Refresh error:", err);
+      }
+      spinner.style.display = "none";
+    }
+
+    // -----------------------------------------------------------------------
+    // Lights
+    // -----------------------------------------------------------------------
+    async function loadLights() {
+      const grid = document.getElementById("lights-grid");
+      grid.innerHTML = '<div class="loading"><span class="spinner"></span> Loading lights...</div>';
+      try {
+        const items = await directorGet("api/v1/categories/lights");
+        if (items.error) throw new Error(items.error);
+        state.lights = Array.isArray(items) ? items : [];
+
+        if (state.lights.length === 0) {
+          grid.innerHTML = '<div class="loading">No lights found</div>';
+          return;
+        }
+
+        // Fetch current levels for all lights
+        await Promise.all(
+          state.lights.map(async (light) => {
+            try {
+              const vars = await directorGet(
+                `api/v1/items/${light.id}/variables?varnames=LIGHT_LEVEL,LIGHT_STATE`
+              );
+              if (Array.isArray(vars)) {
+                for (const v of vars) {
+                  if (v.varName === "LIGHT_LEVEL") light.level = parseInt(v.value) || 0;
+                  if (v.varName === "LIGHT_STATE") light.on = v.value === "1" || v.value === 1;
+                }
+              }
+            } catch {
+              light.level = 0;
+              light.on = false;
+            }
+          })
+        );
+
+        renderLights();
+      } catch (err) {
+        grid.innerHTML = `<div class="loading">Error loading lights: ${err.message}</div>`;
+      }
+    }
+
+    function renderLights() {
+      const grid = document.getElementById("lights-grid");
+      grid.innerHTML = "";
+      for (const light of state.lights) {
+        const card = document.createElement("div");
+        card.className = `light-card${light.on ? " on" : ""}`;
+        card.id = `light-${light.id}`;
+        card.innerHTML = `
+          <div class="light-header">
+            <div>
+              <div class="light-name">${light.name || "Light " + light.id}</div>
+              <div class="light-room">${light.roomName || ""}</div>
+            </div>
+            <button class="toggle${light.on ? " on" : ""}" onclick="toggleLight(${light.id})"></button>
+          </div>
+          <div class="slider-row">
+            <input type="range" min="0" max="100" value="${light.level || 0}"
+                   onchange="setLightLevel(${light.id}, this.value)"
+                   oninput="this.nextElementSibling.textContent = this.value + '%'">
+            <span class="level-label">${light.level || 0}%</span>
+          </div>
+        `;
+        grid.appendChild(card);
+      }
+    }
+
+    async function toggleLight(id) {
+      const light = state.lights.find((l) => l.id === id);
+      if (!light) return;
+      const newLevel = light.on ? 0 : 100;
+      await directorPost(`api/v1/items/${id}/commands`, "SET_LEVEL", {
+        LEVEL: newLevel,
+      });
+      light.on = !light.on;
+      light.level = newLevel;
+      renderLights();
+    }
+
+    let dimTimeout = null;
+    async function setLightLevel(id, level) {
+      // Debounce to avoid flooding the controller
+      clearTimeout(dimTimeout);
+      dimTimeout = setTimeout(async () => {
+        const light = state.lights.find((l) => l.id === id);
+        if (light) {
+          light.level = parseInt(level);
+          light.on = light.level > 0;
+        }
+        await directorPost(`api/v1/items/${id}/commands`, "SET_LEVEL", {
+          LEVEL: parseInt(level),
+        });
+        renderLights();
+      }, 300);
+    }
+
+    // -----------------------------------------------------------------------
+    // Thermostats
+    // -----------------------------------------------------------------------
+    async function loadThermostats() {
+      const grid = document.getElementById("thermos-grid");
+      grid.innerHTML = '<div class="loading"><span class="spinner"></span> Loading thermostats...</div>';
+      try {
+        const items = await directorGet("api/v1/categories/thermostats");
+        if (items.error) throw new Error(items.error);
+        state.thermostats = Array.isArray(items) ? items : [];
+
+        if (state.thermostats.length === 0) {
+          grid.innerHTML = '<div class="loading">No thermostats found</div>';
+          return;
+        }
+
+        // Fetch thermostat variables
+        await Promise.all(
+          state.thermostats.map(async (thermo) => {
+            try {
+              const vars = await directorGet(
+                `api/v1/items/${thermo.id}/variables?varnames=TEMPERATURE_F,TEMPERATURE_C,HEAT_SETPOINT_F,COOL_SETPOINT_F,HEAT_SETPOINT_C,COOL_SETPOINT_C,HVAC_MODE,HVAC_STATE,FAN_MODE,HUMIDITY`
+              );
+              if (Array.isArray(vars)) {
+                for (const v of vars) {
+                  switch (v.varName) {
+                    case "TEMPERATURE_F": thermo.tempF = parseFloat(v.value); break;
+                    case "TEMPERATURE_C": thermo.tempC = parseFloat(v.value); break;
+                    case "HEAT_SETPOINT_F": thermo.heatF = parseFloat(v.value); break;
+                    case "COOL_SETPOINT_F": thermo.coolF = parseFloat(v.value); break;
+                    case "HEAT_SETPOINT_C": thermo.heatC = parseFloat(v.value); break;
+                    case "COOL_SETPOINT_C": thermo.coolC = parseFloat(v.value); break;
+                    case "HVAC_MODE": thermo.hvacMode = v.value; break;
+                    case "HVAC_STATE": thermo.hvacState = v.value; break;
+                    case "FAN_MODE": thermo.fanMode = v.value; break;
+                    case "HUMIDITY": thermo.humidity = parseFloat(v.value); break;
+                  }
+                }
+              }
+            } catch {
+              // Variables may not all exist
+            }
+          })
+        );
+
+        renderThermostats();
+      } catch (err) {
+        grid.innerHTML = `<div class="loading">Error loading thermostats: ${err.message}</div>`;
+      }
+    }
+
+    function renderThermostats() {
+      const grid = document.getElementById("thermos-grid");
+      grid.innerHTML = "";
+      for (const t of state.thermostats) {
+        const card = document.createElement("div");
+        card.className = "thermo-card";
+        card.id = `thermo-${t.id}`;
+        const temp = t.tempF != null ? `${t.tempF}` : (t.tempC != null ? `${t.tempC}` : "--");
+        const unit = t.tempF != null ? "F" : "C";
+        const heat = unit === "F" ? (t.heatF || "--") : (t.heatC || "--");
+        const cool = unit === "F" ? (t.coolF || "--") : (t.coolC || "--");
+
+        card.innerHTML = `
+          <div class="thermo-header">
+            <div>
+              <div class="thermo-name">${t.name || "Thermostat " + t.id}</div>
+              <div class="thermo-room">${t.roomName || ""}</div>
+            </div>
+            <div class="current-temp">${temp}<span>&deg;${unit}</span></div>
+          </div>
+          <div class="thermo-details">
+            <div class="thermo-detail">
+              <div class="label">Heat setpoint</div>
+              <div class="val">
+                <div class="setpoint-controls">
+                  <button onclick="adjustSetpoint(${t.id}, 'heat', -1)">&minus;</button>
+                  <span class="setpoint-value" id="heat-sp-${t.id}">${heat}&deg;</span>
+                  <button onclick="adjustSetpoint(${t.id}, 'heat', 1)">+</button>
+                </div>
+              </div>
+            </div>
+            <div class="thermo-detail">
+              <div class="label">Cool setpoint</div>
+              <div class="val">
+                <div class="setpoint-controls">
+                  <button onclick="adjustSetpoint(${t.id}, 'cool', -1)">&minus;</button>
+                  <span class="setpoint-value" id="cool-sp-${t.id}">${cool}&deg;</span>
+                  <button onclick="adjustSetpoint(${t.id}, 'cool', 1)">+</button>
+                </div>
+              </div>
+            </div>
+            <div class="thermo-detail">
+              <div class="label">HVAC Mode</div>
+              <div class="val">${t.hvacMode || "--"}</div>
+            </div>
+            <div class="thermo-detail">
+              <div class="label">Humidity</div>
+              <div class="val">${t.humidity != null ? t.humidity + "%" : "--"}</div>
+            </div>
+          </div>
+          <select class="mode-select" onchange="setHvacMode(${t.id}, this.value)">
+            <option value="" disabled ${!t.hvacMode ? "selected" : ""}>Set HVAC Mode</option>
+            <option value="Off" ${t.hvacMode === "Off" ? "selected" : ""}>Off</option>
+            <option value="Heat" ${t.hvacMode === "Heat" ? "selected" : ""}>Heat</option>
+            <option value="Cool" ${t.hvacMode === "Cool" ? "selected" : ""}>Cool</option>
+            <option value="Auto" ${t.hvacMode === "Auto" ? "selected" : ""}>Auto</option>
+          </select>
+        `;
+        grid.appendChild(card);
+      }
+    }
+
+    async function adjustSetpoint(id, type, delta) {
+      const t = state.thermostats.find((th) => th.id === id);
+      if (!t) return;
+
+      const useFahrenheit = t.tempF != null;
+      if (type === "heat") {
+        const key = useFahrenheit ? "heatF" : "heatC";
+        const current = t[key] || 68;
+        const newVal = current + delta;
+        t[key] = newVal;
+        document.getElementById(`heat-sp-${id}`).textContent = newVal + "\u00B0";
+        const command = "SET_SETPOINT_HEAT";
+        const params = useFahrenheit ? { FAHRENHEIT: newVal } : { CELSIUS: newVal };
+        await directorPost(`api/v1/items/${id}/commands`, command, params);
+      } else {
+        const key = useFahrenheit ? "coolF" : "coolC";
+        const current = t[key] || 72;
+        const newVal = current + delta;
+        t[key] = newVal;
+        document.getElementById(`cool-sp-${id}`).textContent = newVal + "\u00B0";
+        const command = "SET_SETPOINT_COOL";
+        const params = useFahrenheit ? { FAHRENHEIT: newVal } : { CELSIUS: newVal };
+        await directorPost(`api/v1/items/${id}/commands`, command, params);
+      }
+    }
+
+    async function setHvacMode(id, mode) {
+      const t = state.thermostats.find((th) => th.id === id);
+      if (t) t.hvacMode = mode;
+      await directorPost(`api/v1/items/${id}/commands`, "SET_MODE_HVAC", {
+        MODE: mode,
+      });
+    }
+  </script>
+</body>
+</html>
