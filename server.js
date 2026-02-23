@@ -1,11 +1,68 @@
+require("dotenv").config();
+
 const express = require("express");
 const https = require("https");
 const http = require("http");
+const fs = require("fs");
+const crypto = require("crypto");
+const { execSync } = require("child_process");
 const path = require("path");
 const dgram = require("dgram");
 
+// ---------------------------------------------------------------------------
+// Configuration (from .env or environment)
+// ---------------------------------------------------------------------------
+
+const PORT = parseInt(process.env.PORT, 10) || 3000;
+const HTTPS_ENABLED = process.env.HTTPS_ENABLED === "true";
+const HTTPS_PORT = parseInt(process.env.HTTPS_PORT, 10) || 3443;
+const TLS_CERT_FILE = process.env.TLS_CERT_FILE || "";
+const TLS_KEY_FILE = process.env.TLS_KEY_FILE || "";
+const HTTP_REDIRECT = process.env.HTTP_REDIRECT !== "false"; // default true
+const AUTH_USERNAME = process.env.AUTH_USERNAME || "";
+const AUTH_PASSWORD = process.env.AUTH_PASSWORD || "";
+
 const app = express();
-const PORT = process.env.PORT || 3000;
+
+// ---------------------------------------------------------------------------
+// Basic Auth middleware (active only when AUTH_USERNAME + AUTH_PASSWORD are set)
+// ---------------------------------------------------------------------------
+
+if (AUTH_USERNAME && AUTH_PASSWORD) {
+  const expectedUser = Buffer.from(AUTH_USERNAME);
+  const expectedPass = Buffer.from(AUTH_PASSWORD);
+
+  app.use((req, res, next) => {
+    const header = req.headers.authorization || "";
+    if (!header.startsWith("Basic ")) {
+      res.set("WWW-Authenticate", 'Basic realm="WebControl4"');
+      return res.status(401).send("Authentication required");
+    }
+    const decoded = Buffer.from(header.slice(6), "base64").toString();
+    const sep = decoded.indexOf(":");
+    if (sep === -1) {
+      res.set("WWW-Authenticate", 'Basic realm="WebControl4"');
+      return res.status(401).send("Authentication required");
+    }
+    const user = Buffer.from(decoded.slice(0, sep));
+    const pass = Buffer.from(decoded.slice(sep + 1));
+
+    const userOk =
+      user.length === expectedUser.length &&
+      crypto.timingSafeEqual(user, expectedUser);
+    const passOk =
+      pass.length === expectedPass.length &&
+      crypto.timingSafeEqual(pass, expectedPass);
+
+    if (userOk && passOk) {
+      return next();
+    }
+    res.set("WWW-Authenticate", 'Basic realm="WebControl4"');
+    return res.status(401).send("Invalid credentials");
+  });
+
+  console.log("Basic Auth enabled");
+}
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
@@ -14,18 +71,32 @@ app.use(express.static(path.join(__dirname, "public")));
 // Helpers – outbound HTTPS requests to Control4 cloud & local director
 // ---------------------------------------------------------------------------
 
-function request(url, options = {}) {
+function request(url, options = {}, _redirectCount = 0) {
   return new Promise((resolve, reject) => {
+    if (_redirectCount > 5) {
+      return reject(new Error("Too many redirects"));
+    }
     const parsed = new URL(url);
     const lib = parsed.protocol === "https:" ? https : http;
+    const bodyBuf = options.body ? Buffer.from(options.body) : null;
+    const headers = { ...options.headers };
+    if (bodyBuf) {
+      headers["Content-Length"] = bodyBuf.length;
+    }
     const req = lib.request(
       url,
       {
         method: options.method || "GET",
-        headers: options.headers || {},
+        headers,
         rejectUnauthorized: false, // director uses self-signed cert
       },
       (res) => {
+        // Follow redirects
+        if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
+          const redirectUrl = new URL(res.headers.location, url).href;
+          res.resume(); // drain the response
+          return resolve(request(redirectUrl, options, _redirectCount + 1));
+        }
         let body = "";
         res.on("data", (chunk) => (body += chunk));
         res.on("end", () => {
@@ -38,7 +109,7 @@ function request(url, options = {}) {
       }
     );
     req.on("error", reject);
-    if (options.body) req.write(options.body);
+    if (bodyBuf) req.write(bodyBuf);
     req.end();
   });
 }
@@ -243,6 +314,88 @@ app.get("/{*path}", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-app.listen(PORT, () => {
-  console.log(`WebControl4 running at http://localhost:${PORT}`);
-});
+// ---------------------------------------------------------------------------
+// Self-signed certificate helper
+// ---------------------------------------------------------------------------
+
+function ensureSelfSignedCert() {
+  const certDir = path.join(__dirname, "certs");
+  const certPath = path.join(certDir, "selfsigned.crt");
+  const keyPath = path.join(certDir, "selfsigned.key");
+
+  if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
+    return { cert: certPath, key: keyPath };
+  }
+
+  try {
+    if (!fs.existsSync(certDir)) {
+      fs.mkdirSync(certDir, { recursive: true });
+    }
+    execSync(
+      `openssl req -x509 -newkey rsa:2048 -nodes ` +
+        `-keyout "${keyPath}" -out "${certPath}" ` +
+        `-days 365 -subj "/CN=WebControl4"`,
+      { stdio: "pipe" }
+    );
+    console.log("Generated self-signed certificate in certs/");
+    return { cert: certPath, key: keyPath };
+  } catch {
+    console.error(
+      "Failed to generate self-signed cert (is openssl installed?). Falling back to HTTP."
+    );
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Server startup
+// ---------------------------------------------------------------------------
+
+function startServer() {
+  if (HTTPS_ENABLED) {
+    let certPath = TLS_CERT_FILE;
+    let keyPath = TLS_KEY_FILE;
+
+    // Use provided certs or generate self-signed
+    if (!certPath || !keyPath) {
+      const generated = ensureSelfSignedCert();
+      if (!generated) {
+        // Fallback to plain HTTP
+        app.listen(PORT, () => {
+          console.log(`WebControl4 running at http://localhost:${PORT} (HTTPS failed, using HTTP)`);
+        });
+        return;
+      }
+      certPath = generated.cert;
+      keyPath = generated.key;
+    }
+
+    const tlsOptions = {
+      cert: fs.readFileSync(certPath),
+      key: fs.readFileSync(keyPath),
+    };
+
+    https.createServer(tlsOptions, app).listen(HTTPS_PORT, () => {
+      console.log(`WebControl4 running at https://localhost:${HTTPS_PORT}`);
+    });
+
+    // Optional HTTP -> HTTPS redirect
+    if (HTTP_REDIRECT) {
+      const redirectApp = express();
+      redirectApp.use((req, res) => {
+        const host = (req.headers.host || "").replace(/:\d+$/, "");
+        res.redirect(301, `https://${host}:${HTTPS_PORT}${req.url}`);
+      });
+      redirectApp.listen(PORT, () => {
+        console.log(`HTTP :${PORT} redirecting to HTTPS :${HTTPS_PORT}`);
+      });
+    }
+  } else {
+    // Plain HTTP (original behavior)
+    app.listen(PORT, () => {
+      console.log(`WebControl4 running at http://localhost:${PORT}`);
+    });
+  }
+}
+
+startServer();

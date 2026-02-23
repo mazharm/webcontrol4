@@ -372,7 +372,11 @@
       <div class="form-group">
         <label>Or connect directly to controller IP</label>
         <input type="text" id="direct-ip" placeholder="192.168.1.100">
+        <button class="btn" style="background:transparent;border:1px solid var(--border);color:var(--muted);margin-top:8px;" onclick="discoverControllers('direct-ip')">
+          <span id="discover-spinner-login" class="spinner" style="display:none;"></span>Discover on Network (SDDP)
+        </button>
       </div>
+      <div id="discover-results-login"></div>
       <div class="form-group">
         <label>Director Bearer Token</label>
         <input type="text" id="direct-token" placeholder="Paste bearer token">
@@ -389,7 +393,11 @@
     <div class="form-group" style="margin-top:20px;">
       <label>Controller IP Address (local network)</label>
       <input type="text" id="controller-ip" placeholder="192.168.1.100">
+      <button class="btn" style="background:transparent;border:1px solid var(--border);color:var(--muted);margin-top:8px;" onclick="discoverControllers('controller-ip')">
+        <span id="discover-spinner-controller" class="spinner" style="display:none;"></span>Discover on Network (SDDP)
+      </button>
     </div>
+    <div id="discover-results-controller"></div>
   </div>
 
   <!-- Dashboard View -->
@@ -408,6 +416,15 @@
   </div>
 
   <script>
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+    function esc(str) {
+      const d = document.createElement("div");
+      d.textContent = str;
+      return d.innerHTML;
+    }
+
     // -----------------------------------------------------------------------
     // State
     // -----------------------------------------------------------------------
@@ -440,7 +457,13 @@
         headers: { "Content-Type": "application/json", ...options.headers },
         body: options.body ? JSON.stringify(options.body) : undefined,
       });
-      return res.json();
+      const text = await res.text();
+      try {
+        return JSON.parse(text);
+      } catch {
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
+        return { raw: text };
+      }
     }
 
     function directorGet(apiPath) {
@@ -508,8 +531,8 @@
         const card = document.createElement("div");
         card.className = "controller-card";
         card.innerHTML = `
-          <div class="name">${c.name || "Controller"}</div>
-          <div class="common-name">${c.controllerCommonName || "unknown"}</div>
+          <div class="name">${esc(c.name || "Controller")}</div>
+          <div class="common-name">${esc(c.controllerCommonName || "unknown")}</div>
         `;
         card.addEventListener("click", () => selectController(c));
         list.appendChild(card);
@@ -563,6 +586,42 @@
       state.controllerIP = ip;
       state.directorToken = token;
       enterDashboard();
+    }
+
+    async function discoverControllers(targetInputId) {
+      const isLogin = targetInputId === "direct-ip";
+      const spinnerId = isLogin ? "discover-spinner-login" : "discover-spinner-controller";
+      const resultsId = isLogin ? "discover-results-login" : "discover-results-controller";
+      const spinner = document.getElementById(spinnerId);
+      const resultsDiv = document.getElementById(resultsId);
+      spinner.style.display = "inline-block";
+      resultsDiv.innerHTML = '<div class="loading"><span class="spinner"></span> Scanning network (4s)...</div>';
+      try {
+        const devices = await api("/api/discover");
+        if (!Array.isArray(devices) || devices.length === 0) {
+          resultsDiv.innerHTML = '<div style="font-size:13px;color:var(--muted);margin:8px 0;">No devices found on network.</div>';
+          return;
+        }
+        resultsDiv.innerHTML = "";
+        for (const d of devices) {
+          const card = document.createElement("div");
+          card.className = "controller-card";
+          const name = d.model || d.type || "Device";
+          card.innerHTML = `
+            <div class="name">${esc(String(name))}</div>
+            <div class="common-name">${esc(d.ip)}</div>
+          `;
+          card.addEventListener("click", () => {
+            document.getElementById(targetInputId).value = d.ip;
+            resultsDiv.innerHTML = "";
+          });
+          resultsDiv.appendChild(card);
+        }
+      } catch (err) {
+        resultsDiv.innerHTML = `<div style="font-size:13px;color:var(--red);margin:8px 0;">Discovery failed: ${esc(err.message)}</div>`;
+      } finally {
+        spinner.style.display = "none";
+      }
     }
 
     function logout() {
@@ -648,8 +707,8 @@
         card.innerHTML = `
           <div class="light-header">
             <div>
-              <div class="light-name">${light.name || "Light " + light.id}</div>
-              <div class="light-room">${light.roomName || ""}</div>
+              <div class="light-name">${esc(light.name || "Light " + light.id)}</div>
+              <div class="light-room">${esc(light.roomName || "")}</div>
             </div>
             <button class="toggle${light.on ? " on" : ""}" onclick="toggleLight(${light.id})"></button>
           </div>
@@ -759,8 +818,8 @@
         card.innerHTML = `
           <div class="thermo-header">
             <div>
-              <div class="thermo-name">${t.name || "Thermostat " + t.id}</div>
-              <div class="thermo-room">${t.roomName || ""}</div>
+              <div class="thermo-name">${esc(t.name || "Thermostat " + t.id)}</div>
+              <div class="thermo-room">${esc(t.roomName || "")}</div>
             </div>
             <div class="current-temp">${temp}<span>&deg;${unit}</span></div>
           </div>
