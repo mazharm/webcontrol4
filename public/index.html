@@ -338,6 +338,113 @@
       padding-top: 24px;
       border-top: 1px solid var(--border);
     }
+
+    /* Routines */
+    .routine-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .routine-card .routine-name { font-weight: 500; font-size: 15px; }
+    .routine-card .routine-steps { font-size: 12px; color: var(--muted); }
+    .routine-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .btn-sm {
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text);
+    }
+    .btn-sm:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-sm.primary { background: var(--accent); border-color: var(--accent); color: white; }
+    .btn-sm.primary:hover { background: var(--accent-hover); }
+    .btn-sm.danger:hover { border-color: var(--red); color: var(--red); }
+    .btn-run {
+      padding: 8px 16px;
+      background: var(--green);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .btn-run:hover { opacity: 0.85; }
+    .btn-run:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Modal */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      width: 100%;
+      max-width: 520px;
+      max-height: 90vh;
+      overflow-y: auto;
+      margin: 0 16px;
+    }
+    .modal h3 { font-size: 18px; margin-bottom: 16px; }
+    .step-list { margin: 8px 0 12px; display: flex; flex-direction: column; gap: 8px; }
+    .step-item {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+    }
+    .step-item button {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 18px;
+      line-height: 1;
+      padding: 0 4px;
+      flex-shrink: 0;
+    }
+    .step-item button:hover { color: var(--red); }
+    .add-step-form {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      margin-top: 4px;
+    }
+    .add-step-form select, .add-step-form input[type="number"] {
+      width: 100%;
+      padding: 8px 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+    .add-step-form select:focus, .add-step-form input[type="number"]:focus {
+      border-color: var(--accent);
+      outline: none;
+    }
+    .modal-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
   </style>
 </head>
 <body>
@@ -413,6 +520,43 @@
     <div id="thermos-grid" class="device-grid">
       <div class="loading"><span class="spinner"></span> Loading thermostats...</div>
     </div>
+
+    <div class="section-title" style="margin-top:8px;"><span class="icon">&#x26A1;</span> Routines</div>
+    <div style="margin-bottom:16px;">
+      <button class="btn-sm primary" onclick="openRoutineModal()">+ New Routine</button>
+    </div>
+    <div id="routines-grid" class="device-grid"></div>
+  </div>
+
+  <!-- Routine Editor Modal -->
+  <div id="routine-modal" class="modal-backdrop">
+    <div class="modal">
+      <h3 id="modal-title">New Routine</h3>
+      <div class="form-group">
+        <label>Routine Name</label>
+        <input type="text" id="routine-name" placeholder="e.g. Good Night">
+      </div>
+      <div style="font-size:13px;color:var(--muted);margin-bottom:4px;">Steps</div>
+      <div class="step-list" id="step-list"></div>
+      <div class="add-step-form">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:500;">Add a Step</div>
+        <select id="step-action" onchange="onStepActionChange()">
+          <option value="">Select action…</option>
+          <option value="light_level">Set Light Level</option>
+          <option value="light_toggle">Toggle Light On / Off</option>
+          <option value="hvac_mode">Set HVAC Mode</option>
+          <option value="heat_setpoint">Set Heat Setpoint</option>
+          <option value="cool_setpoint">Set Cool Setpoint</option>
+        </select>
+        <select id="step-device" style="display:none;"></select>
+        <div id="step-value-container" style="display:none;"></div>
+        <button class="btn-sm primary" onclick="addStepToRoutine()" style="width:100%;margin-top:4px;">Add Step</button>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-sm" onclick="closeRoutineModal()">Cancel</button>
+        <button class="btn-sm primary" onclick="saveRoutine()">Save Routine</button>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -435,6 +579,7 @@
       controllerCommonName: null,
       lights: [],
       thermostats: [],
+      routines: [],
     };
 
     // -----------------------------------------------------------------------
@@ -632,6 +777,7 @@
         controllerCommonName: null,
         lights: [],
         thermostats: [],
+        routines: [],
       };
       showView("login-view");
     }
@@ -641,6 +787,7 @@
     // -----------------------------------------------------------------------
     async function enterDashboard() {
       showView("dashboard-view");
+      loadRoutines();
       await refreshDevices();
     }
 
@@ -897,6 +1044,295 @@
       await directorPost(`api/v1/items/${id}/commands`, "SET_MODE_HVAC", {
         MODE: mode,
       });
+    }
+
+    // -----------------------------------------------------------------------
+    // Routines
+    // -----------------------------------------------------------------------
+    const ROUTINES_KEY = "wc4_routines";
+    let editingRoutineId = null;
+    let editingSteps = [];
+
+    function loadRoutines() {
+      try {
+        const stored = localStorage.getItem(ROUTINES_KEY);
+        state.routines = stored ? JSON.parse(stored) : [];
+      } catch {
+        state.routines = [];
+      }
+      renderRoutines();
+    }
+
+    function saveRoutinesToStorage() {
+      localStorage.setItem(ROUTINES_KEY, JSON.stringify(state.routines));
+    }
+
+    function renderRoutines() {
+      const grid = document.getElementById("routines-grid");
+      if (!grid) return;
+      if (state.routines.length === 0) {
+        grid.innerHTML = '<div style="font-size:13px;color:var(--muted);">No routines yet. Click &ldquo;+ New Routine&rdquo; to create one.</div>';
+        return;
+      }
+      grid.innerHTML = "";
+      for (const routine of state.routines) {
+        const card = document.createElement("div");
+        card.className = "routine-card";
+        const stepsText = routine.steps.length === 1 ? "1 step" : `${routine.steps.length} steps`;
+        card.innerHTML = `
+          <div>
+            <div class="routine-name">${esc(routine.name)}</div>
+            <div class="routine-steps">${stepsText}</div>
+          </div>
+          <div class="routine-actions">
+            <button class="btn-run" id="run-btn-${esc(routine.id)}" onclick="executeRoutine('${esc(routine.id)}')">&#x25B6; Run</button>
+            <button class="btn-sm" onclick="openRoutineModal('${esc(routine.id)}')">Edit</button>
+            <button class="btn-sm danger" onclick="deleteRoutine('${esc(routine.id)}')">Delete</button>
+          </div>
+        `;
+        grid.appendChild(card);
+      }
+    }
+
+    function openRoutineModal(routineId) {
+      editingRoutineId = routineId || null;
+      editingSteps = [];
+      const nameInput = document.getElementById("routine-name");
+      if (routineId) {
+        const routine = state.routines.find((r) => r.id === routineId);
+        if (!routine) return;
+        document.getElementById("modal-title").textContent = "Edit Routine";
+        nameInput.value = routine.name;
+        editingSteps = routine.steps.map((s) => ({ ...s }));
+      } else {
+        document.getElementById("modal-title").textContent = "New Routine";
+        nameInput.value = "";
+      }
+      document.getElementById("step-action").value = "";
+      document.getElementById("step-device").style.display = "none";
+      document.getElementById("step-value-container").style.display = "none";
+      renderModalSteps();
+      document.getElementById("routine-modal").classList.add("open");
+    }
+
+    function closeRoutineModal() {
+      document.getElementById("routine-modal").classList.remove("open");
+    }
+
+    function renderModalSteps() {
+      const list = document.getElementById("step-list");
+      if (editingSteps.length === 0) {
+        list.innerHTML = '<div style="font-size:13px;color:var(--muted);padding:4px 0;">No steps yet.</div>';
+        return;
+      }
+      list.innerHTML = "";
+      editingSteps.forEach((step, idx) => {
+        const div = document.createElement("div");
+        div.className = "step-item";
+        div.innerHTML = `<span>${esc(describeStep(step))}</span><button onclick="removeStep(${idx})" title="Remove step">&times;</button>`;
+        list.appendChild(div);
+      });
+    }
+
+    function describeStep(step) {
+      switch (step.type) {
+        case "light_level":   return `${step.deviceName}: Set level to ${step.level}%`;
+        case "light_toggle":  return `${step.deviceName}: Turn ${step.on ? "on" : "off"}`;
+        case "hvac_mode":     return `${step.deviceName}: Set HVAC mode to ${step.mode}`;
+        case "heat_setpoint": return `${step.deviceName}: Heat setpoint \u2192 ${step.value}\u00B0`;
+        case "cool_setpoint": return `${step.deviceName}: Cool setpoint \u2192 ${step.value}\u00B0`;
+        default: return JSON.stringify(step);
+      }
+    }
+
+    function onStepActionChange() {
+      const action = document.getElementById("step-action").value;
+      const deviceSel = document.getElementById("step-device");
+      const valueContainer = document.getElementById("step-value-container");
+
+      deviceSel.innerHTML = '<option value="">Select device\u2026</option>';
+      deviceSel.style.display = "none";
+      valueContainer.innerHTML = "";
+      valueContainer.style.display = "none";
+
+      if (!action) return;
+
+      const isLight = action === "light_level" || action === "light_toggle";
+      const devices = isLight ? state.lights : state.thermostats;
+
+      if (devices.length === 0) {
+        deviceSel.innerHTML = `<option value="">No ${isLight ? "lights" : "thermostats"} available</option>`;
+        deviceSel.style.display = "block";
+        return;
+      }
+      for (const d of devices) {
+        const opt = document.createElement("option");
+        opt.value = d.id;
+        opt.textContent = d.name || (isLight ? `Light ${d.id}` : `Thermostat ${d.id}`);
+        deviceSel.appendChild(opt);
+      }
+      deviceSel.style.display = "block";
+
+      if (action === "light_level") {
+        valueContainer.innerHTML = `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            <input type="range" id="step-level" min="0" max="100" value="100" style="flex:1;"
+                   oninput="document.getElementById('step-level-label').textContent=this.value+'%'">
+            <span id="step-level-label" style="font-size:13px;color:var(--muted);min-width:36px;">100%</span>
+          </div>`;
+        valueContainer.style.display = "block";
+      } else if (action === "light_toggle") {
+        valueContainer.innerHTML = `
+          <select id="step-toggle-val">
+            <option value="on">Turn On</option>
+            <option value="off">Turn Off</option>
+          </select>`;
+        valueContainer.style.display = "block";
+      } else if (action === "hvac_mode") {
+        valueContainer.innerHTML = `
+          <select id="step-hvac-mode">
+            <option value="Off">Off</option>
+            <option value="Heat">Heat</option>
+            <option value="Cool">Cool</option>
+            <option value="Auto">Auto</option>
+          </select>`;
+        valueContainer.style.display = "block";
+      } else if (action === "heat_setpoint" || action === "cool_setpoint") {
+        valueContainer.innerHTML = `<input type="number" id="step-setpoint" placeholder="Temperature" value="72" min="32" max="120">`;
+        valueContainer.style.display = "block";
+      }
+    }
+
+    function addStepToRoutine() {
+      const action = document.getElementById("step-action").value;
+      const deviceIdRaw = parseInt(document.getElementById("step-device").value, 10);
+      if (!action || isNaN(deviceIdRaw) || !deviceIdRaw) {
+        alert("Please select an action and device.");
+        return;
+      }
+      const deviceId = deviceIdRaw;
+      const isLight = action === "light_level" || action === "light_toggle";
+      const devices = isLight ? state.lights : state.thermostats;
+      const device = devices.find((d) => d.id === deviceId);
+      if (!device) return;
+
+      const step = { type: action, deviceId, deviceName: device.name || `Device ${deviceId}` };
+      if (action === "light_level") {
+        const raw = parseInt(document.getElementById("step-level").value, 10);
+        step.level = isNaN(raw) ? 0 : Math.min(100, Math.max(0, raw));
+      } else if (action === "light_toggle") {
+        step.on = document.getElementById("step-toggle-val").value === "on";
+      } else if (action === "hvac_mode") {
+        step.mode = document.getElementById("step-hvac-mode").value;
+      } else if (action === "heat_setpoint" || action === "cool_setpoint") {
+        const raw = parseFloat(document.getElementById("step-setpoint").value);
+        if (isNaN(raw)) { alert("Please enter a valid temperature."); return; }
+        step.value = raw;
+        // Record the unit in use at creation time so execution sends the right unit
+        step.useFahrenheit = device.tempF != null;
+      }
+      editingSteps.push(step);
+      renderModalSteps();
+
+      // Reset step builder
+      document.getElementById("step-action").value = "";
+      document.getElementById("step-device").style.display = "none";
+      document.getElementById("step-value-container").style.display = "none";
+    }
+
+    function removeStep(idx) {
+      editingSteps.splice(idx, 1);
+      renderModalSteps();
+    }
+
+    function saveRoutine() {
+      const name = document.getElementById("routine-name").value.trim();
+      if (!name) { alert("Please enter a routine name."); return; }
+      if (editingRoutineId) {
+        const routine = state.routines.find((r) => r.id === editingRoutineId);
+        if (routine) { routine.name = name; routine.steps = editingSteps; }
+      } else {
+        state.routines.push({
+          id: (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2),
+          name,
+          steps: editingSteps,
+        });
+      }
+      saveRoutinesToStorage();
+      renderRoutines();
+      closeRoutineModal();
+    }
+
+    function deleteRoutine(id) {
+      if (!confirm("Delete this routine?")) return;
+      state.routines = state.routines.filter((r) => r.id !== id);
+      saveRoutinesToStorage();
+      renderRoutines();
+    }
+
+    async function executeRoutine(id) {
+      const routine = state.routines.find((r) => r.id === id);
+      if (!routine || routine.steps.length === 0) {
+        alert("This routine has no steps.");
+        return;
+      }
+      const btn = document.getElementById(`run-btn-${id}`);
+      if (btn) { btn.disabled = true; btn.textContent = "Running\u2026"; }
+      try {
+        for (const step of routine.steps) {
+          await executeStep(step);
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+        renderLights();
+        renderThermostats();
+        if (btn) {
+          btn.textContent = "\u2713 Done";
+          setTimeout(() => { btn.disabled = false; btn.innerHTML = "&#x25B6; Run"; }, 2000);
+        }
+      } catch (err) {
+        if (btn) { btn.disabled = false; btn.innerHTML = "&#x25B6; Run"; }
+        alert(`Routine failed: ${err.message}`);
+      }
+    }
+
+    async function executeStep(step) {
+      switch (step.type) {
+        case "light_level": {
+          await directorPost(`api/v1/items/${step.deviceId}/commands`, "SET_LEVEL", { LEVEL: step.level });
+          const light = state.lights.find((l) => l.id === step.deviceId);
+          if (light) { light.level = step.level; light.on = step.level > 0; }
+          break;
+        }
+        case "light_toggle": {
+          const level = step.on ? 100 : 0;
+          await directorPost(`api/v1/items/${step.deviceId}/commands`, "SET_LEVEL", { LEVEL: level });
+          const light = state.lights.find((l) => l.id === step.deviceId);
+          if (light) { light.level = level; light.on = step.on; }
+          break;
+        }
+        case "hvac_mode": {
+          await directorPost(`api/v1/items/${step.deviceId}/commands`, "SET_MODE_HVAC", { MODE: step.mode });
+          const thermo = state.thermostats.find((t) => t.id === step.deviceId);
+          if (thermo) thermo.hvacMode = step.mode;
+          break;
+        }
+        case "heat_setpoint": {
+          const t = state.thermostats.find((th) => th.id === step.deviceId);
+          const useFahrenheit = step.useFahrenheit !== false;
+          await directorPost(`api/v1/items/${step.deviceId}/commands`, "SET_SETPOINT_HEAT",
+            useFahrenheit ? { FAHRENHEIT: step.value } : { CELSIUS: step.value });
+          if (t) { if (useFahrenheit) t.heatF = step.value; else t.heatC = step.value; }
+          break;
+        }
+        case "cool_setpoint": {
+          const t = state.thermostats.find((th) => th.id === step.deviceId);
+          const useFahrenheit = step.useFahrenheit !== false;
+          await directorPost(`api/v1/items/${step.deviceId}/commands`, "SET_SETPOINT_COOL",
+            useFahrenheit ? { FAHRENHEIT: step.value } : { CELSIUS: step.value });
+          if (t) { if (useFahrenheit) t.coolF = step.value; else t.coolC = step.value; }
+          break;
+        }
+      }
     }
   </script>
 </body>
