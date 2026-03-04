@@ -64,7 +64,7 @@ if (AUTH_USERNAME && AUTH_PASSWORD) {
   console.log("Basic Auth enabled");
 }
 
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 // ---------------------------------------------------------------------------
@@ -83,12 +83,14 @@ function request(url, options = {}, _redirectCount = 0) {
     if (bodyBuf) {
       headers["Content-Length"] = bodyBuf.length;
     }
+    const timeout = options.timeout || 30000;
     const req = lib.request(
       url,
       {
         method: options.method || "GET",
         headers,
         rejectUnauthorized: false, // director uses self-signed cert
+        timeout,
       },
       (res) => {
         // Follow redirects
@@ -108,6 +110,7 @@ function request(url, options = {}, _redirectCount = 0) {
         });
       }
     );
+    req.on("timeout", () => { req.destroy(new Error("Request timed out")); });
     req.on("error", reject);
     if (bodyBuf) req.write(bodyBuf);
     req.end();
@@ -132,6 +135,19 @@ app.get("/api/discover", (_req, res) => {
 
   const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
   const found = [];
+  let responded = false;
+
+  function finish() {
+    if (responded) return;
+    responded = true;
+    try { sock.close(); } catch {}
+    res.json(found);
+  }
+
+  sock.on("error", (err) => {
+    console.error("SDDP socket error:", err.message);
+    finish();
+  });
 
   sock.on("message", (msg, rinfo) => {
     const text = msg.toString();
@@ -140,7 +156,9 @@ app.get("/api/discover", (_req, res) => {
     for (const line of text.split("\r\n")) {
       const idx = line.indexOf(":");
       if (idx > 0) {
-        entry[line.slice(0, idx).trim().toLowerCase()] = line
+        const key = line.slice(0, idx).trim().toLowerCase();
+        if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+        entry[key] = line
           .slice(idx + 1)
           .trim();
       }
@@ -149,14 +167,17 @@ app.get("/api/discover", (_req, res) => {
   });
 
   sock.bind(() => {
-    sock.addMembership(SDDP_ADDR);
-    sock.send(searchMsg, SDDP_PORT, SDDP_ADDR);
+    try {
+      sock.addMembership(SDDP_ADDR);
+    } catch (err) {
+      console.error("SDDP addMembership error:", err.message);
+    }
+    sock.send(Buffer.from(searchMsg), SDDP_PORT, SDDP_ADDR, (err) => {
+      if (err) console.error("SDDP send error:", err.message);
+    });
   });
 
-  setTimeout(() => {
-    sock.close();
-    res.json(found);
-  }, 4000);
+  setTimeout(finish, 4000);
 });
 
 // ---------------------------------------------------------------------------
@@ -270,7 +291,11 @@ app.get("/api/director/{*path}", async (req, res) => {
     const data = await request(`https://${ip}${apiPath}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    res.json(JSON.parse(data));
+    try {
+      res.json(JSON.parse(data));
+    } catch {
+      res.json({ ok: true, raw: data });
+    }
   } catch (err) {
     res.status(502).json({ error: err.message });
   }

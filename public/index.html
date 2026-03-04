@@ -599,7 +599,10 @@
     async function api(path, options = {}) {
       const res = await fetch(path, {
         method: options.method || "GET",
-        headers: { "Content-Type": "application/json", ...options.headers },
+        headers: {
+          ...(options.body ? { "Content-Type": "application/json" } : {}),
+          ...options.headers,
+        },
         body: options.body ? JSON.stringify(options.body) : undefined,
       });
       const text = await res.text();
@@ -702,11 +705,6 @@
         state.directorToken = tokenRes.directorToken;
 
         if (!ipInput) {
-          // Try to get IP from controller info
-          const info = await api("/api/auth/controllers", {
-            method: "POST",
-            body: { accountToken: state.accountToken },
-          });
           // The IP must be provided by the user for local connections
           const ip = prompt("Enter your controller's local IP address:");
           if (!ip) return;
@@ -763,7 +761,7 @@
           resultsDiv.appendChild(card);
         }
       } catch (err) {
-        resultsDiv.innerHTML = `<div style="font-size:13px;color:var(--red);margin:8px 0;">Discovery failed: ${esc(err.message)}</div>`;
+        resultsDiv.innerHTML = `<div style="font-size:13px;color:var(--red);margin:8px 0;">Discovery failed: ${esc(String(err.message))}</div>`;
       } finally {
         spinner.style.display = "none";
       }
@@ -840,7 +838,7 @@
 
         renderLights();
       } catch (err) {
-        grid.innerHTML = `<div class="loading">Error loading lights: ${err.message}</div>`;
+        grid.innerHTML = `<div class="loading">Error loading lights: ${esc(err.message)}</div>`;
       }
     }
 
@@ -882,11 +880,11 @@
       renderLights();
     }
 
-    let dimTimeout = null;
+    let dimTimeouts = {};
     async function setLightLevel(id, level) {
-      // Debounce to avoid flooding the controller
-      clearTimeout(dimTimeout);
-      dimTimeout = setTimeout(async () => {
+      // Debounce per-light to avoid flooding the controller
+      clearTimeout(dimTimeouts[id]);
+      dimTimeouts[id] = setTimeout(async () => {
         const light = state.lights.find((l) => l.id === id);
         if (light) {
           light.level = parseInt(level);
@@ -946,7 +944,7 @@
 
         renderThermostats();
       } catch (err) {
-        grid.innerHTML = `<div class="loading">Error loading thermostats: ${err.message}</div>`;
+        grid.innerHTML = `<div class="loading">Error loading thermostats: ${esc(err.message)}</div>`;
       }
     }
 
@@ -993,7 +991,7 @@
             </div>
             <div class="thermo-detail">
               <div class="label">HVAC Mode</div>
-              <div class="val">${t.hvacMode || "--"}</div>
+              <div class="val">${esc(t.hvacMode || "--")}</div>
             </div>
             <div class="thermo-detail">
               <div class="label">Humidity</div>
@@ -1085,11 +1083,16 @@
             <div class="routine-steps">${stepsText}</div>
           </div>
           <div class="routine-actions">
-            <button class="btn-run" id="run-btn-${esc(routine.id)}" onclick="executeRoutine('${esc(routine.id)}')">&#x25B6; Run</button>
-            <button class="btn-sm" onclick="openRoutineModal('${esc(routine.id)}')">Edit</button>
-            <button class="btn-sm danger" onclick="deleteRoutine('${esc(routine.id)}')">Delete</button>
+            <button class="btn-run" data-run-routine data-routine-id>&#x25B6; Run</button>
+            <button class="btn-sm" data-edit-routine>Edit</button>
+            <button class="btn-sm danger" data-delete-routine>Delete</button>
           </div>
         `;
+        const runBtn = card.querySelector("[data-run-routine]");
+        runBtn.dataset.routineId = routine.id;
+        runBtn.addEventListener("click", () => executeRoutine(routine.id));
+        card.querySelector("[data-edit-routine]").addEventListener("click", () => openRoutineModal(routine.id));
+        card.querySelector("[data-delete-routine]").addEventListener("click", () => deleteRoutine(routine.id));
         grid.appendChild(card);
       }
     }
@@ -1276,7 +1279,7 @@
         alert("This routine has no steps.");
         return;
       }
-      const btn = document.getElementById(`run-btn-${id}`);
+      const btn = document.querySelector(`[data-routine-id="${CSS.escape(id)}"]`);
       if (btn) { btn.disabled = true; btn.textContent = "Running\u2026"; }
       try {
         for (const step of routine.steps) {
