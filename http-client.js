@@ -33,6 +33,10 @@ function filterRedirectHeaders(headers, fromUrl, toUrl) {
   delete filtered["X-API-Key"];
   delete filtered["Proxy-Authorization"];
   delete filtered["proxy-authorization"];
+  delete filtered["X-Director-Token"];
+  delete filtered["x-director-token"];
+  delete filtered["X-Director-IP"];
+  delete filtered["x-director-ip"];
   return filtered;
 }
 
@@ -78,10 +82,23 @@ function requestText(url, options = {}, redirectCount = 0) {
           );
         }
 
+        const maxResponseSize = options.maxResponseSize || 10 * 1024 * 1024; // 10 MB default
         let body = "";
+        let totalSize = 0;
+        let destroyed = false;
         res.setEncoding("utf8");
-        res.on("data", (chunk) => (body += chunk));
-        res.on("end", () => resolve({ statusCode: res.statusCode || 0, headers: res.headers, body }));
+        res.on("data", (chunk) => {
+          totalSize += chunk.length;
+          if (totalSize > maxResponseSize) {
+            destroyed = true;
+            req.destroy(new Error("Response body too large"));
+            return;
+          }
+          body += chunk;
+        });
+        res.on("end", () => {
+          if (!destroyed) resolve({ statusCode: res.statusCode || 0, headers: res.headers, body });
+        });
       }
     );
 
