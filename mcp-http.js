@@ -186,7 +186,7 @@ async function main() {
         res.redirect(redirectUrl.toString());
       } catch (err) {
         console.error("MCP OAuth callback error:", err);
-        res.status(500).send("Authentication failed: " + err.message);
+        res.status(500).send("Authentication failed. Please try again.");
       }
     });
 

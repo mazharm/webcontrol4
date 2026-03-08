@@ -2588,7 +2588,11 @@
               }),
             };
             state.routines.push(routine);
-            saveRoutinesToStorage();
+            try {
+              await api("/api/routines", { method: "POST", body: routine });
+            } catch (err) {
+              console.error("Failed to save routine:", err);
+            }
             renderRoutines();
             addAiMessage("assistant", `✓ Created routine "${routine.name}"`);
           } else {
@@ -2628,7 +2632,12 @@
         name,
         steps: enrichedSteps,
       });
-      saveRoutinesToStorage();
+      const newRoutine = state.routines[state.routines.length - 1];
+      try {
+        await api("/api/routines", { method: "POST", body: newRoutine });
+      } catch (err) {
+        console.error("Failed to save routine:", err);
+      }
       renderRoutines();
       clearAiActions();
       addAiMessage("assistant", `✓ Saved routine "${name}" (${enrichedSteps.length} steps).`);
@@ -2872,14 +2881,14 @@
       card.className = "scene-card";
       card.innerHTML = `
         <span class="scene-name">${esc(scene.name || "Scene " + scene.id)}</span>
-        <button class="btn-run" data-scene-id="${scene.id}">Activate</button>
+        <button class="btn-run" data-scene-id="${esc(String(scene.id))}">Activate</button>
       `;
       card.querySelector(".btn-run").addEventListener("click", () => activateScene(scene.id));
       return card;
     }
 
     async function activateScene(id) {
-      const btn = document.querySelector(`.scene-card [data-scene-id="${id}"]`);
+      const btn = document.querySelector(`.scene-card [data-scene-id="${CSS.escape(id)}"]`);
       if (btn) { btn.disabled = true; btn.textContent = "Activating\u2026"; }
       try {
         await directorPost(`api/v1/items/${id}/commands`, "PRESS", {});

@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm start:*)",
+      "Bash(ping:*)",
+      "Bash(node:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:lawtancool.github.io)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:www.c4forums.com)",
+      "Bash(gh pr:*)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:ts.sdk.modelcontextprotocol.io)",
+      "Bash(curl:*)",
+      "Bash(npm install:*)",
+      "Bash(printf:*)"
+    ]
+  }
+}

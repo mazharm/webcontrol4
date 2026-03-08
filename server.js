@@ -162,11 +162,13 @@ if (oauth.isConfigured()) {
       const isSecure = proto === "https";
       oauth.setSessionCookie(res, sessionId, isSecure);
 
-      const next = (state || "").replace(/^web:/, "") || "/";
+      let next = (state || "").replace(/^web:/, "") || "/";
+      // Prevent open redirect — only allow relative paths
+      if (!/^\/[^\/\\]/.test(next) && next !== "/") next = "/";
       res.redirect(next);
     } catch (err) {
       console.error("Google OAuth callback error:", err);
-      res.status(500).send("Authentication failed: " + err.message);
+      res.status(500).send("Authentication failed. Please try again.");
     }
   });
 
@@ -190,6 +192,14 @@ if (oauth.isConfigured()) {
 // Helpers – outbound HTTPS requests to Control4 cloud & local director
 // ---------------------------------------------------------------------------
 
+function isPrivateIp(hostname) {
+  // Allow connecting without TLS verification only for private/local IPs
+  const parts = hostname.split(".");
+  if (parts.length !== 4 || parts.some((p) => isNaN(p) || p < 0 || p > 255)) return false;
+  const [a, b] = parts.map(Number);
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a === 127;
+}
+
 function request(url, options = {}, _redirectCount = 0) {
   return new Promise((resolve, reject) => {
     if (_redirectCount > 5) {
@@ -203,12 +213,14 @@ function request(url, options = {}, _redirectCount = 0) {
       headers["Content-Length"] = bodyBuf.length;
     }
     const timeout = options.timeout || 30000;
+    // Only skip TLS verification for private/local IPs (director self-signed certs)
+    const skipTlsVerify = isPrivateIp(parsed.hostname);
     const req = lib.request(
       url,
       {
         method: options.method || "GET",
         headers,
-        rejectUnauthorized: false, // director uses self-signed cert
+        rejectUnauthorized: !skipTlsVerify,
         timeout,
       },
       (res) => {
@@ -576,10 +588,20 @@ app.post("/api/auth/director-token", async (req, res) => {
 // Proxy: GET to Director REST API
 // ---------------------------------------------------------------------------
 
+function isValidDirectorIp(ip) {
+  if (ip === "mock") return true;
+  // Only allow valid IPv4 addresses to prevent SSRF
+  const parts = ip.split(".");
+  return parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) >= 0 && Number(p) <= 255);
+}
+
 app.get("/api/director/{*path}", async (req, res) => {
   const { ip, token, ...rest } = req.query;
   if (!ip || !token) {
     return res.status(400).json({ error: "ip and token query params required" });
+  }
+  if (!isValidDirectorIp(ip)) {
+    return res.status(400).json({ error: "invalid ip address format" });
   }
   const apiPath = "/" + req.params.path.join("/");
   if (ip === "mock") {
@@ -611,6 +633,9 @@ app.post("/api/director/{*path}", async (req, res) => {
   const { ip, token, ...rest } = req.query;
   if (!ip || !token) {
     return res.status(400).json({ error: "ip and token query params required" });
+  }
+  if (!isValidDirectorIp(ip)) {
+    return res.status(400).json({ error: "invalid ip address format" });
   }
   const apiPath = "/" + req.params.path.join("/");
   if (ip === "mock") {
@@ -648,6 +673,9 @@ app.put("/api/director/{*path}", async (req, res) => {
   const { ip, token, ...rest } = req.query;
   if (!ip || !token) {
     return res.status(400).json({ error: "ip and token query params required" });
+  }
+  if (!isValidDirectorIp(ip)) {
+    return res.status(400).json({ error: "invalid ip address format" });
   }
   const apiPath = "/" + req.params.path.join("/");
   if (ip === "mock") {
