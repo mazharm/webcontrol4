@@ -292,7 +292,7 @@ function createAuthCode(clientId, redirectUri, codeChallenge, codeChallengeMetho
   return code;
 }
 
-function exchangeAuthCode(code, codeVerifier, clientId) {
+function exchangeAuthCode(code, codeVerifier, clientId, redirectUri) {
   const c = authCodes.get(code);
   if (!c) return null;
   if (Date.now() > c.expiresAt) {
@@ -300,6 +300,8 @@ function exchangeAuthCode(code, codeVerifier, clientId) {
     return null;
   }
   if (c.clientId !== clientId) return null;
+  // Verify redirect_uri matches the one used during authorization
+  if (c.redirectUri && redirectUri && c.redirectUri !== redirectUri) return null;
 
   // Verify PKCE (only S256 is supported)
   if (c.codeChallenge) {
