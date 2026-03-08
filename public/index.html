@@ -157,6 +157,103 @@
       gap: 8px;
     }
     .section-title .icon { font-size: 20px; }
+    .room-section { margin-bottom: 24px; }
+    .room-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .room-header .chevron {
+      font-size: 12px;
+      transition: transform 0.2s;
+      color: var(--muted);
+    }
+    .room-header .chevron.collapsed { transform: rotate(-90deg); }
+    .room-header .room-name {
+      font-size: 15px;
+      font-weight: 500;
+    }
+    .room-header .room-count {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .room-header .rename-btn {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .room-header:hover .rename-btn { opacity: 1; }
+    .room-header .rename-btn:hover { background: var(--border); color: var(--text); }
+
+    /* Floor sections */
+    .floor-section { margin-bottom: 20px; }
+    .floor-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      cursor: pointer;
+      user-select: none;
+      padding: 8px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .floor-header .chevron {
+      font-size: 12px;
+      transition: transform 0.2s;
+      color: var(--muted);
+    }
+    .floor-header .chevron.collapsed { transform: rotate(-90deg); }
+    .floor-header .floor-name {
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .floor-header .floor-count {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .floor-header .on-count {
+      font-size: 12px;
+      color: var(--orange);
+      font-weight: 500;
+    }
+    .floor-header .rename-btn {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .floor-header:hover .rename-btn { opacity: 1; }
+    .floor-header .rename-btn:hover { background: var(--border); color: var(--text); }
+    .floor-rooms { padding-left: 16px; }
+
+    /* Light edit button */
+    .light-edit-btn {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      margin-left: 8px;
+    }
+    .light-edit-btn:hover { background: var(--border); color: var(--text); }
 
     .device-grid {
       display: grid;
@@ -462,34 +559,19 @@
   <!-- Login View -->
   <div id="login-view" class="view active">
     <h2>Connect to Control4</h2>
-    <p class="sub">Sign in with your Control4 account or connect directly to a controller</p>
+    <p class="sub">Sign in with your Control4 account</p>
     <div id="login-error" class="error-msg"></div>
-    <form id="login-form">
+    <form id="login-form" autocomplete="on">
       <div class="form-group">
         <label>Control4 Email</label>
-        <input type="email" id="c4-username" placeholder="you@example.com" autocomplete="username">
+        <input type="email" id="c4-username" name="username" placeholder="you@example.com" autocomplete="username">
       </div>
       <div class="form-group">
         <label>Password</label>
-        <input type="password" id="c4-password" placeholder="Your Control4 password" autocomplete="current-password">
+        <input type="password" id="c4-password" name="password" placeholder="Your Control4 password" autocomplete="current-password">
       </div>
       <button type="submit" class="btn" id="btn-login">Sign In</button>
     </form>
-    <div class="manual-connect">
-      <div class="form-group">
-        <label>Or connect directly to controller IP</label>
-        <input type="text" id="direct-ip" placeholder="192.168.1.100">
-        <button class="btn" style="background:transparent;border:1px solid var(--border);color:var(--muted);margin-top:8px;" onclick="discoverControllers('direct-ip')">
-          <span id="discover-spinner-login" class="spinner" style="display:none;"></span>Discover on Network (SDDP)
-        </button>
-      </div>
-      <div id="discover-results-login"></div>
-      <div class="form-group">
-        <label>Director Bearer Token</label>
-        <input type="text" id="direct-token" placeholder="Paste bearer token">
-      </div>
-      <button class="btn" onclick="directConnect()">Connect Directly</button>
-    </div>
   </div>
 
   <!-- Controller Selection View -->
@@ -497,14 +579,6 @@
     <h2 style="margin-bottom:8px;">Select Controller</h2>
     <p class="sub" style="color:var(--muted);margin-bottom:24px;font-size:14px;">Choose which controller to connect to</p>
     <div id="controller-list"></div>
-    <div class="form-group" style="margin-top:20px;">
-      <label>Controller IP Address (local network)</label>
-      <input type="text" id="controller-ip" placeholder="192.168.1.100">
-      <button class="btn" style="background:transparent;border:1px solid var(--border);color:var(--muted);margin-top:8px;" onclick="discoverControllers('controller-ip')">
-        <span id="discover-spinner-controller" class="spinner" style="display:none;"></span>Discover on Network (SDDP)
-      </button>
-    </div>
-    <div id="discover-results-controller"></div>
   </div>
 
   <!-- Dashboard View -->
@@ -512,7 +586,7 @@
     <button class="refresh-btn" onclick="refreshDevices()"><span class="spinner" style="display:none;" id="refresh-spinner"></span>Refresh Devices</button>
 
     <div class="section-title"><span class="icon">&#x1F4A1;</span> Lights</div>
-    <div id="lights-grid" class="device-grid">
+    <div id="lights-container">
       <div class="loading"><span class="spinner"></span> Loading lights...</div>
     </div>
 
@@ -619,7 +693,8 @@
         ip: state.controllerIP,
         token: state.directorToken,
       });
-      return api(`/api/director/${apiPath}?${params}`);
+      const sep = apiPath.includes("?") ? "&" : "?";
+      return api(`/api/director/${apiPath}${sep}${params}`);
     }
 
     function directorPost(apiPath, command, tParams = {}) {
@@ -627,9 +702,22 @@
         ip: state.controllerIP,
         token: state.directorToken,
       });
-      return api(`/api/director/${apiPath}?${params}`, {
+      const sep = apiPath.includes("?") ? "&" : "?";
+      return api(`/api/director/${apiPath}${sep}${params}`, {
         method: "POST",
         body: { async: true, command, tParams },
+      });
+    }
+
+    function directorPut(apiPath, body = {}) {
+      const params = new URLSearchParams({
+        ip: state.controllerIP,
+        token: state.directorToken,
+      });
+      const sep = apiPath.includes("?") ? "&" : "?";
+      return api(`/api/director/${apiPath}${sep}${params}`, {
+        method: "PUT",
+        body,
       });
     }
 
@@ -672,25 +760,50 @@
       }
     });
 
-    function showControllerSelection(controllers) {
+    async function showControllerSelection(controllers) {
       const list = document.getElementById("controller-list");
+      list.innerHTML = '<div class="loading"><span class="spinner"></span> Discovering controllers on network...</div>';
+      showView("controller-view");
+
+      // Auto-discover local IPs via SDDP and match to cloud controllers
+      // Cloud uses "control4_ea5_000FFF93E27D", SDDP uses "ea5-000FFF93E27D"
+      function normalize(s) { return s.replace(/[_\-"]/g, "").toLowerCase(); }
+      try {
+        const devices = await api("/api/discover");
+        if (Array.isArray(devices)) {
+          for (const c of controllers) {
+            const cn = normalize(c.controllerCommonName || "");
+            const match = devices.find((d) => {
+              const host = normalize(d.host || "");
+              return host && cn && (cn.includes(host) || host.includes(cn));
+            });
+            if (match) c.localIP = match.ip;
+          }
+        }
+      } catch {}
+
+      // Auto-connect if only one controller
+      if (controllers.length === 1) {
+        return selectController(controllers[0]);
+      }
+
       list.innerHTML = "";
       for (const c of controllers) {
         const card = document.createElement("div");
         card.className = "controller-card";
+        const ipLabel = c.localIP ? c.localIP : "IP not found";
         card.innerHTML = `
           <div class="name">${esc(c.name || "Controller")}</div>
           <div class="common-name">${esc(c.controllerCommonName || "unknown")}</div>
+          <div class="common-name" style="color:${c.localIP ? "var(--green)" : "var(--red)"}">${esc(ipLabel)}</div>
         `;
         card.addEventListener("click", () => selectController(c));
         list.appendChild(card);
       }
-      showView("controller-view");
     }
 
     async function selectController(controller) {
       state.controllerCommonName = controller.controllerCommonName;
-      const ipInput = document.getElementById("controller-ip").value.trim();
 
       // Get director token
       try {
@@ -704,13 +817,12 @@
         if (tokenRes.error) throw new Error(tokenRes.error);
         state.directorToken = tokenRes.directorToken;
 
-        if (!ipInput) {
-          // The IP must be provided by the user for local connections
-          const ip = prompt("Enter your controller's local IP address:");
+        if (controller.localIP) {
+          state.controllerIP = controller.localIP;
+        } else {
+          const ip = prompt("Controller not found on network. Enter its local IP address:");
           if (!ip) return;
           state.controllerIP = ip;
-        } else {
-          state.controllerIP = ipInput;
         }
 
         enterDashboard();
@@ -767,7 +879,10 @@
       }
     }
 
+    let refreshTimer = null;
+
     function logout() {
+      if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
       state = {
         accountToken: null,
         directorToken: null,
@@ -787,6 +902,54 @@
       showView("dashboard-view");
       loadRoutines();
       await refreshDevices();
+      // Poll for state changes every 10 seconds
+      if (refreshTimer) clearInterval(refreshTimer);
+      refreshTimer = setInterval(() => refreshDeviceState(), 10000);
+    }
+
+    async function refreshDeviceState() {
+      try {
+        await Promise.all([refreshLightState(), refreshThermostatState()]);
+      } catch {}
+    }
+
+    async function refreshLightState() {
+      if (!state.lights.length) return;
+      await Promise.all(
+        state.lights.map(async (light) => {
+          try {
+            const vars = await directorGet(
+              `api/v1/items/${light.id}/variables?varnames=LIGHT_LEVEL,LIGHT_STATE`
+            );
+            if (Array.isArray(vars)) {
+              for (const v of vars) {
+                if (v.varName === "LIGHT_LEVEL") light.level = parseInt(v.value) || 0;
+                if (v.varName === "LIGHT_STATE") light.on = v.value === "1" || v.value === 1;
+              }
+            }
+          } catch {}
+        })
+      );
+      renderLights();
+    }
+
+    async function refreshThermostatState() {
+      if (!state.thermostats.length) return;
+      await Promise.all(
+        state.thermostats.map(async (thermo) => {
+          try {
+            const vars = await directorGet(
+              `api/v1/items/${thermo.id}/variables?varnames=TEMPERATURE_F,TEMPERATURE_C,HEAT_SETPOINT_F,COOL_SETPOINT_F,HEAT_SETPOINT_C,COOL_SETPOINT_C,HVAC_MODE,HVAC_STATE,FAN_MODE,HUMIDITY`
+            );
+            if (Array.isArray(vars)) {
+              for (const v of vars) {
+                thermo[v.varName] = v.value;
+              }
+            }
+          } catch {}
+        })
+      );
+      renderThermostats();
     }
 
     async function refreshDevices() {
@@ -804,15 +967,16 @@
     // Lights
     // -----------------------------------------------------------------------
     async function loadLights() {
-      const grid = document.getElementById("lights-grid");
-      grid.innerHTML = '<div class="loading"><span class="spinner"></span> Loading lights...</div>';
+      const container = document.getElementById("lights-container");
+      container.innerHTML = '<div class="loading"><span class="spinner"></span> Loading lights...</div>';
       try {
         const items = await directorGet("api/v1/categories/lights");
         if (items.error) throw new Error(items.error);
-        state.lights = Array.isArray(items) ? items : [];
+        // type 7 = proxy (named light), type 6 = hardware driver (duplicate)
+        state.lights = (Array.isArray(items) ? items : []).filter((i) => i.type === 7);
 
         if (state.lights.length === 0) {
-          grid.innerHTML = '<div class="loading">No lights found</div>';
+          container.innerHTML = '<div class="loading">No lights found</div>';
           return;
         }
 
@@ -838,33 +1002,304 @@
 
         renderLights();
       } catch (err) {
-        grid.innerHTML = `<div class="loading">Error loading lights: ${esc(err.message)}</div>`;
+        container.innerHTML = `<div class="loading">Error loading lights: ${esc(err.message)}</div>`;
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Light overrides & floor helpers (localStorage)
+    // -----------------------------------------------------------------------
+    function getLightOverrides() {
+      try { return JSON.parse(localStorage.getItem("wc4_light_overrides") || "{}"); } catch { return {}; }
+    }
+    function setLightOverride(id, updates) {
+      const o = getLightOverrides();
+      o[id] = { ...(o[id] || {}), ...updates };
+      // Clean up empty keys
+      if (!o[id].name) delete o[id].name;
+      if (!o[id].floor) delete o[id].floor;
+      if (Object.keys(o[id]).length === 0) delete o[id];
+      localStorage.setItem("wc4_light_overrides", JSON.stringify(o));
+    }
+    function getFloorRenames() {
+      try { return JSON.parse(localStorage.getItem("wc4_floor_renames") || "{}"); } catch { return {}; }
+    }
+    function setFloorRename(original, newName) {
+      const r = getFloorRenames();
+      if (newName && newName !== original) r[original] = newName;
+      else delete r[original];
+      localStorage.setItem("wc4_floor_renames", JSON.stringify(r));
+    }
+    function getRoomRenames() {
+      try { return JSON.parse(localStorage.getItem("wc4_room_renames") || "{}"); } catch { return {}; }
+    }
+    function setRoomRename(original, newName) {
+      const r = getRoomRenames();
+      if (newName && newName !== original) r[original] = newName;
+      else delete r[original];
+      localStorage.setItem("wc4_room_renames", JSON.stringify(r));
+    }
+
+    function getCollapsedState() {
+      try { return JSON.parse(localStorage.getItem("wc4_rooms_collapsed") || "{}"); } catch { return {}; }
+    }
+    function toggleCollapse(key) {
+      const c = getCollapsedState();
+      // Default is collapsed (true), so first toggle opens (sets to false)
+      if (c[key] === undefined) c[key] = false;
+      else c[key] = !c[key];
+      localStorage.setItem("wc4_rooms_collapsed", JSON.stringify(c));
+    }
+    function isCollapsed(key) {
+      const c = getCollapsedState();
+      // Default collapsed
+      return c[key] !== false;
+    }
+
+    const FLOOR_NAME_MAP = {
+      "Main": "Main Floor",
+      "Upstairs": "Upper Floor",
+      "Lower Level": "Lower Floor",
+    };
+    const FLOOR_ORDER = ["Main Floor", "Upper Floor", "Lower Floor", "Exterior"];
+
+    function getFloorForLight(light) {
+      const overrides = getLightOverrides();
+      const override = overrides[light.id];
+      if (override && override.floor) return override.floor;
+      const room = light.roomName || "";
+      if (room.toLowerCase().includes("exterior")) return "Exterior";
+      const apiFloor = light.floorName || "";
+      return FLOOR_NAME_MAP[apiFloor] || apiFloor || "Other";
+    }
+
+    function getLightDisplayName(light) {
+      const overrides = getLightOverrides();
+      const override = overrides[light.id];
+      return (override && override.name) || light.name || "Light " + light.id;
+    }
+
+    function renameFloor(floorKey) {
+      const renames = getFloorRenames();
+      const current = renames[floorKey] || floorKey;
+      const newName = prompt("Rename floor:", current);
+      if (newName === null) return;
+      setFloorRename(floorKey, newName || floorKey);
+      renderLights();
+    }
+    async function renameRoom(roomKey) {
+      const renames = getRoomRenames();
+      const current = renames[roomKey] || roomKey;
+      const newName = prompt("Rename room:", current);
+      if (newName === null) return;
+      const nameChanged = newName && newName !== roomKey;
+      if (nameChanged) {
+        // Find a light in this room to get the room's parent ID for the API call
+        const lightInRoom = state.lights.find(l => l.roomName === roomKey);
+        if (lightInRoom && lightInRoom.roomParentId) {
+          try {
+            await directorPut(`api/v1/rooms/${lightInRoom.roomParentId}`, { name: newName });
+            // Update local state so all lights reflect the new room name
+            for (const l of state.lights) {
+              if (l.roomName === roomKey) l.roomName = newName;
+            }
+            for (const t of state.thermostats) {
+              if (t.roomName === roomKey) t.roomName = newName;
+            }
+          } catch (err) {
+            console.error("Failed to rename room on controller:", err);
+            // Fall through to save locally as fallback
+          }
+        }
+      }
+      setRoomRename(roomKey, newName || roomKey);
+      renderLights();
+    }
+
+    async function editLight(id) {
+      const light = state.lights.find(l => l.id === id);
+      if (!light) return;
+      const overrides = getLightOverrides();
+      const ov = overrides[id] || {};
+      const currentName = ov.name || light.name || "";
+      const currentFloor = getFloorForLight(light);
+
+      const newName = prompt("Light name (leave empty for default):", currentName);
+      if (newName === null) return;
+
+      const allFloors = [...FLOOR_ORDER];
+      // Add any custom floors from overrides
+      for (const o of Object.values(getLightOverrides())) {
+        if (o.floor && !allFloors.includes(o.floor)) allFloors.push(o.floor);
+      }
+      const floorList = allFloors.map((f, i) => `${i + 1}. ${f}`).join("\n");
+      const floorPrompt = `Assign to floor (enter number or custom name):\n${floorList}\n\nCurrent: ${currentFloor}`;
+      const floorInput = prompt(floorPrompt, currentFloor);
+      if (floorInput === null) return;
+
+      let newFloor = floorInput.trim();
+      const num = parseInt(newFloor);
+      if (!isNaN(num) && num >= 1 && num <= allFloors.length) {
+        newFloor = allFloors[num - 1];
+      }
+
+      const updates = {};
+      const nameChanged = newName && newName !== light.name;
+      if (nameChanged) updates.name = newName;
+      else if (!newName) updates.name = "";
+      if (newFloor && newFloor !== getFloorForLight(light)) updates.floor = newFloor;
+
+      if (Object.keys(updates).length > 0) {
+        // Write name back to the controller
+        if (nameChanged) {
+          try {
+            await directorPut(`api/v1/items/${id}`, { name: newName });
+            light.name = newName; // update local state to match controller
+          } catch (err) {
+            console.error("Failed to rename light on controller:", err);
+            // Still save locally as fallback
+          }
+        }
+        setLightOverride(id, updates);
+        renderLights();
       }
     }
 
     function renderLights() {
-      const grid = document.getElementById("lights-grid");
-      grid.innerHTML = "";
+      const container = document.getElementById("lights-container");
+      container.innerHTML = "";
+      const floorRenames = getFloorRenames();
+      const roomRenames = getRoomRenames();
+
+      // Build floor → room → lights hierarchy
+      const floorMap = {};
       for (const light of state.lights) {
-        const card = document.createElement("div");
-        card.className = `light-card${light.on ? " on" : ""}`;
-        card.id = `light-${light.id}`;
-        card.innerHTML = `
-          <div class="light-header">
-            <div>
-              <div class="light-name">${esc(light.name || "Light " + light.id)}</div>
-              <div class="light-room">${esc(light.roomName || "")}</div>
-            </div>
-            <button class="toggle${light.on ? " on" : ""}" onclick="toggleLight(${light.id})"></button>
-          </div>
-          <div class="slider-row">
-            <input type="range" min="0" max="100" value="${light.level || 0}"
-                   onchange="setLightLevel(${light.id}, this.value)"
-                   oninput="this.nextElementSibling.textContent = this.value + '%'">
-            <span class="level-label">${light.level || 0}%</span>
-          </div>
+        const floor = getFloorForLight(light);
+        const room = light.roomName || "Unknown";
+        if (!floorMap[floor]) floorMap[floor] = {};
+        if (!floorMap[floor][room]) floorMap[floor][room] = [];
+        floorMap[floor][room].push(light);
+      }
+
+      // Sort floors by FLOOR_ORDER, then alphabetical for unknowns
+      const floorKeys = Object.keys(floorMap).sort((a, b) => {
+        const ia = FLOOR_ORDER.indexOf(a);
+        const ib = FLOOR_ORDER.indexOf(b);
+        if (ia !== -1 && ib !== -1) return ia - ib;
+        if (ia !== -1) return -1;
+        if (ib !== -1) return 1;
+        return a.localeCompare(b);
+      });
+
+      for (const floorKey of floorKeys) {
+        const rooms = floorMap[floorKey];
+        const floorDisplayName = floorRenames[floorKey] || floorKey;
+        const floorCollapseKey = "floor:" + floorKey;
+        const floorIsCollapsed = isCollapsed(floorCollapseKey);
+
+        // Count total and on lights for this floor
+        let floorTotal = 0, floorOn = 0;
+        for (const roomLights of Object.values(rooms)) {
+          floorTotal += roomLights.length;
+          floorOn += roomLights.filter(l => l.on).length;
+        }
+
+        const floorSection = document.createElement("div");
+        floorSection.className = "floor-section";
+
+        const floorHeader = document.createElement("div");
+        floorHeader.className = "floor-header";
+        const onCountHtml = floorOn > 0 ? `<span class="on-count">${floorOn} on</span>` : "";
+        floorHeader.innerHTML = `
+          <span class="chevron${floorIsCollapsed ? " collapsed" : ""}">&#9660;</span>
+          <span class="floor-name">${esc(floorDisplayName)}</span>
+          <span class="floor-count">${floorTotal} lights</span>
+          ${onCountHtml}
+          <button class="rename-btn" title="Rename floor">&#9998;</button>
         `;
-        grid.appendChild(card);
+        floorHeader.addEventListener("click", (e) => {
+          if (e.target.classList.contains("rename-btn")) return;
+          toggleCollapse(floorCollapseKey);
+          renderLights();
+        });
+        floorHeader.querySelector(".rename-btn").addEventListener("click", (e) => {
+          e.stopPropagation();
+          renameFloor(floorKey);
+        });
+        floorSection.appendChild(floorHeader);
+
+        if (!floorIsCollapsed) {
+          const roomsDiv = document.createElement("div");
+          roomsDiv.className = "floor-rooms";
+
+          const sortedRooms = Object.entries(rooms).sort((a, b) => a[0].localeCompare(b[0]));
+          for (const [roomKey, lights] of sortedRooms) {
+            const roomDisplayName = roomRenames[roomKey] || roomKey;
+            const roomCollapseKey = "room:" + roomKey;
+            const roomIsCollapsed = isCollapsed(roomCollapseKey);
+            const roomOn = lights.filter(l => l.on).length;
+
+            const roomSection = document.createElement("div");
+            roomSection.className = "room-section";
+
+            const roomHeader = document.createElement("div");
+            roomHeader.className = "room-header";
+            const roomOnHtml = roomOn > 0 ? `<span class="on-count" style="font-size:12px;color:var(--orange);font-weight:500;">${roomOn} on</span>` : "";
+            roomHeader.innerHTML = `
+              <span class="chevron${roomIsCollapsed ? " collapsed" : ""}">&#9660;</span>
+              <span class="room-name">${esc(roomDisplayName)}</span>
+              <span class="room-count">(${lights.length})</span>
+              ${roomOnHtml}
+              <button class="rename-btn" title="Rename room">&#9998;</button>
+            `;
+            roomHeader.addEventListener("click", (e) => {
+              if (e.target.classList.contains("rename-btn")) return;
+              toggleCollapse(roomCollapseKey);
+              renderLights();
+            });
+            roomHeader.querySelector(".rename-btn").addEventListener("click", (e) => {
+              e.stopPropagation();
+              renameRoom(roomKey);
+            });
+            roomSection.appendChild(roomHeader);
+
+            if (!roomIsCollapsed) {
+              const roomGrid = document.createElement("div");
+              roomGrid.className = "device-grid";
+              for (const light of lights) {
+                const displayName = getLightDisplayName(light);
+                const card = document.createElement("div");
+                card.className = `light-card${light.on ? " on" : ""}`;
+                card.id = `light-${light.id}`;
+                card.innerHTML = `
+                  <div class="light-header">
+                    <div>
+                      <div class="light-name">${esc(displayName)}<button class="light-edit-btn" title="Edit light">&#9998;</button></div>
+                    </div>
+                    <button class="toggle${light.on ? " on" : ""}" onclick="toggleLight(${light.id})"></button>
+                  </div>
+                  <div class="slider-row">
+                    <input type="range" min="0" max="100" value="${light.level || 0}"
+                           onchange="setLightLevel(${light.id}, this.value)"
+                           oninput="this.nextElementSibling.textContent = this.value + '%'">
+                    <span class="level-label">${light.level || 0}%</span>
+                  </div>
+                `;
+                card.querySelector(".light-edit-btn").addEventListener("click", (e) => {
+                  e.stopPropagation();
+                  editLight(light.id);
+                });
+                roomGrid.appendChild(card);
+              }
+              roomSection.appendChild(roomGrid);
+            }
+
+            roomsDiv.appendChild(roomSection);
+          }
+          floorSection.appendChild(roomsDiv);
+        }
+
+        container.appendChild(floorSection);
       }
     }
 
@@ -906,7 +1341,8 @@
       try {
         const items = await directorGet("api/v1/categories/thermostats");
         if (items.error) throw new Error(items.error);
-        state.thermostats = Array.isArray(items) ? items : [];
+        // type 7 = proxy (named thermostat), type 6 = hardware driver (duplicate)
+        state.thermostats = (Array.isArray(items) ? items : []).filter((i) => i.type === 7);
 
         if (state.thermostats.length === 0) {
           grid.innerHTML = '<div class="loading">No thermostats found</div>';

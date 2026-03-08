@@ -282,13 +282,15 @@ app.post("/api/auth/director-token", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.get("/api/director/{*path}", async (req, res) => {
-  const { ip, token } = req.query;
+  const { ip, token, ...rest } = req.query;
   if (!ip || !token) {
     return res.status(400).json({ error: "ip and token query params required" });
   }
-  const apiPath = "/" + req.params.path;
+  const apiPath = "/" + req.params.path.join("/");
+  const qs = new URLSearchParams(rest).toString();
+  const fullUrl = `https://${ip}${apiPath}${qs ? "?" + qs : ""}`;
   try {
-    const data = await request(`https://${ip}${apiPath}`, {
+    const data = await request(fullUrl, {
       headers: { Authorization: `Bearer ${token}` },
     });
     try {
@@ -306,13 +308,15 @@ app.get("/api/director/{*path}", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.post("/api/director/{*path}", async (req, res) => {
-  const { ip, token } = req.query;
+  const { ip, token, ...rest } = req.query;
   if (!ip || !token) {
     return res.status(400).json({ error: "ip and token query params required" });
   }
-  const apiPath = "/" + req.params.path;
+  const apiPath = "/" + req.params.path.join("/");
+  const qs = new URLSearchParams(rest).toString();
+  const fullUrl = `https://${ip}${apiPath}${qs ? "?" + qs : ""}`;
   try {
-    const data = await request(`https://${ip}${apiPath}`, {
+    const data = await request(fullUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -321,6 +325,37 @@ app.post("/api/director/{*path}", async (req, res) => {
       body: JSON.stringify(req.body),
     });
     // Some commands return empty body
+    try {
+      res.json(JSON.parse(data));
+    } catch {
+      res.json({ ok: true, raw: data });
+    }
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Proxy: PUT to Director REST API
+// ---------------------------------------------------------------------------
+
+app.put("/api/director/{*path}", async (req, res) => {
+  const { ip, token, ...rest } = req.query;
+  if (!ip || !token) {
+    return res.status(400).json({ error: "ip and token query params required" });
+  }
+  const apiPath = "/" + req.params.path.join("/");
+  const qs = new URLSearchParams(rest).toString();
+  const fullUrl = `https://${ip}${apiPath}${qs ? "?" + qs : ""}`;
+  try {
+    const data = await request(fullUrl, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(req.body),
+    });
     try {
       res.json(JSON.parse(data));
     } catch {
