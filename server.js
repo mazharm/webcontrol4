@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const { execSync } = require("child_process");
 const path = require("path");
 const dgram = require("dgram");
+const oauth = require("./oauth");
 
 // ---------------------------------------------------------------------------
 // Data directory (settings + any future persistence)
@@ -47,6 +48,29 @@ function persistSettings() {
 }
 
 // ---------------------------------------------------------------------------
+// Routines persistence (data/routines.json)
+// ---------------------------------------------------------------------------
+
+const ROUTINES_FILE = path.join(DATA_DIR, "routines.json");
+let routinesStore = [];
+
+try {
+  if (fs.existsSync(ROUTINES_FILE)) {
+    routinesStore = JSON.parse(fs.readFileSync(ROUTINES_FILE, "utf8"));
+  }
+} catch (err) {
+  console.error("Failed to load routines:", err.message);
+}
+
+function persistRoutines() {
+  try {
+    fs.writeFileSync(ROUTINES_FILE, JSON.stringify(routinesStore, null, 2));
+  } catch (err) {
+    console.error("Failed to save routines:", err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // In-memory history storage (server lifetime, ~24 h at 10-s poll interval)
 // ---------------------------------------------------------------------------
 
@@ -81,53 +105,86 @@ const HTTPS_PORT = parseInt(process.env.HTTPS_PORT, 10) || 3443;
 const TLS_CERT_FILE = process.env.TLS_CERT_FILE || "";
 const TLS_KEY_FILE = process.env.TLS_KEY_FILE || "";
 const HTTP_REDIRECT = process.env.HTTP_REDIRECT !== "false"; // default true
-const AUTH_USERNAME = process.env.AUTH_USERNAME || "";
-const AUTH_PASSWORD = process.env.AUTH_PASSWORD || "";
 
 const app = express();
 
-// ---------------------------------------------------------------------------
-// Basic Auth middleware (active only when AUTH_USERNAME + AUTH_PASSWORD are set)
-// ---------------------------------------------------------------------------
-
-if (AUTH_USERNAME && AUTH_PASSWORD) {
-  const expectedUser = Buffer.from(AUTH_USERNAME);
-  const expectedPass = Buffer.from(AUTH_PASSWORD);
-
-  app.use((req, res, next) => {
-    const header = req.headers.authorization || "";
-    if (!header.startsWith("Basic ")) {
-      res.set("WWW-Authenticate", 'Basic realm="WebControl4"');
-      return res.status(401).send("Authentication required");
-    }
-    const decoded = Buffer.from(header.slice(6), "base64").toString();
-    const sep = decoded.indexOf(":");
-    if (sep === -1) {
-      res.set("WWW-Authenticate", 'Basic realm="WebControl4"');
-      return res.status(401).send("Authentication required");
-    }
-    const user = Buffer.from(decoded.slice(0, sep));
-    const pass = Buffer.from(decoded.slice(sep + 1));
-
-    const userOk =
-      user.length === expectedUser.length &&
-      crypto.timingSafeEqual(user, expectedUser);
-    const passOk =
-      pass.length === expectedPass.length &&
-      crypto.timingSafeEqual(pass, expectedPass);
-
-    if (userOk && passOk) {
-      return next();
-    }
-    res.set("WWW-Authenticate", 'Basic realm="WebControl4"');
-    return res.status(401).send("Invalid credentials");
-  });
-
-  console.log("Basic Auth enabled");
-}
-
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
+
+// ---------------------------------------------------------------------------
+// Authentication – Google OAuth (when GOOGLE_CLIENT_ID is configured)
+// ---------------------------------------------------------------------------
+
+// Auth status endpoint – always available so the frontend can check
+app.get("/auth/status", (req, res) => {
+  if (!oauth.isConfigured()) {
+    return res.json({ authenticated: true, provider: null });
+  }
+  const session = oauth.getSessionFromReq(req);
+  res.json({
+    authenticated: !!session,
+    email: session?.email || null,
+    name: session?.name || null,
+    provider: "google",
+  });
+});
+
+if (oauth.isConfigured()) {
+  console.log("Google OAuth enabled");
+
+  // --- Google OAuth login ---
+  app.get("/auth/google", (req, res) => {
+    const proto = req.headers["x-forwarded-proto"] || req.protocol;
+    const host = req.headers.host;
+    const callbackUrl = `${proto}://${host}/auth/google/callback`;
+    const state = `web:${req.query.next || "/"}`;
+    res.redirect(oauth.googleAuthUrl(callbackUrl, state));
+  });
+
+  // --- Google OAuth callback ---
+  app.get("/auth/google/callback", async (req, res) => {
+    try {
+      const { code, state } = req.query;
+      if (!code) return res.status(400).send("Missing authorization code");
+
+      const proto = req.headers["x-forwarded-proto"] || req.protocol;
+      const host = req.headers.host;
+      const callbackUrl = `${proto}://${host}/auth/google/callback`;
+
+      const tokens = await oauth.googleExchangeCode(code, callbackUrl);
+      const user = await oauth.googleUserInfo(tokens.access_token);
+
+      if (!oauth.isEmailAllowed(user.email)) {
+        return res.status(403).send("Email not authorized. Check ALLOWED_EMAILS.");
+      }
+
+      const sessionId = oauth.createSession(user.email, user.name || user.email);
+      const isSecure = proto === "https";
+      oauth.setSessionCookie(res, sessionId, isSecure);
+
+      const next = (state || "").replace(/^web:/, "") || "/";
+      res.redirect(next);
+    } catch (err) {
+      console.error("Google OAuth callback error:", err);
+      res.status(500).send("Authentication failed: " + err.message);
+    }
+  });
+
+  // --- Logout ---
+  app.get("/auth/logout", (req, res) => {
+    const sid = oauth.getSessionIdFromReq(req);
+    if (sid) oauth.deleteSession(sid);
+    oauth.clearSessionCookie(res);
+    res.redirect("/");
+  });
+
+  // --- Protect /api/* routes (session cookie or bearer token) ---
+  app.use("/api", (req, res, next) => {
+    if (oauth.getSessionFromReq(req)) return next();
+    if (oauth.getTokenFromReq(req)) return next();
+    res.status(401).json({ error: "Authentication required" });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Helpers – outbound HTTPS requests to Control4 cloud & local director
@@ -707,6 +764,36 @@ app.post("/api/settings", (req, res) => {
   if (anthropicKey !== undefined) appSettings.anthropicKey = String(anthropicKey);
   if (anthropicModel)             appSettings.anthropicModel = String(anthropicModel);
   persistSettings();
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Routines: CRUD endpoints
+// ---------------------------------------------------------------------------
+
+app.get("/api/routines", (_req, res) => {
+  res.json(routinesStore);
+});
+
+app.post("/api/routines", (req, res) => {
+  const routine = req.body;
+  if (!routine || !routine.id) {
+    return res.status(400).json({ error: "routine with id required" });
+  }
+  const idx = routinesStore.findIndex((r) => r.id === routine.id);
+  if (idx !== -1) {
+    routinesStore[idx] = routine;
+  } else {
+    routinesStore.push(routine);
+  }
+  persistRoutines();
+  res.json({ ok: true });
+});
+
+app.delete("/api/routines/:id", (req, res) => {
+  const { id } = req.params;
+  routinesStore = routinesStore.filter((r) => r.id !== id);
+  persistRoutines();
   res.json({ ok: true });
 });
 
