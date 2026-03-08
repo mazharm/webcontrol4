@@ -189,34 +189,44 @@ class TrendingEngine {
   /** Raw events for a device within a time window. */
   getDeviceHistory(itemId, hours = 24) {
     if (!this._db) return [];
-    const cutoff = Date.now() - hours * 3600 * 1000;
+    const id = Number(itemId);
+    if (!Number.isFinite(id)) return [];
+    const h = Math.max(1, Math.min(Number(hours) || 24, 720));
+    const cutoff = Date.now() - h * 3600 * 1000;
     return this._db.prepare(
       "SELECT item_id, var_name, value, old_value, timestamp FROM device_events WHERE item_id = ? AND timestamp > ? ORDER BY timestamp DESC LIMIT 1000"
-    ).all(Number(itemId), cutoff);
+    ).all(id, cutoff);
   }
 
   /** Daily summaries for a device. */
   getDailySummary(itemId, days = 7) {
     if (!this._db) return [];
-    const cutoffDate = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+    const id = Number(itemId);
+    if (!Number.isFinite(id)) return [];
+    const d = Math.max(1, Math.min(Number(days) || 7, 90));
+    const cutoffDate = new Date(Date.now() - d * 86400000).toISOString().slice(0, 10);
     return this._db.prepare(
       "SELECT * FROM daily_summaries WHERE item_id = ? AND date >= ? ORDER BY date DESC"
-    ).all(Number(itemId), cutoffDate);
+    ).all(id, cutoffDate);
   }
 
   /** Trend data: daily values for a specific variable. */
   getDeviceTrend(itemId, variable, days = 14) {
     if (!this._db) return [];
-    const cutoffDate = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+    const id = Number(itemId);
+    if (!Number.isFinite(id)) return [];
+    const d = Math.max(1, Math.min(Number(days) || 14, 90));
+    const cutoffDate = new Date(Date.now() - d * 86400000).toISOString().slice(0, 10);
     return this._db.prepare(
       "SELECT date, event_count, min_value, max_value, avg_value, total_on_minutes FROM daily_summaries WHERE item_id = ? AND var_name = ? AND date >= ? ORDER BY date ASC"
-    ).all(Number(itemId), variable, cutoffDate);
+    ).all(id, variable, cutoffDate);
   }
 
   /** Detect anomalies in recent events (values > 2σ from baseline). */
   getAnomalies(hours = 24) {
     if (!this._db) return [];
-    const cutoff = Date.now() - hours * 3600 * 1000;
+    const h = Math.max(1, Math.min(Number(hours) || 24, 720));
+    const cutoff = Date.now() - h * 3600 * 1000;
 
     // Get recent daily summaries grouped by device+variable
     const todayStr = new Date().toISOString().slice(0, 10);
@@ -257,11 +267,13 @@ class TrendingEngine {
   /** 14-day rolling baseline for a device. */
   getBaseline(itemId) {
     if (!this._db) return {};
+    const id = Number(itemId);
+    if (!Number.isFinite(id)) return {};
 
     // Get all variable names for this device
     const varNames = this._db.prepare(
       "SELECT DISTINCT var_name FROM daily_summaries WHERE item_id = ?"
-    ).all(Number(itemId));
+    ).all(id);
 
     const result = {};
     for (const { var_name } of varNames) {
@@ -298,7 +310,8 @@ class TrendingEngine {
   /** Home mode history. */
   getModeHistory(hours = 24) {
     if (!this._db) return [];
-    const cutoff = Date.now() - hours * 3600 * 1000;
+    const h = Math.max(1, Math.min(Number(hours) || 24, 720));
+    const cutoff = Date.now() - h * 3600 * 1000;
     return this._db.prepare(
       "SELECT * FROM home_mode_log WHERE started_at > ? ORDER BY started_at DESC"
     ).all(cutoff);

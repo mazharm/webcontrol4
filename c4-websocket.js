@@ -28,13 +28,15 @@ class C4WebSocket extends EventEmitter {
    * @param {string}   opts.directorToken   – Bearer token for Director
    * @param {function} [opts.refreshTokenFn] – async () => { token, validSeconds }
    * @param {function} [opts.logger]         – (...args) => void
+   * @param {boolean}  [opts.rejectUnauthorized] – TLS cert validation (default false for local directors with self-signed certs)
    */
-  constructor({ directorIp, directorToken, refreshTokenFn, logger }) {
+  constructor({ directorIp, directorToken, refreshTokenFn, logger, rejectUnauthorized }) {
     super();
     this._directorIp = directorIp;
     this._token = directorToken;
     this._refreshTokenFn = refreshTokenFn;
     this._logger = logger || (() => {});
+    this._rejectUnauthorized = rejectUnauthorized !== undefined ? rejectUnauthorized : false;
 
     this._socket = null;
     this._connected = false;
@@ -126,7 +128,7 @@ class C4WebSocket extends EventEmitter {
     this._socket = io(url, {
       transports: ["websocket"],
       extraHeaders: { JWT: this._token },
-      rejectUnauthorized: false,
+      rejectUnauthorized: this._rejectUnauthorized,
       reconnection: false, // we manage reconnection ourselves
       timeout: 10000,
     });

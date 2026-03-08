@@ -1191,11 +1191,22 @@
         state.directorToken = tokenRes.directorToken;
 
         if (controller.localIP) {
+          // Validate discovered IP format
+          if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(controller.localIP)) {
+            alert("Invalid controller IP discovered. Please enter manually.");
+            controller.localIP = null;
+          }
+        }
+        if (controller.localIP) {
           state.controllerIP = controller.localIP;
         } else {
           const ip = prompt("Controller not found on network. Enter its local IP address:");
           if (!ip) return;
-          state.controllerIP = ip;
+          if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip.trim())) {
+            alert("Please enter a valid IPv4 address.");
+            return;
+          }
+          state.controllerIP = ip.trim();
         }
 
         // Initialize server-side real-time engine
@@ -1985,6 +1996,8 @@
     }
 
     async function setHvacMode(id, mode) {
+      const validModes = ["Off", "Heat", "Cool", "Auto"];
+      if (!validModes.includes(mode)) return;
       const t = state.thermostats.find((th) => th.id === id);
       if (t) t.hvacMode = mode;
       await directorPost(`api/v1/items/${id}/commands`, "SET_MODE_HVAC", {
@@ -2543,7 +2556,7 @@
       } else {
         const lights = state.lights.filter((l) => getFloorForLight(l) === floor).slice(0, 10);
         const results = await Promise.all(
-          lights.map((l) => api(`/api/history?type=light&id=${l.id}`).catch(() => []))
+          lights.map((l) => api(`/api/history?type=light&id=${encodeURIComponent(l.id)}`).catch(() => []))
         );
         // Merge timestamps
         const allTs = [...new Set(results.flatMap((d) => d.map((p) => p.ts)))].sort((a,b)=>a-b);
@@ -2581,7 +2594,7 @@
       thermoChart = null;
       if (!thermoId) return;
 
-      const data = await api(`/api/history?type=thermo&id=${thermoId}`).catch(() => []);
+      const data = await api(`/api/history?type=thermo&id=${encodeURIComponent(thermoId)}`).catch(() => []);
       const hasData = data.length > 0;
       msgEl.style.display = hasData ? "none" : "block";
       wrap.style.display  = hasData ? "block" : "none";
@@ -2703,7 +2716,7 @@
           }
         }
         for (const t of state.thermostats) {
-          const data = await api(`/api/history?type=thermo&id=${t.id}`).catch(() => []);
+          const data = await api(`/api/history?type=thermo&id=${encodeURIComponent(t.id)}`).catch(() => []);
           if (data.length) {
             const temps = data.filter((p) => p.tempF != null).map((p) => p.tempF);
             if (temps.length) {

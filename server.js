@@ -62,7 +62,17 @@ let routinesStore = [];
 
 try {
   if (fs.existsSync(ROUTINES_FILE)) {
-    routinesStore = JSON.parse(fs.readFileSync(ROUTINES_FILE, "utf8"));
+    const raw = JSON.parse(fs.readFileSync(ROUTINES_FILE, "utf8"));
+    // Validate loaded routines to prevent persisted malicious data
+    if (Array.isArray(raw)) {
+      const validStepTypes = ["light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"];
+      routinesStore = raw.filter(r =>
+        r && typeof r.id === "string" && /^[a-zA-Z0-9_-]+$/.test(r.id) &&
+        typeof r.name === "string" && r.name.length <= 200 &&
+        Array.isArray(r.steps) && r.steps.length <= 100 &&
+        r.steps.every(s => s && typeof s === "object" && validStepTypes.includes(s.type) && Number.isFinite(s.deviceId))
+      ).slice(0, 200);
+    }
   }
 } catch (err) {
   console.error("Failed to load routines:", err.message);
@@ -759,6 +769,17 @@ function isValidDirectorIp(ip) {
   return isPrivateOrLocalHost(ip);
 }
 
+function sanitizeApiPath(pathSegments) {
+  const joined = "/" + pathSegments.join("/");
+  // Reject path traversal attempts
+  if (/(?:^|\/)\.\.(\/|$)/.test(joined)) return null;
+  // Reject encoded traversal
+  if (/%2e%2e|%2f/i.test(joined)) return null;
+  // Reject backslashes
+  if (/\\/.test(joined)) return null;
+  return joined;
+}
+
 app.get("/api/director/{*path}", async (req, res) => {
   const ip = req.headers["x-director-ip"];
   const token = req.headers["x-director-token"];
@@ -769,7 +790,10 @@ app.get("/api/director/{*path}", async (req, res) => {
   if (!isValidDirectorIp(ip)) {
     return res.status(400).json({ error: "invalid ip address format" });
   }
-  const apiPath = "/" + req.params.path.join("/");
+  const apiPath = sanitizeApiPath(req.params.path);
+  if (!apiPath) {
+    return res.status(400).json({ error: "invalid path" });
+  }
   if (ip === "mock") {
     const handled = handleMockRequest(req, res, apiPath);
     if (handled !== null) return;
@@ -806,7 +830,10 @@ app.post("/api/director/{*path}", async (req, res) => {
   if (!isValidDirectorIp(ip)) {
     return res.status(400).json({ error: "invalid ip address format" });
   }
-  const apiPath = "/" + req.params.path.join("/");
+  const apiPath = sanitizeApiPath(req.params.path);
+  if (!apiPath) {
+    return res.status(400).json({ error: "invalid path" });
+  }
   if (ip === "mock") {
     const handled = handleMockRequest(req, res, apiPath);
     if (handled !== null) return;
@@ -849,7 +876,10 @@ app.put("/api/director/{*path}", async (req, res) => {
   if (!isValidDirectorIp(ip)) {
     return res.status(400).json({ error: "invalid ip address format" });
   }
-  const apiPath = "/" + req.params.path.join("/");
+  const apiPath = sanitizeApiPath(req.params.path);
+  if (!apiPath) {
+    return res.status(400).json({ error: "invalid path" });
+  }
   if (ip === "mock") {
     const handled = handleMockRequest(req, res, apiPath);
     if (handled !== null) return;
@@ -896,8 +926,9 @@ app.post("/api/history/record", (req, res) => {
   const ts = Date.now();
 
   for (const l of lights) {
-    if (l.id != null) {
-      addHistoryPoint(`light:${l.id}`, {
+    const lid = Number(l.id);
+    if (Number.isFinite(lid) && Number.isInteger(lid)) {
+      addHistoryPoint(`light:${lid}`, {
         ts,
         on: !!l.on,
         level: Number(l.level) || 0,
@@ -906,8 +937,9 @@ app.post("/api/history/record", (req, res) => {
   }
 
   for (const t of thermostats) {
-    if (t.id != null) {
-      addHistoryPoint(`thermo:${t.id}`, {
+    const tid = Number(t.id);
+    if (Number.isFinite(tid) && Number.isInteger(tid)) {
+      addHistoryPoint(`thermo:${tid}`, {
         ts,
         tempF: t.tempF != null ? Number(t.tempF) : null,
         heatF: t.heatF != null ? Number(t.heatF) : null,
@@ -1036,10 +1068,10 @@ app.post("/api/routines", (req, res) => {
     if (!validStepTypes.includes(step.type)) {
       return res.status(400).json({ error: "invalid step type" });
     }
-    if (typeof step.deviceId !== "number" || !Number.isFinite(step.deviceId)) {
+    if (!Number.isFinite(step.deviceId)) {
       return res.status(400).json({ error: "each step must have a numeric deviceId" });
     }
-    if (step.type === "light_level" && (typeof step.level !== "number" || step.level < 0 || step.level > 100)) {
+    if (step.type === "light_level" && (!Number.isFinite(step.level) || step.level < 0 || step.level > 100)) {
       return res.status(400).json({ error: "light_level step requires level 0-100" });
     }
     if (step.type === "light_toggle" && typeof step.on !== "boolean") {
@@ -1049,7 +1081,7 @@ app.post("/api/routines", (req, res) => {
       return res.status(400).json({ error: "hvac_mode step requires mode: Off, Heat, Cool, or Auto" });
     }
     if ((step.type === "heat_setpoint" || step.type === "cool_setpoint") &&
-        (typeof step.value !== "number" || step.value < 32 || step.value > 120)) {
+        (!Number.isFinite(step.value) || step.value < 32 || step.value > 120)) {
       return res.status(400).json({ error: "setpoint step requires value between 32 and 120" });
     }
   }
@@ -1057,8 +1089,8 @@ app.post("/api/routines", (req, res) => {
   if (routine.schedule) {
     const s = routine.schedule;
     if (typeof s.enabled !== "boolean") s.enabled = false;
-    if (typeof s.time !== "string" || !/^\d{2}:\d{2}$/.test(s.time)) {
-      return res.status(400).json({ error: "schedule.time must be HH:MM format" });
+    if (typeof s.time !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(s.time)) {
+      return res.status(400).json({ error: "schedule.time must be valid HH:MM (00:00-23:59)" });
     }
     if (!Array.isArray(s.days) || s.days.some((d) => typeof d !== "number" || d < 0 || d > 6)) {
       return res.status(400).json({ error: "schedule.days must be array of 0-6 (Sun-Sat)" });
@@ -1185,8 +1217,11 @@ app.post("/api/llm/chat", async (req, res) => {
   }
 
   const { message, context, mode } = req.body;
-  if (!message) {
+  if (!message || typeof message !== "string") {
     return res.status(400).json({ error: "message required" });
+  }
+  if (message.length > 10000) {
+    return res.status(400).json({ error: "message too long (max 10000 characters)" });
   }
 
   const systemPrompt = buildSystemPrompt(context, mode);
@@ -1233,13 +1268,13 @@ app.post("/api/llm/chat", async (req, res) => {
       parsed.actions = parsed.actions.filter(a => {
         if (!a || typeof a !== "object") return false;
         if (!validActionTypes.includes(a.type)) return false;
-        if (a.type === "light_level" && (typeof a.deviceId !== "number" || typeof a.level !== "number" || a.level < 0 || a.level > 100)) return false;
-        if (a.type === "light_toggle" && (typeof a.deviceId !== "number" || typeof a.on !== "boolean")) return false;
-        if (a.type === "hvac_mode" && (typeof a.deviceId !== "number" || !["Off", "Heat", "Cool", "Auto"].includes(a.mode))) return false;
-        if (a.type === "heat_setpoint" && (typeof a.deviceId !== "number" || typeof a.value !== "number" || a.value < 32 || a.value > 120)) return false;
-        if (a.type === "cool_setpoint" && (typeof a.deviceId !== "number" || typeof a.value !== "number" || a.value < 32 || a.value > 120)) return false;
-        if (a.type === "run_routine" && typeof a.routineId !== "string") return false;
-        if (a.type === "create_routine" && (!a.name || !Array.isArray(a.steps))) return false;
+        if (a.type === "light_level" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.level) || a.level < 0 || a.level > 100)) return false;
+        if (a.type === "light_toggle" && (!Number.isFinite(a.deviceId) || typeof a.on !== "boolean")) return false;
+        if (a.type === "hvac_mode" && (!Number.isFinite(a.deviceId) || !["Off", "Heat", "Cool", "Auto"].includes(a.mode))) return false;
+        if (a.type === "heat_setpoint" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.value) || a.value < 32 || a.value > 120)) return false;
+        if (a.type === "cool_setpoint" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.value) || a.value < 32 || a.value > 120)) return false;
+        if (a.type === "run_routine" && (typeof a.routineId !== "string" || a.routineId.length > 100 || !/^[a-zA-Z0-9_-]+$/.test(a.routineId))) return false;
+        if (a.type === "create_routine" && (!a.name || typeof a.name !== "string" || a.name.length > 200 || !Array.isArray(a.steps) || a.steps.length > 100)) return false;
         return true;
       });
     } else {
@@ -1546,16 +1581,16 @@ app.get("/api/state/:itemId", (req, res) => {
 app.get("/api/trending/:itemId", (req, res) => {
   if (!trending) return res.status(503).json({ error: "Trending not initialized" });
   const itemId = parseInt(req.params.itemId, 10);
-  const hours = Math.min(parseInt(req.query.hours, 10) || 24, 720);
-  if (!Number.isFinite(itemId)) return res.status(400).json({ error: "invalid itemId" });
+  const hours = Math.max(1, Math.min(parseInt(req.query.hours, 10) || 24, 720));
+  if (!Number.isFinite(itemId) || itemId < 0) return res.status(400).json({ error: "invalid itemId" });
   res.json(trending.getDeviceHistory(itemId, hours));
 });
 
 app.get("/api/trending/:itemId/daily", (req, res) => {
   if (!trending) return res.status(503).json({ error: "Trending not initialized" });
   const itemId = parseInt(req.params.itemId, 10);
-  const days = Math.min(parseInt(req.query.days, 10) || 7, 90);
-  if (!Number.isFinite(itemId)) return res.status(400).json({ error: "invalid itemId" });
+  const days = Math.max(1, Math.min(parseInt(req.query.days, 10) || 7, 90));
+  if (!Number.isFinite(itemId) || itemId < 0) return res.status(400).json({ error: "invalid itemId" });
   res.json(trending.getDailySummary(itemId, days));
 });
 

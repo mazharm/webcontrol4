@@ -206,7 +206,7 @@ class StateMachine extends EventEmitter {
     };
     this.emit("stateChange", change);
     for (const cb of this._changeListeners) {
-      try { cb(change); } catch { /* intentional: isolate listener errors */ }
+      try { cb(change); } catch (err) { this._logger("listener-error", err.message); }
     }
   }
 
@@ -330,6 +330,11 @@ class StateMachine extends EventEmitter {
   /** Subscribe to every state change. */
   onStateChange(cb) {
     this._changeListeners.add(cb);
+  }
+
+  /** Unsubscribe from state changes. */
+  offStateChange(cb) {
+    this._changeListeners.delete(cb);
   }
 
   // -----------------------------------------------------------------------

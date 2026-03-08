@@ -19,24 +19,26 @@ function isPrivateOrLocalHost(hostname) {
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a === 127;
 }
 
+const SENSITIVE_HEADERS = [
+  "authorization",
+  "cookie",
+  "x-api-key",
+  "proxy-authorization",
+  "x-director-token",
+  "x-director-ip",
+];
+
 function filterRedirectHeaders(headers, fromUrl, toUrl) {
   if (fromUrl.origin === toUrl.origin) {
     return { ...headers };
   }
 
-  const filtered = { ...headers };
-  delete filtered.Authorization;
-  delete filtered.authorization;
-  delete filtered.Cookie;
-  delete filtered.cookie;
-  delete filtered["x-api-key"];
-  delete filtered["X-API-Key"];
-  delete filtered["Proxy-Authorization"];
-  delete filtered["proxy-authorization"];
-  delete filtered["X-Director-Token"];
-  delete filtered["x-director-token"];
-  delete filtered["X-Director-IP"];
-  delete filtered["x-director-ip"];
+  const filtered = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (!SENSITIVE_HEADERS.includes(key.toLowerCase())) {
+      filtered[key] = value;
+    }
+  }
   return filtered;
 }
 
@@ -88,7 +90,7 @@ function requestText(url, options = {}, redirectCount = 0) {
         let destroyed = false;
         res.setEncoding("utf8");
         res.on("data", (chunk) => {
-          totalSize += chunk.length;
+          totalSize += Buffer.byteLength(chunk, "utf8");
           if (totalSize > maxResponseSize) {
             destroyed = true;
             req.destroy(new Error("Response body too large"));
