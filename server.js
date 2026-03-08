@@ -19,7 +19,9 @@ const DATA_DIR = path.join(__dirname, "data");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
 if (!fs.existsSync(DATA_DIR)) {
-  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (err) {
+    console.error("Failed to create data directory:", err.message);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -79,7 +81,7 @@ const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 let lastScheduleCheck = "";  // "YYYY-MM-DD HH:MM" to avoid double-firing
 
 function startScheduler() {
-  setInterval(() => {
+  const schedulerInterval = setInterval(() => {
     const now = new Date();
     const minuteKey = now.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:MM"
     if (minuteKey === lastScheduleCheck) return;
@@ -100,6 +102,7 @@ function startScheduler() {
       });
     }
   }, 15_000); // check every 15 seconds for responsive scheduling
+  schedulerInterval.unref();
 }
 
 async function executeRoutineSteps(routine) {
@@ -174,7 +177,7 @@ async function executeScheduledCommand(deviceId, command, tParams) {
 // ---------------------------------------------------------------------------
 
 const MAX_HISTORY_POINTS = 8640; // 24 h × 3600 s / 10 s
-const historyStore = {}; // key -> array of timestamped data points
+const historyStore = Object.create(null); // key -> array of timestamped data points
 
 function addHistoryPoint(key, point) {
   if (!historyStore[key]) historyStore[key] = [];
@@ -336,7 +339,7 @@ const C4_AUTH_URL = "https://apis.control4.com/authentication/v1/rest";
 const C4_CONTROLLER_AUTH_URL =
   "https://apis.control4.com/authentication/v1/rest/authorization";
 const C4_ACCOUNTS_URL = "https://apis.control4.com/account/v3/rest/accounts";
-const APPLICATION_KEY = "78f6791373d61bea49fdb9fb8897f1f3af193f11";
+const APPLICATION_KEY = process.env.C4_APPLICATION_KEY || "78f6791373d61bea49fdb9fb8897f1f3af193f11";
 
 // ---------------------------------------------------------------------------
 // Mock controller state (for demo mode when ip=mock)
@@ -530,7 +533,10 @@ app.get("/api/discover", (_req, res) => {
 
   sock.on("message", (msg, rinfo) => {
     const text = msg.toString();
-    const entry = { ip: rinfo.address, port: rinfo.port, raw: text };
+    const entry = Object.create(null);
+    entry.ip = rinfo.address;
+    entry.port = rinfo.port;
+    entry.raw = text;
     // Parse SDDP headers
     for (const line of text.split("\r\n")) {
       const idx = line.indexOf(":");
@@ -600,7 +606,8 @@ app.post("/api/auth/login", async (req, res) => {
     if (!token) throw new Error("No token in response");
     res.json({ accountToken: token });
   } catch (err) {
-    res.status(401).json({ error: err.message });
+    console.error("Login error:", err.message);
+    res.status(401).json({ error: "Authentication failed" });
   }
 });
 
@@ -624,7 +631,8 @@ app.post("/api/auth/controllers", async (req, res) => {
     const json = JSON.parse(data);
     res.json(json.account || json);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Controller list error:", err.message);
+    res.status(500).json({ error: "Failed to fetch controllers" });
   }
 });
 
@@ -664,7 +672,8 @@ app.post("/api/auth/director-token", async (req, res) => {
     if (!token) throw new Error("No director token in response");
     res.json({ directorToken: token, validSeconds });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Director token error:", err.message);
+    res.status(500).json({ error: "Failed to get director token" });
   }
 });
 
@@ -886,7 +895,13 @@ app.get("/api/settings", (_req, res) => {
 
 app.post("/api/settings", (req, res) => {
   const { anthropicKey, anthropicModel } = req.body;
-  if (anthropicKey !== undefined) appSettings.anthropicKey = String(anthropicKey);
+  if (anthropicKey !== undefined) {
+    const keyStr = String(anthropicKey).trim();
+    if (keyStr && keyStr.length > 256) {
+      return res.status(400).json({ error: "anthropicKey is too long" });
+    }
+    appSettings.anthropicKey = keyStr;
+  }
   if (anthropicModel) {
     const validModel = ANTHROPIC_MODELS.find((m) => m.id === String(anthropicModel));
     if (!validModel) {
@@ -925,6 +940,32 @@ app.post("/api/routines", (req, res) => {
   }
   if (routine.steps.length > ROUTINE_STEPS_MAX) {
     return res.status(400).json({ error: `routine may have at most ${ROUTINE_STEPS_MAX} steps` });
+  }
+  // Validate individual step structure
+  const validStepTypes = ["light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"];
+  for (const step of routine.steps) {
+    if (!step || typeof step !== "object") {
+      return res.status(400).json({ error: "each step must be an object" });
+    }
+    if (!validStepTypes.includes(step.type)) {
+      return res.status(400).json({ error: `invalid step type: ${step.type}` });
+    }
+    if (typeof step.deviceId !== "number" || !Number.isFinite(step.deviceId)) {
+      return res.status(400).json({ error: "each step must have a numeric deviceId" });
+    }
+    if (step.type === "light_level" && (typeof step.level !== "number" || step.level < 0 || step.level > 100)) {
+      return res.status(400).json({ error: "light_level step requires level 0-100" });
+    }
+    if (step.type === "light_toggle" && typeof step.on !== "boolean") {
+      return res.status(400).json({ error: "light_toggle step requires boolean 'on'" });
+    }
+    if (step.type === "hvac_mode" && !["Off", "Heat", "Cool", "Auto"].includes(step.mode)) {
+      return res.status(400).json({ error: "hvac_mode step requires mode: Off, Heat, Cool, or Auto" });
+    }
+    if ((step.type === "heat_setpoint" || step.type === "cool_setpoint") &&
+        (typeof step.value !== "number" || step.value < 32 || step.value > 120)) {
+      return res.status(400).json({ error: "setpoint step requires value between 32 and 120" });
+    }
   }
   // Validate optional schedule
   if (routine.schedule) {

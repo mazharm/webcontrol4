@@ -288,18 +288,15 @@ function exchangeAuthCode(code, codeVerifier, clientId) {
   }
   if (c.clientId !== clientId) return null;
 
-  // Verify PKCE
+  // Verify PKCE (only S256 is supported)
   if (c.codeChallenge) {
-    if ((c.codeChallengeMethod || "S256") === "S256") {
-      const hash = crypto
-        .createHash("sha256")
-        .update(codeVerifier || "")
-        .digest("base64url");
-      if (hash !== c.codeChallenge) return null;
-    } else {
-      // plain
-      if ((codeVerifier || "") !== c.codeChallenge) return null;
-    }
+    if (c.codeChallengeMethod !== "S256") return null; // reject non-S256 methods
+    if (!codeVerifier) return null;
+    const hash = crypto
+      .createHash("sha256")
+      .update(codeVerifier)
+      .digest("base64url");
+    if (hash !== c.codeChallenge) return null;
   }
 
   authCodes.delete(code); // one-time use
