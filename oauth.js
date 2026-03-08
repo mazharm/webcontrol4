@@ -16,9 +16,10 @@ const ALLOWED_EMAILS       = process.env.ALLOWED_EMAILS
   ? process.env.ALLOWED_EMAILS.split(",").map((e) => e.trim().toLowerCase())
   : [];
 
-const SESSION_TTL = 24 * 3600 * 1000; // 24 hours
-const CODE_TTL    = 10 * 60 * 1000;   // 10 minutes
-const TOKEN_TTL   = 3600 * 1000;      // 1 hour
+const SESSION_TTL  = 24 * 3600 * 1000; // 24 hours
+const CODE_TTL     = 10 * 60 * 1000;   // 10 minutes
+const TOKEN_TTL    = 3600 * 1000;      // 1 hour
+const MAX_CLIENTS  = 100;              // max registered OAuth clients
 
 // ---------------------------------------------------------------------------
 // In-memory stores
@@ -161,8 +162,23 @@ function setSessionCookie(res, sessionId, secure) {
 }
 
 function clearSessionCookie(res) {
-  res.setHeader("Set-Cookie", "wc4_session=; Path=/; HttpOnly; Max-Age=0");
+  res.setHeader("Set-Cookie", "wc4_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
 }
+
+// ---------------------------------------------------------------------------
+// Cleanup – remove expired in-memory entries to prevent unbounded growth
+// ---------------------------------------------------------------------------
+
+function cleanupExpired() {
+  const now = Date.now();
+  for (const [id, s] of Array.from(sessions))     { if (now > s.expiresAt)  sessions.delete(id); }
+  for (const [id, p] of Array.from(pendingAuths)) { if (now > p.expiresAt)  pendingAuths.delete(id); }
+  for (const [id, c] of Array.from(authCodes))    { if (now > c.expiresAt)  authCodes.delete(id); }
+  for (const [id, t] of Array.from(accessTokens)) { if (now > t.expiresAt)  accessTokens.delete(id); }
+}
+
+// Run cleanup every 15 minutes
+setInterval(cleanupExpired, 15 * 60 * 1000).unref();
 
 // ---------------------------------------------------------------------------
 // Bearer token validation (MCP access tokens)
@@ -190,6 +206,10 @@ function validateAccessToken(token) {
 // ---------------------------------------------------------------------------
 
 function registerClient(metadata) {
+  if (registeredClients.size >= MAX_CLIENTS) {
+    throw new Error("Maximum number of registered clients reached");
+  }
+
   const redirectUris = Array.isArray(metadata.redirect_uris)
     ? metadata.redirect_uris.filter((uri) => typeof uri === "string" && isValidRedirectUri(uri))
     : [];
@@ -333,4 +353,7 @@ module.exports = {
   getPendingAuth,
   createAuthCode,
   exchangeAuthCode,
+
+  // Maintenance
+  cleanupExpired,
 };

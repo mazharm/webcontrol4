@@ -110,8 +110,12 @@ async function main() {
       if (!metadata.redirect_uris.every((uri) => typeof uri === "string" && oauth.isValidRedirectUri(uri))) {
         return res.status(400).json({ error: "redirect_uris must be https or loopback http URLs" });
       }
-      const client = oauth.registerClient(metadata);
-      res.status(201).json(client);
+      try {
+        const client = oauth.registerClient(metadata);
+        res.status(201).json(client);
+      } catch (err) {
+        res.status(503).json({ error: err.message });
+      }
     });
 
     // --- Authorization Endpoint ---

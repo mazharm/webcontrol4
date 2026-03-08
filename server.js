@@ -109,6 +109,17 @@ const HTTP_REDIRECT = process.env.HTTP_REDIRECT !== "false"; // default true
 
 const app = express();
 
+// ---------------------------------------------------------------------------
+// Security headers
+// ---------------------------------------------------------------------------
+
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "same-origin");
+  next();
+});
+
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -682,8 +693,18 @@ app.put("/api/director/{*path}", async (req, res) => {
 // History: record a state snapshot from the frontend
 // ---------------------------------------------------------------------------
 
+const HISTORY_RECORD_MAX_ITEMS  = 500;
+const HISTORY_RECORD_MAX_FLOORS = 50;
+
 app.post("/api/history/record", (req, res) => {
   const { lights = [], thermostats = [], floors = {} } = req.body;
+  if (!Array.isArray(lights) || !Array.isArray(thermostats) ||
+      typeof floors !== "object" || floors === null || Array.isArray(floors)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
+  if (lights.length > HISTORY_RECORD_MAX_ITEMS || thermostats.length > HISTORY_RECORD_MAX_ITEMS) {
+    return res.status(400).json({ error: "too many items" });
+  }
   const ts = Date.now();
 
   for (const l of lights) {
@@ -708,7 +729,9 @@ app.post("/api/history/record", (req, res) => {
     }
   }
 
+  let floorCount = 0;
   for (const [floorKey, onCount] of Object.entries(floors)) {
+    if (floorCount >= HISTORY_RECORD_MAX_FLOORS) break;
     // Reject keys that could cause prototype pollution or key collisions;
     // sanitize to keep only safe characters
     if (
@@ -720,6 +743,7 @@ app.post("/api/history/record", (req, res) => {
       const safeKey = floorKey.replace(/[^a-zA-Z0-9 _\-]/g, "").slice(0, 128);
       if (safeKey) {
         addHistoryPoint(`floor:${safeKey}`, { ts, onCount: Number(onCount) || 0 });
+        floorCount++;
       }
     }
   }
@@ -764,7 +788,13 @@ app.get("/api/settings", (_req, res) => {
 app.post("/api/settings", (req, res) => {
   const { anthropicKey, anthropicModel } = req.body;
   if (anthropicKey !== undefined) appSettings.anthropicKey = String(anthropicKey);
-  if (anthropicModel)             appSettings.anthropicModel = String(anthropicModel);
+  if (anthropicModel) {
+    const validModel = ANTHROPIC_MODELS.find((m) => m.id === String(anthropicModel));
+    if (!validModel) {
+      return res.status(400).json({ error: "invalid anthropicModel" });
+    }
+    appSettings.anthropicModel = validModel.id;
+  }
   persistSettings();
   res.json({ ok: true });
 });
@@ -777,10 +807,25 @@ app.get("/api/routines", (_req, res) => {
   res.json(routinesStore);
 });
 
+const ROUTINE_NAME_MAX_LEN = 200;
+const ROUTINE_STEPS_MAX    = 100;
+
 app.post("/api/routines", (req, res) => {
   const routine = req.body;
   if (!routine || !routine.id) {
     return res.status(400).json({ error: "routine with id required" });
+  }
+  if (!routine.name || typeof routine.name !== "string" || !routine.name.trim()) {
+    return res.status(400).json({ error: "routine name required" });
+  }
+  if (routine.name.length > ROUTINE_NAME_MAX_LEN) {
+    return res.status(400).json({ error: `routine name must be at most ${ROUTINE_NAME_MAX_LEN} characters` });
+  }
+  if (!Array.isArray(routine.steps)) {
+    return res.status(400).json({ error: "routine steps must be an array" });
+  }
+  if (routine.steps.length > ROUTINE_STEPS_MAX) {
+    return res.status(400).json({ error: `routine may have at most ${ROUTINE_STEPS_MAX} steps` });
   }
   const idx = routinesStore.findIndex((r) => r.id === routine.id);
   if (idx !== -1) {

@@ -1278,7 +1278,18 @@
             );
             if (Array.isArray(vars)) {
               for (const v of vars) {
-                thermo[v.varName] = v.value;
+                switch (v.varName) {
+                  case "TEMPERATURE_F":  thermo.tempF    = parseFloat(v.value); break;
+                  case "TEMPERATURE_C":  thermo.tempC    = parseFloat(v.value); break;
+                  case "HEAT_SETPOINT_F": thermo.heatF   = parseFloat(v.value); break;
+                  case "COOL_SETPOINT_F": thermo.coolF   = parseFloat(v.value); break;
+                  case "HEAT_SETPOINT_C": thermo.heatC   = parseFloat(v.value); break;
+                  case "COOL_SETPOINT_C": thermo.coolC   = parseFloat(v.value); break;
+                  case "HVAC_MODE":      thermo.hvacMode  = v.value; break;
+                  case "HVAC_STATE":     thermo.hvacState = v.value; break;
+                  case "FAN_MODE":       thermo.fanMode   = v.value; break;
+                  case "HUMIDITY":       thermo.humidity  = parseFloat(v.value); break;
+                }
               }
             }
           } catch {}
@@ -1726,10 +1737,14 @@
         const card = document.createElement("div");
         card.className = "thermo-card";
         card.id = `thermo-${t.id}`;
-        const temp = t.tempF != null ? `${t.tempF}` : (t.tempC != null ? `${t.tempC}` : "--");
+        const tempNum = t.tempF != null ? t.tempF : t.tempC;
+        const temp = tempNum != null ? esc(String(tempNum)) : "--";
         const unit = t.tempF != null ? "F" : "C";
-        const heat = unit === "F" ? (t.heatF || "--") : (t.heatC || "--");
-        const cool = unit === "F" ? (t.coolF || "--") : (t.coolC || "--");
+        const heatNum = unit === "F" ? t.heatF : t.heatC;
+        const coolNum = unit === "F" ? t.coolF : t.coolC;
+        const heat = heatNum != null ? esc(String(heatNum)) : "--";
+        const cool = coolNum != null ? esc(String(coolNum)) : "--";
+        const humidity = t.humidity != null ? esc(String(t.humidity)) + "%" : "--";
 
         card.innerHTML = `
           <div class="thermo-header">
@@ -1766,7 +1781,7 @@
             </div>
             <div class="thermo-detail">
               <div class="label">Humidity</div>
-              <div class="val">${t.humidity != null ? t.humidity + "%" : "--"}</div>
+              <div class="val">${humidity}</div>
             </div>
           </div>
           <select class="mode-select" onchange="setHvacMode(${t.id}, this.value)">
