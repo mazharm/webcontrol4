@@ -9,6 +9,7 @@ const { execSync } = require("child_process");
 const path = require("path");
 const dgram = require("dgram");
 const oauth = require("./oauth");
+const { isPrivateOrLocalHost, requestText } = require("./http-client");
 
 // ---------------------------------------------------------------------------
 // Data directory (settings + any future persistence)
@@ -192,59 +193,20 @@ if (oauth.isConfigured()) {
 // Helpers – outbound HTTPS requests to Control4 cloud & local director
 // ---------------------------------------------------------------------------
 
-function isPrivateIp(hostname) {
-  // Allow connecting without TLS verification only for private/local IPs
-  const parts = hostname.split(".");
-  if (parts.length !== 4 || parts.some((p) => isNaN(p) || p < 0 || p > 255)) return false;
-  const [a, b] = parts.map(Number);
-  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a === 127;
-}
-
 function request(url, options = {}, _redirectCount = 0) {
   return new Promise((resolve, reject) => {
     if (_redirectCount > 5) {
       return reject(new Error("Too many redirects"));
     }
-    const parsed = new URL(url);
-    const lib = parsed.protocol === "https:" ? https : http;
-    const bodyBuf = options.body ? Buffer.from(options.body) : null;
-    const headers = { ...options.headers };
-    if (bodyBuf) {
-      headers["Content-Length"] = bodyBuf.length;
-    }
-    const timeout = options.timeout || 30000;
-    // Only skip TLS verification for private/local IPs (director self-signed certs)
-    const skipTlsVerify = isPrivateIp(parsed.hostname);
-    const req = lib.request(
-      url,
-      {
-        method: options.method || "GET",
-        headers,
-        rejectUnauthorized: !skipTlsVerify,
-        timeout,
-      },
-      (res) => {
-        // Follow redirects
-        if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
-          const redirectUrl = new URL(res.headers.location, url).href;
-          res.resume(); // drain the response
-          return resolve(request(redirectUrl, options, _redirectCount + 1));
+    requestText(url, options, _redirectCount)
+      .then(({ statusCode, body }) => {
+        if (statusCode >= 400) {
+          reject(new Error(`HTTP ${statusCode}: ${body}`));
+        } else {
+          resolve(body);
         }
-        let body = "";
-        res.on("data", (chunk) => (body += chunk));
-        res.on("end", () => {
-          if (res.statusCode >= 400) {
-            reject(new Error(`HTTP ${res.statusCode}: ${body}`));
-          } else {
-            resolve(body);
-          }
-        });
-      }
-    );
-    req.on("timeout", () => { req.destroy(new Error("Request timed out")); });
-    req.on("error", reject);
-    if (bodyBuf) req.write(bodyBuf);
-    req.end();
+      })
+      .catch(reject);
   });
 }
 
@@ -590,9 +552,8 @@ app.post("/api/auth/director-token", async (req, res) => {
 
 function isValidDirectorIp(ip) {
   if (ip === "mock") return true;
-  // Only allow valid IPv4 addresses to prevent SSRF
-  const parts = ip.split(".");
-  return parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) >= 0 && Number(p) <= 255);
+  // Only allow local/private controller IPs to prevent SSRF to arbitrary hosts
+  return isPrivateOrLocalHost(ip);
 }
 
 app.get("/api/director/{*path}", async (req, res) => {

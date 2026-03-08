@@ -47,6 +47,26 @@ function isEmailAllowed(email) {
   return ALLOWED_EMAILS.includes(email.toLowerCase());
 }
 
+function isValidRedirectUri(redirectUri) {
+  try {
+    const parsed = new URL(redirectUri);
+    if (!["http:", "https:"].includes(parsed.protocol)) return false;
+    if (parsed.hash) return false;
+
+    const hostname = parsed.hostname.toLowerCase();
+    if (parsed.protocol === "https:") return true;
+
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function clientAllowsRedirectUri(client, redirectUri) {
+  if (!client || !redirectUri || !Array.isArray(client.redirectUris)) return false;
+  return client.redirectUris.includes(redirectUri) && isValidRedirectUri(redirectUri);
+}
+
 // ---------------------------------------------------------------------------
 // Google OAuth helpers
 // ---------------------------------------------------------------------------
@@ -170,11 +190,15 @@ function validateAccessToken(token) {
 // ---------------------------------------------------------------------------
 
 function registerClient(metadata) {
+  const redirectUris = Array.isArray(metadata.redirect_uris)
+    ? metadata.redirect_uris.filter((uri) => typeof uri === "string" && isValidRedirectUri(uri))
+    : [];
+
   const clientId = randomId();
   const clientSecret = randomId();
   registeredClients.set(clientId, {
     clientSecret,
-    redirectUris: metadata.redirect_uris || [],
+    redirectUris,
     clientName: metadata.client_name || "Unknown",
     grantTypes: metadata.grant_types || ["authorization_code"],
     responseTypes: metadata.response_types || ["code"],
@@ -183,7 +207,7 @@ function registerClient(metadata) {
     client_id: clientId,
     client_secret: clientSecret,
     client_name: metadata.client_name,
-    redirect_uris: metadata.redirect_uris,
+    redirect_uris: redirectUris,
     grant_types: metadata.grant_types || ["authorization_code"],
     response_types: metadata.response_types || ["code"],
     token_endpoint_auth_method: "client_secret_post",
@@ -303,6 +327,8 @@ module.exports = {
   // MCP OAuth AS
   registerClient,
   getClient,
+  isValidRedirectUri,
+  clientAllowsRedirectUri,
   createPendingAuth,
   getPendingAuth,
   createAuthCode,

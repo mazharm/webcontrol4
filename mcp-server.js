@@ -4,6 +4,7 @@
 
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
 const { z } = require("zod");
+const { requestText } = require("./http-client");
 
 /**
  * Creates a configured MCP server with all 13 smart-home tools.
@@ -37,17 +38,19 @@ function createMcpServer(config) {
       }
     }
 
-    const res = await fetch(`${baseUrl}${path}`, {
+    const body = options.body ? JSON.stringify(options.body) : undefined;
+    const response = await requestText(`${baseUrl}${path}`, {
       method: options.method || "GET",
       headers,
-      body: options.body ? JSON.stringify(options.body) : undefined,
+      body,
     });
-    const text = await res.text();
+    if (response.statusCode >= 400) {
+      throw new Error(`HTTP ${response.statusCode}: ${response.body}`);
+    }
     try {
-      return JSON.parse(text);
+      return JSON.parse(response.body);
     } catch {
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
-      return { raw: text };
+      return { raw: response.body };
     }
   }
 

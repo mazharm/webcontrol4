@@ -10,13 +10,11 @@
 //          MCP_BASE_URL       (default: auto-detect from .env)
 //          GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET (for OAuth)
 
-// Allow self-signed certificates when connecting to local Express server
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-
 require("dotenv").config();
 
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
 const { createMcpServer } = require("./mcp-server.js");
+const { requestJson } = require("./http-client");
 const oauth = require("./oauth");
 
 const BASE_URL = process.env.MCP_BASE_URL || (
@@ -50,20 +48,18 @@ async function main() {
       headers["Cookie"] = authHeader.replace("Cookie: ", "");
     }
 
-    const loginRes = await fetch(`${BASE_URL}/api/auth/login`, {
+    const loginData = await requestJson(`${BASE_URL}/api/auth/login`, {
       method: "POST",
       headers,
       body: JSON.stringify({ username: "demo@demo.com", password: "demo" }),
     });
-    const loginData = await loginRes.json();
     const accountToken = loginData.accountToken;
 
-    const tokenRes = await fetch(`${BASE_URL}/api/auth/director-token`, {
+    const tokenData = await requestJson(`${BASE_URL}/api/auth/director-token`, {
       method: "POST",
       headers,
       body: JSON.stringify({ accountToken, controllerCommonName: "mock-controller" }),
     });
-    const tokenData = await tokenRes.json();
     directorToken = tokenData.directorToken;
   }
 

@@ -12,14 +12,12 @@
 //          MCP_BASE_URL       (default: "http://localhost:3000")
 //          GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET (for OAuth)
 
-// Allow self-signed certificates when connecting to local Express server
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-
 require("dotenv").config();
 
 const express = require("express");
 const { StreamableHTTPServerTransport } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const { createMcpServer } = require("./mcp-server.js");
+const { requestJson } = require("./http-client");
 const oauth = require("./oauth");
 
 const MCP_PORT = parseInt(process.env.MCP_HTTP_PORT, 10) || 3001;
@@ -51,20 +49,18 @@ async function main() {
       headers["Cookie"] = authHeader.replace("Cookie: ", "");
     }
 
-    const loginRes = await fetch(`${BASE_URL}/api/auth/login`, {
+    const loginData = await requestJson(`${BASE_URL}/api/auth/login`, {
       method: "POST",
       headers,
       body: JSON.stringify({ username: "demo@demo.com", password: "demo" }),
     });
-    const loginData = await loginRes.json();
     const accountToken = loginData.accountToken;
 
-    const tokenRes = await fetch(`${BASE_URL}/api/auth/director-token`, {
+    const tokenData = await requestJson(`${BASE_URL}/api/auth/director-token`, {
       method: "POST",
       headers,
       body: JSON.stringify({ accountToken, controllerCommonName: "mock-controller" }),
     });
-    const tokenData = await tokenRes.json();
     directorToken = tokenData.directorToken;
   }
 
@@ -110,6 +106,9 @@ async function main() {
       if (!metadata.redirect_uris || !Array.isArray(metadata.redirect_uris) || metadata.redirect_uris.length === 0) {
         return res.status(400).json({ error: "redirect_uris required" });
       }
+      if (!metadata.redirect_uris.every((uri) => typeof uri === "string" && oauth.isValidRedirectUri(uri))) {
+        return res.status(400).json({ error: "redirect_uris must be https or loopback http URLs" });
+      }
       const client = oauth.registerClient(metadata);
       res.status(201).json(client);
     });
@@ -125,6 +124,12 @@ async function main() {
       const client = oauth.getClient(client_id);
       if (!client) {
         return res.status(400).send("Unknown client_id. Register first via POST /register.");
+      }
+      if (!oauth.clientAllowsRedirectUri(client, redirect_uri)) {
+        return res.status(400).send("redirect_uri must exactly match a registered redirect URI.");
+      }
+      if (!code_challenge || (code_challenge_method && code_challenge_method !== "S256")) {
+        return res.status(400).send("PKCE with S256 code_challenge is required.");
       }
 
       // Store pending auth state, then redirect to Google
