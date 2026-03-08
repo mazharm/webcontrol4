@@ -8,7 +8,10 @@ function isPrivateOrLocalHost(hostname) {
   if (normalized === "localhost" || normalized === "::1") return true;
 
   const parts = normalized.split(".");
-  if (parts.length !== 4 || parts.some((p) => !/^\d+$/.test(p) || Number(p) > 255)) {
+  if (
+    parts.length !== 4 ||
+    parts.some((p) => !/^\d+$/.test(p) || (p.length > 1 && p.startsWith("0")) || Number(p) > 255)
+  ) {
     return false;
   }
 

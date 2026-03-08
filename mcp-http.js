@@ -27,6 +27,7 @@ const BASE_URL = process.env.MCP_BASE_URL || (
     : `http://localhost:${process.env.PORT || 3000}`
 );
 const CONTROLLER_IP = process.env.MCP_CONTROLLER_IP || "mock";
+const PKCE_S256_RE = /^[A-Za-z0-9\-_]{43,128}$/;
 
 async function main() {
   let directorToken = process.env.MCP_DIRECTOR_TOKEN || "";
@@ -128,7 +129,11 @@ async function main() {
       if (!oauth.clientAllowsRedirectUri(client, redirect_uri)) {
         return res.status(400).send("redirect_uri must exactly match a registered redirect URI.");
       }
-      if (!code_challenge || code_challenge_method !== "S256") {
+      if (
+        !code_challenge ||
+        code_challenge_method !== "S256" ||
+        !PKCE_S256_RE.test(String(code_challenge))
+      ) {
         return res.status(400).send("PKCE with S256 code_challenge is required.");
       }
 

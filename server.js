@@ -138,6 +138,7 @@ if (oauth.isConfigured()) {
     if (!value.startsWith("/")) return "/";
     if (value.startsWith("//") || value.includes("\\")) return "/";
     if (/%2f|%5c/i.test(value)) return "/";
+    if (value.includes("?") || value.includes("#")) return "/";
     return value;
   }
 
