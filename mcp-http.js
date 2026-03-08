@@ -114,7 +114,7 @@ async function main() {
         const client = oauth.registerClient(metadata);
         res.status(201).json(client);
       } catch (err) {
-        res.status(503).json({ error: err.message });
+        res.status(500).json({ error: err.message });
       }
     });
 
@@ -123,22 +123,22 @@ async function main() {
       const { client_id, redirect_uri, state, code_challenge, code_challenge_method, response_type } = req.query;
 
       if (response_type !== "code") {
-        return res.status(400).send("Unsupported response_type. Use 'code'.");
+        return res.status(400).json({ error: "Unsupported response_type. Use 'code'." });
       }
 
       const client = oauth.getClient(client_id);
       if (!client) {
-        return res.status(400).send("Unknown client_id. Register first via POST /register.");
+        return res.status(400).json({ error: "Unknown client_id. Register first via POST /register." });
       }
       if (!oauth.clientAllowsRedirectUri(client, redirect_uri)) {
-        return res.status(400).send("redirect_uri must exactly match a registered redirect URI.");
+        return res.status(400).json({ error: "redirect_uri must exactly match a registered redirect URI." });
       }
       if (
         !code_challenge ||
         code_challenge_method !== "S256" ||
         !PKCE_S256_RE.test(String(code_challenge))
       ) {
-        return res.status(400).send("PKCE with S256 code_challenge is required.");
+        return res.status(400).json({ error: "PKCE with S256 code_challenge is required." });
       }
 
       // Store pending auth state, then redirect to Google
@@ -162,13 +162,13 @@ async function main() {
     app.get("/auth/google/callback", async (req, res) => {
       try {
         const { code, state } = req.query;
-        if (!code) return res.status(400).send("Missing authorization code");
+        if (!code) return res.status(400).json({ error: "Missing authorization code" });
 
         // Extract pending auth ID from state
         const pendingId = (state || "").replace(/^mcp:/, "");
         const pending = oauth.getPendingAuth(pendingId);
         if (!pending) {
-          return res.status(400).send("Invalid or expired authorization state");
+          return res.status(400).json({ error: "Invalid or expired authorization state" });
         }
 
         const proto = req.headers["x-forwarded-proto"] || req.protocol;
@@ -179,7 +179,7 @@ async function main() {
         const user = await oauth.googleUserInfo(tokens.access_token);
 
         if (!oauth.isEmailAllowed(user.email)) {
-          return res.status(403).send("Email not authorized. Check ALLOWED_EMAILS.");
+          return res.status(403).json({ error: "Email not authorized. Check ALLOWED_EMAILS." });
         }
 
         // Create auth code for the MCP client
@@ -200,7 +200,7 @@ async function main() {
         res.redirect(redirectUrl.toString());
       } catch (err) {
         console.error("MCP OAuth callback error:", err);
-        res.status(500).send("Authentication failed. Please try again.");
+        res.status(500).json({ error: "Authentication failed. Please try again." });
       }
     });
 
@@ -214,7 +214,7 @@ async function main() {
 
       // Validate client credentials
       const client = oauth.getClient(client_id);
-      if (!client || client.clientSecret !== client_secret) {
+      if (!client || !oauth.verifyClientSecret(client, client_secret)) {
         return res.status(401).json({ error: "invalid_client" });
       }
 

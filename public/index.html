@@ -1670,11 +1670,11 @@
       const roomRenames = getRoomRenames();
 
       // Build floor → room → lights hierarchy
-      const floorMap = {};
+      const floorMap = Object.create(null);
       for (const light of state.lights) {
         const floor = getFloorForLight(light);
         const room = light.roomName || "Unknown";
-        if (!floorMap[floor]) floorMap[floor] = {};
+        if (!floorMap[floor]) floorMap[floor] = Object.create(null);
         if (!floorMap[floor][room]) floorMap[floor][room] = [];
         floorMap[floor][room].push(light);
       }
@@ -2992,7 +2992,7 @@
       }
 
       const wholeHouse = [];
-      const floorMap = {};
+      const floorMap = Object.create(null);
 
       for (const scene of state.scenes) {
         if (isWholeHouseScene(scene)) {
@@ -3000,7 +3000,7 @@
         } else {
           const floor = getSceneFloor(scene);
           const room = scene.roomName || "Unknown";
-          if (!floorMap[floor]) floorMap[floor] = {};
+          if (!floorMap[floor]) floorMap[floor] = Object.create(null);
           if (!floorMap[floor][room]) floorMap[floor][room] = [];
           floorMap[floor][room].push(scene);
         }

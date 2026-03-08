@@ -22,7 +22,9 @@ const DATA_DIR = path.join(__dirname, "data");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
 if (!fs.existsSync(DATA_DIR)) {
-  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (err) {
+    console.error("Failed to create data directory:", err.message);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +84,7 @@ const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 let lastScheduleCheck = "";  // "YYYY-MM-DD HH:MM" to avoid double-firing
 
 function startScheduler() {
-  setInterval(() => {
+  const schedulerInterval = setInterval(() => {
     const now = new Date();
     const minuteKey = now.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:MM"
     if (minuteKey === lastScheduleCheck) return;
@@ -103,6 +105,7 @@ function startScheduler() {
       });
     }
   }, 15_000); // check every 15 seconds for responsive scheduling
+  schedulerInterval.unref();
 }
 
 async function executeRoutineSteps(routine) {
@@ -177,7 +180,7 @@ async function executeScheduledCommand(deviceId, command, tParams) {
 // ---------------------------------------------------------------------------
 
 const MAX_HISTORY_POINTS = 8640; // 24 h × 3600 s / 10 s
-const historyStore = {}; // key -> array of timestamped data points
+const historyStore = Object.create(null); // key -> array of timestamped data points
 
 function addHistoryPoint(key, point) {
   if (!historyStore[key]) historyStore[key] = [];
@@ -229,6 +232,10 @@ app.use((_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Referrer-Policy", "same-origin");
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://accounts.google.com"
+  );
   next();
 });
 
@@ -350,7 +357,7 @@ const C4_AUTH_URL = "https://apis.control4.com/authentication/v1/rest";
 const C4_CONTROLLER_AUTH_URL =
   "https://apis.control4.com/authentication/v1/rest/authorization";
 const C4_ACCOUNTS_URL = "https://apis.control4.com/account/v3/rest/accounts";
-const APPLICATION_KEY = "78f6791373d61bea49fdb9fb8897f1f3af193f11";
+const APPLICATION_KEY = process.env.C4_APPLICATION_KEY || "78f6791373d61bea49fdb9fb8897f1f3af193f11";
 
 // ---------------------------------------------------------------------------
 // Mock controller state (for demo mode when ip=mock)
@@ -484,11 +491,14 @@ function handleMockRequest(req, res, apiPath) {
       if (thermo) {
         const events = [];
         if (command === "SET_MODE_HVAC") {
-          thermo.hvacMode = tParams.MODE || thermo.hvacMode;
-          events.push({ varName: "HVAC_MODE", value: thermo.hvacMode });
-          // HVAC_STATE follows mode
-          const hvacState = thermo.hvacMode === "Off" ? "Off" : "Running";
-          events.push({ varName: "HVAC_STATE", value: hvacState });
+          const allowedModes = ["Off", "Heat", "Cool", "Auto"];
+          if (allowedModes.includes(tParams.MODE)) {
+            thermo.hvacMode = tParams.MODE;
+            events.push({ varName: "HVAC_MODE", value: thermo.hvacMode });
+            // HVAC_STATE follows mode
+            const hvacState = thermo.hvacMode === "Off" ? "Off" : "Running";
+            events.push({ varName: "HVAC_STATE", value: hvacState });
+          }
         }
         if (command === "SET_SETPOINT_HEAT") {
           thermo.heatF = clampNumber(tParams?.FAHRENHEIT, 32, 120, thermo.heatF);
@@ -518,17 +528,21 @@ function handleMockRequest(req, res, apiPath) {
     if (itemMatch) {
       const id = parseInt(itemMatch[1], 10);
       const item = [...mockState.lights, ...mockState.thermostats, ...mockState.scenes].find(i => i.id === id);
-      if (item && req.body.name) item.name = req.body.name;
+      if (item && req.body.name) {
+        const name = String(req.body.name).slice(0, 200);
+        item.name = name;
+      }
       return res.json({ ok: true });
     }
     const roomMatch = apiPath.match(/^\/api\/v1\/rooms\/(\d+)$/);
     if (roomMatch) {
       const roomId = parseInt(roomMatch[1], 10);
       const newName = req.body.name;
-      if (newName) {
+      if (newName && typeof newName === "string") {
+        const safeName = newName.slice(0, 200);
         for (const arr of [mockState.lights, mockState.thermostats, mockState.scenes]) {
           for (const item of arr) {
-            if (item.roomParentId === roomId) item.roomName = newName;
+            if (item.roomParentId === roomId) item.roomName = safeName;
           }
         }
       }
@@ -580,7 +594,10 @@ app.get("/api/discover", (_req, res) => {
 
   sock.on("message", (msg, rinfo) => {
     const text = msg.toString();
-    const entry = { ip: rinfo.address, port: rinfo.port, raw: text };
+    const entry = Object.create(null);
+    entry.ip = rinfo.address;
+    entry.port = rinfo.port;
+    entry.raw = text;
     // Parse SDDP headers
     for (const line of text.split("\r\n")) {
       const idx = line.indexOf(":");
@@ -650,7 +667,8 @@ app.post("/api/auth/login", async (req, res) => {
     if (!token) throw new Error("No token in response");
     res.json({ accountToken: token });
   } catch (err) {
-    res.status(401).json({ error: err.message });
+    console.error("Login error:", err.message);
+    res.status(401).json({ error: "Authentication failed" });
   }
 });
 
@@ -674,7 +692,8 @@ app.post("/api/auth/controllers", async (req, res) => {
     const json = JSON.parse(data);
     res.json(json.account || json);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Controller list error:", err.message);
+    res.status(500).json({ error: "Failed to fetch controllers" });
   }
 });
 
@@ -714,7 +733,8 @@ app.post("/api/auth/director-token", async (req, res) => {
     if (!token) throw new Error("No director token in response");
     res.json({ directorToken: token, validSeconds });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Director token error:", err.message);
+    res.status(500).json({ error: "Failed to get director token" });
   }
 });
 
@@ -755,7 +775,8 @@ app.get("/api/director/{*path}", async (req, res) => {
       res.json({ ok: true, raw: data });
     }
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    console.error("Director GET proxy error:", err.message);
+    res.status(502).json({ error: "Director request failed" });
   }
 });
 
@@ -795,7 +816,8 @@ app.post("/api/director/{*path}", async (req, res) => {
       res.json({ ok: true, raw: data });
     }
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    console.error("Director POST proxy error:", err.message);
+    res.status(502).json({ error: "Director request failed" });
   }
 });
 
@@ -834,7 +856,8 @@ app.put("/api/director/{*path}", async (req, res) => {
       res.json({ ok: true, raw: data });
     }
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    console.error("Director PUT proxy error:", err.message);
+    res.status(502).json({ error: "Director request failed" });
   }
 });
 
@@ -936,7 +959,13 @@ app.get("/api/settings", (_req, res) => {
 
 app.post("/api/settings", (req, res) => {
   const { anthropicKey, anthropicModel } = req.body;
-  if (anthropicKey !== undefined) appSettings.anthropicKey = String(anthropicKey);
+  if (anthropicKey !== undefined) {
+    const keyStr = String(anthropicKey).trim();
+    if (keyStr && keyStr.length > 256) {
+      return res.status(400).json({ error: "anthropicKey is too long" });
+    }
+    appSettings.anthropicKey = keyStr;
+  }
   if (anthropicModel) {
     const validModel = ANTHROPIC_MODELS.find((m) => m.id === String(anthropicModel));
     if (!validModel) {
@@ -975,6 +1004,32 @@ app.post("/api/routines", (req, res) => {
   }
   if (routine.steps.length > ROUTINE_STEPS_MAX) {
     return res.status(400).json({ error: `routine may have at most ${ROUTINE_STEPS_MAX} steps` });
+  }
+  // Validate individual step structure
+  const validStepTypes = ["light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"];
+  for (const step of routine.steps) {
+    if (!step || typeof step !== "object") {
+      return res.status(400).json({ error: "each step must be an object" });
+    }
+    if (!validStepTypes.includes(step.type)) {
+      return res.status(400).json({ error: "invalid step type" });
+    }
+    if (typeof step.deviceId !== "number" || !Number.isFinite(step.deviceId)) {
+      return res.status(400).json({ error: "each step must have a numeric deviceId" });
+    }
+    if (step.type === "light_level" && (typeof step.level !== "number" || step.level < 0 || step.level > 100)) {
+      return res.status(400).json({ error: "light_level step requires level 0-100" });
+    }
+    if (step.type === "light_toggle" && typeof step.on !== "boolean") {
+      return res.status(400).json({ error: "light_toggle step requires boolean 'on'" });
+    }
+    if (step.type === "hvac_mode" && !["Off", "Heat", "Cool", "Auto"].includes(step.mode)) {
+      return res.status(400).json({ error: "hvac_mode step requires mode: Off, Heat, Cool, or Auto" });
+    }
+    if ((step.type === "heat_setpoint" || step.type === "cool_setpoint") &&
+        (typeof step.value !== "number" || step.value < 32 || step.value > 120)) {
+      return res.status(400).json({ error: "setpoint step requires value between 32 and 120" });
+    }
   }
   // Validate optional schedule
   if (routine.schedule) {
@@ -1528,7 +1583,12 @@ function startServer() {
       const redirectApp = express();
       redirectApp.use((req, res) => {
         const host = (req.headers.host || "").replace(/:\d+$/, "");
-        res.redirect(301, `https://${host}:${HTTPS_PORT}${req.url}`);
+        // Validate the path to prevent open-redirect attacks
+        let safePath = req.url;
+        if (!safePath.startsWith("/") || safePath.startsWith("//")) {
+          safePath = "/";
+        }
+        res.redirect(301, `https://${host}:${HTTPS_PORT}${safePath}`);
       });
       redirectApp.listen(PORT, () => {
         console.log(`HTTP :${PORT} redirecting to HTTPS :${HTTPS_PORT}`);

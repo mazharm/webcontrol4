@@ -93,8 +93,11 @@ function createMcpServer(config) {
           let level = 0, on = false;
           if (Array.isArray(vars)) {
             for (const v of vars) {
-              if (v.varName === "LIGHT_LEVEL") level = parseInt(v.value) || 0;
-              if (v.varName === "LIGHT_STATE") on = v.value === "1" || v.value === 1;
+              if (v.varName === "LIGHT_LEVEL") {
+                const parsed = parseInt(v.value, 10);
+                level = Number.isNaN(parsed) ? 0 : parsed;
+              }
+              if (v.varName === "LIGHT_STATE") on = String(v.value) === "1";
             }
           }
           return {
@@ -105,7 +108,8 @@ function createMcpServer(config) {
             level,
             on,
           };
-        } catch {
+        } catch (err) {
+          console.warn(`Failed to fetch variables for light ${light.id}:`, err.message);
           return { id: light.id, name: light.name, room: light.roomName || "", floor: light.floorName || "", level: 0, on: false };
         }
       })
@@ -127,16 +131,18 @@ function createMcpServer(config) {
           );
           if (Array.isArray(vars)) {
             for (const v of vars) {
-              if (v.varName === "TEMPERATURE_F") info.tempF = parseFloat(v.value);
-              if (v.varName === "HEAT_SETPOINT_F") info.heatF = parseFloat(v.value);
-              if (v.varName === "COOL_SETPOINT_F") info.coolF = parseFloat(v.value);
+              if (v.varName === "TEMPERATURE_F") { const n = parseFloat(v.value); if (Number.isFinite(n)) info.tempF = n; }
+              if (v.varName === "HEAT_SETPOINT_F") { const n = parseFloat(v.value); if (Number.isFinite(n)) info.heatF = n; }
+              if (v.varName === "COOL_SETPOINT_F") { const n = parseFloat(v.value); if (Number.isFinite(n)) info.coolF = n; }
               if (v.varName === "HVAC_MODE") info.hvacMode = v.value;
-              if (v.varName === "HUMIDITY") info.humidity = parseFloat(v.value);
+              if (v.varName === "HUMIDITY") { const n = parseFloat(v.value); if (Number.isFinite(n)) info.humidity = n; }
               if (v.varName === "HVAC_STATE") info.hvacState = v.value;
               if (v.varName === "FAN_MODE") info.fanMode = v.value;
             }
           }
-        } catch {}
+        } catch (err) {
+          console.warn(`Failed to fetch variables for thermostat ${t.id}:`, err.message);
+        }
         return info;
       })
     );
@@ -216,7 +222,7 @@ function createMcpServer(config) {
     "Set heat setpoint temperature (Fahrenheit)",
     {
       deviceId: z.number().describe("Thermostat device ID"),
-      temperature: z.number().describe("Heat setpoint in Fahrenheit"),
+      temperature: z.number().min(32).max(120).describe("Heat setpoint in Fahrenheit (32-120)"),
     },
     async ({ deviceId, temperature }) => {
       await directorPost(`api/v1/items/${deviceId}/commands`, "SET_SETPOINT_HEAT", { FAHRENHEIT: temperature });
@@ -229,7 +235,7 @@ function createMcpServer(config) {
     "Set cool setpoint temperature (Fahrenheit)",
     {
       deviceId: z.number().describe("Thermostat device ID"),
-      temperature: z.number().describe("Cool setpoint in Fahrenheit"),
+      temperature: z.number().min(32).max(120).describe("Cool setpoint in Fahrenheit (32-120)"),
     },
     async ({ deviceId, temperature }) => {
       await directorPost(`api/v1/items/${deviceId}/commands`, "SET_SETPOINT_COOL", { FAHRENHEIT: temperature });
@@ -245,7 +251,11 @@ function createMcpServer(config) {
       try {
         await directorPost(`api/v1/items/${sceneId}/commands`, "PRESS", {});
       } catch {
-        await directorPost(`api/v1/items/${sceneId}/commands`, "ACTIVATE", {});
+        try {
+          await directorPost(`api/v1/items/${sceneId}/commands`, "ACTIVATE", {});
+        } catch (err) {
+          return { content: [{ type: "text", text: `Failed to activate scene ${sceneId}: ${err.message}` }], isError: true };
+        }
       }
       return { content: [{ type: "text", text: `Scene ${sceneId} activated` }] };
     }
