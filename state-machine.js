@@ -86,8 +86,9 @@ class StateMachine extends EventEmitter {
         const items = await this._apiFn(`api/v1/categories/${typeInfo.category}`);
         if (!Array.isArray(items)) continue;
 
+        const proxyOnlyTypes = ["light", "thermostat"];
         for (const item of items) {
-          if (item.type !== 7) continue; // only proxy (real) devices
+          if (proxyOnlyTypes.includes(typeName) && item.type !== 7) continue; // only proxy (real) devices for lights/thermostats
 
           this._devices.set(item.id, {
             itemId: item.id,
@@ -205,7 +206,7 @@ class StateMachine extends EventEmitter {
     };
     this.emit("stateChange", change);
     for (const cb of this._changeListeners) {
-      try { cb(change); } catch {}
+      try { cb(change); } catch { /* intentional: isolate listener errors */ }
     }
   }
 
