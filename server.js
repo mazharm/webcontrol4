@@ -133,12 +133,17 @@ app.get("/auth/status", (req, res) => {
 if (oauth.isConfigured()) {
   console.log("Google OAuth enabled");
 
+  function sanitizeNextPath(next) {
+    const value = String(next || "/");
+    return /^\/[^\/\\]/.test(value) || value === "/" ? value : "/";
+  }
+
   // --- Google OAuth login ---
   app.get("/auth/google", (req, res) => {
     const proto = req.headers["x-forwarded-proto"] || req.protocol;
     const host = req.headers.host;
     const callbackUrl = `${proto}://${host}/auth/google/callback`;
-    const state = `web:${req.query.next || "/"}`;
+    const state = `web:${sanitizeNextPath(req.query.next)}`;
     res.redirect(oauth.googleAuthUrl(callbackUrl, state));
   });
 
@@ -163,9 +168,7 @@ if (oauth.isConfigured()) {
       const isSecure = proto === "https";
       oauth.setSessionCookie(res, sessionId, isSecure);
 
-      let next = (state || "").replace(/^web:/, "") || "/";
-      // Prevent open redirect — only allow relative paths
-      if (!/^\/[^\/\\]/.test(next) && next !== "/") next = "/";
+      const next = sanitizeNextPath((state || "").replace(/^web:/, "") || "/");
       res.redirect(next);
     } catch (err) {
       console.error("Google OAuth callback error:", err);
@@ -208,6 +211,12 @@ function request(url, options = {}, _redirectCount = 0) {
       })
       .catch(reject);
   });
+}
+
+function clampNumber(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, num));
 }
 
 const C4_AUTH_URL = "https://apis.control4.com/authentication/v1/rest";
@@ -328,7 +337,7 @@ function handleMockRequest(req, res, apiPath) {
       const light = mockState.lights.find(l => l.id === id);
       if (light) {
         if (command === "SET_LEVEL") {
-          light.level = parseInt(tParams.LEVEL, 10) || 0;
+          light.level = clampNumber(tParams?.LEVEL, 0, 100, 0);
           light.on = light.level > 0;
         }
         return res.json({ ok: true });
@@ -338,8 +347,8 @@ function handleMockRequest(req, res, apiPath) {
       const thermo = mockState.thermostats.find(t => t.id === id);
       if (thermo) {
         if (command === "SET_MODE_HVAC") thermo.hvacMode = tParams.MODE || thermo.hvacMode;
-        if (command === "SET_SETPOINT_HEAT") thermo.heatF = tParams.FAHRENHEIT != null ? parseFloat(tParams.FAHRENHEIT) : thermo.heatF;
-        if (command === "SET_SETPOINT_COOL") thermo.coolF = tParams.FAHRENHEIT != null ? parseFloat(tParams.FAHRENHEIT) : thermo.coolF;
+        if (command === "SET_SETPOINT_HEAT") thermo.heatF = clampNumber(tParams?.FAHRENHEIT, 32, 120, thermo.heatF);
+        if (command === "SET_SETPOINT_COOL") thermo.coolF = clampNumber(tParams?.FAHRENHEIT, 32, 120, thermo.coolF);
         return res.json({ ok: true });
       }
 
