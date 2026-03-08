@@ -1063,34 +1063,32 @@
     }
 
     function directorGet(apiPath) {
-      const params = new URLSearchParams({
-        ip: state.controllerIP,
-        token: state.directorToken,
+      return api(`/api/director/${apiPath}`, {
+        headers: {
+          "X-Director-IP": state.controllerIP,
+          "X-Director-Token": state.directorToken,
+        },
       });
-      const sep = apiPath.includes("?") ? "&" : "?";
-      return api(`/api/director/${apiPath}${sep}${params}`);
     }
 
     function directorPost(apiPath, command, tParams = {}) {
-      const params = new URLSearchParams({
-        ip: state.controllerIP,
-        token: state.directorToken,
-      });
-      const sep = apiPath.includes("?") ? "&" : "?";
-      return api(`/api/director/${apiPath}${sep}${params}`, {
+      return api(`/api/director/${apiPath}`, {
         method: "POST",
+        headers: {
+          "X-Director-IP": state.controllerIP,
+          "X-Director-Token": state.directorToken,
+        },
         body: { async: true, command, tParams },
       });
     }
 
     function directorPut(apiPath, body = {}) {
-      const params = new URLSearchParams({
-        ip: state.controllerIP,
-        token: state.directorToken,
-      });
-      const sep = apiPath.includes("?") ? "&" : "?";
-      return api(`/api/director/${apiPath}${sep}${params}`, {
+      return api(`/api/director/${apiPath}`, {
         method: "PUT",
+        headers: {
+          "X-Director-IP": state.controllerIP,
+          "X-Director-Token": state.directorToken,
+        },
         body,
       });
     }
@@ -1307,6 +1305,11 @@
     // Server-Sent Events (SSE) for real-time updates
     // -----------------------------------------------------------------------
 
+    window.addEventListener("beforeunload", () => {
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+    });
+
     function connectSSE() {
       if (eventSource) eventSource.close();
       eventSource = new EventSource("/api/events");
@@ -1317,7 +1320,7 @@
           if (data.type === "stateChange") {
             applyStateChange(data);
           }
-        } catch {}
+        } catch (err) { console.warn("[sse]", err.message); }
       };
 
       eventSource.onopen = () => {
@@ -1397,7 +1400,7 @@
       try {
         await Promise.all([refreshLightState(), refreshThermostatState()]);
         maybeRecordHistory();
-      } catch {}
+      } catch (err) { console.warn("[refresh]", err.message); }
     }
 
     async function refreshLightState() {
@@ -1414,7 +1417,7 @@
                 if (v.varName === "LIGHT_STATE") light.on = v.value === "1" || v.value === 1;
               }
             }
-          } catch {}
+          } catch (err) { console.warn("[refresh] light", light.id, err.message); }
         })
       );
       renderLights();
@@ -1444,7 +1447,7 @@
                 }
               }
             }
-          } catch {}
+          } catch (err) { console.warn("[refresh] thermo", thermo.id, err.message); }
         })
       );
       renderThermostats();
@@ -2506,7 +2509,8 @@
 
     async function loadLightHistory() {
       const floor   = document.getElementById("hist-floor-select").value;
-      const lightId = document.getElementById("hist-light-select").value;
+      const lightIdRaw = document.getElementById("hist-light-select").value;
+      const lightId = lightIdRaw ? parseInt(lightIdRaw, 10) : null;
       const msgEl   = document.getElementById("hist-lights-msg");
       const wrap    = document.getElementById("chart-light-wrap");
 
@@ -2517,11 +2521,11 @@
       let labels = [], datasets = [];
 
       if (lightId) {
-        const data = await api(`/api/history?type=light&id=${lightId}`).catch(() => []);
+        const data = await api(`/api/history?type=light&id=${encodeURIComponent(lightId)}`).catch(() => []);
         if (data.length) {
           labels   = data.map((p) => formatTs(p.ts));
           datasets = [{
-            label: getLightDisplayName(state.lights.find((l) => l.id == lightId)) || "Light",
+            label: getLightDisplayName(state.lights.find((l) => l.id === lightId)) || "Light",
             data: data.map((p) => p.level),
             borderColor: "#f59e0b",
             backgroundColor: "rgba(245,158,11,0.1)",

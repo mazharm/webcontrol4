@@ -166,7 +166,7 @@ class TrendingEngine {
         this._db.prepare(
           "UPDATE home_mode_log SET ended_at = ?, duration_minutes = ? WHERE mode = ? AND started_at = ? AND ended_at IS NULL"
         ).run(now, duration, this._currentMode, this._currentModeStart);
-      } catch {}
+      } catch (err) { this._logger("trending-mode-update-error", err.message); }
     }
 
     // Open new mode entry
@@ -289,8 +289,8 @@ class TrendingEngine {
     return {
       mean: Math.round(mean * 100) / 100,
       stddev: Math.round(stddev * 100) / 100,
-      min: Math.min(...values),
-      max: Math.max(...values),
+      min: values.reduce((a, b) => Math.min(a, b), Infinity),
+      max: values.reduce((a, b) => Math.max(a, b), -Infinity),
       samples: n,
     };
   }
@@ -312,7 +312,8 @@ class TrendingEngine {
       const summaries = this._db.prepare("SELECT COUNT(*) as c FROM daily_summaries").get().c;
       const modes = this._db.prepare("SELECT COUNT(*) as c FROM home_mode_log").get().c;
       return { events, summaries, modes, bufferSize: this._buffer.length };
-    } catch {
+    } catch (err) {
+      this._logger("trending-stats-error", err.message);
       return { events: 0, summaries: 0, modes: 0, bufferSize: this._buffer.length };
     }
   }
@@ -327,26 +328,23 @@ class TrendingEngine {
   }
 
   _scheduleDailyRollup() {
-    const now = new Date();
-    const midnight = new Date(now);
-    midnight.setHours(24, 0, 5, 0); // 5 seconds past midnight
-    const msUntilMidnight = midnight.getTime() - now.getTime();
+    const scheduleNext = () => {
+      const now = new Date();
+      const midnight = new Date(now);
+      midnight.setHours(24, 0, 5, 0); // 5 seconds past midnight
+      const msUntilMidnight = midnight.getTime() - now.getTime();
 
-    this._rollupTimer = setTimeout(() => {
-      this._rollupDaily();
-      this._pruneOldEvents();
-
-      // Schedule recurring rollup every 24h
-      const interval = setInterval(() => {
+      this._rollupTimer = setTimeout(() => {
         this._rollupDaily();
         this._pruneOldEvents();
-      }, 24 * 3600 * 1000);
-      if (interval.unref) interval.unref();
-    }, msUntilMidnight);
+        scheduleNext(); // re-schedule based on next midnight to avoid drift
+      }, msUntilMidnight);
 
-    if (this._rollupTimer.unref) this._rollupTimer.unref();
+      if (this._rollupTimer.unref) this._rollupTimer.unref();
+      this._logger("trending-rollup-scheduled", `in ${Math.round(msUntilMidnight / 60000)}m`);
+    };
 
-    this._logger("trending-rollup-scheduled", `in ${Math.round(msUntilMidnight / 60000)}m`);
+    scheduleNext();
   }
 
   _rollupDaily() {
@@ -382,8 +380,8 @@ class TrendingEngine {
           if (events.length === 0) continue;
 
           const numericValues = events.map(e => parseFloat(e.value)).filter(v => Number.isFinite(v));
-          const minVal = numericValues.length > 0 ? Math.min(...numericValues) : null;
-          const maxVal = numericValues.length > 0 ? Math.max(...numericValues) : null;
+          const minVal = numericValues.length > 0 ? numericValues.reduce((a, b) => Math.min(a, b), Infinity) : null;
+          const maxVal = numericValues.length > 0 ? numericValues.reduce((a, b) => Math.max(a, b), -Infinity) : null;
           const avgVal = numericValues.length > 0
             ? numericValues.reduce((a, b) => a + b, 0) / numericValues.length
             : null;

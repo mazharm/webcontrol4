@@ -562,7 +562,7 @@ function emitMockDeviceEvents(itemId, events) {
   for (const { varName, value } of events) {
     try {
       stateMachine.handleDeviceEvent({ itemId, varName, value });
-    } catch {}
+    } catch (err) { console.warn("[mock] Event emit error:", err.message); }
   }
 }
 
@@ -749,9 +749,11 @@ function isValidDirectorIp(ip) {
 }
 
 app.get("/api/director/{*path}", async (req, res) => {
-  const { ip, token, ...rest } = req.query;
+  const ip = req.headers["x-director-ip"] || req.query.ip;
+  const token = req.headers["x-director-token"] || req.query.token;
+  const { ip: _ip, token: _token, ...rest } = req.query;
   if (!ip || !token) {
-    return res.status(400).json({ error: "ip and token query params required" });
+    return res.status(400).json({ error: "ip and token required" });
   }
   if (!isValidDirectorIp(ip)) {
     return res.status(400).json({ error: "invalid ip address format" });
@@ -785,9 +787,11 @@ app.get("/api/director/{*path}", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.post("/api/director/{*path}", async (req, res) => {
-  const { ip, token, ...rest } = req.query;
+  const ip = req.headers["x-director-ip"] || req.query.ip;
+  const token = req.headers["x-director-token"] || req.query.token;
+  const { ip: _ip, token: _token, ...rest } = req.query;
   if (!ip || !token) {
-    return res.status(400).json({ error: "ip and token query params required" });
+    return res.status(400).json({ error: "ip and token required" });
   }
   if (!isValidDirectorIp(ip)) {
     return res.status(400).json({ error: "invalid ip address format" });
@@ -826,9 +830,11 @@ app.post("/api/director/{*path}", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.put("/api/director/{*path}", async (req, res) => {
-  const { ip, token, ...rest } = req.query;
+  const ip = req.headers["x-director-ip"] || req.query.ip;
+  const token = req.headers["x-director-token"] || req.query.token;
+  const { ip: _ip, token: _token, ...rest } = req.query;
   if (!ip || !token) {
-    return res.status(400).json({ error: "ip and token query params required" });
+    return res.status(400).json({ error: "ip and token required" });
   }
   if (!isValidDirectorIp(ip)) {
     return res.status(400).json({ error: "invalid ip address format" });
@@ -1071,6 +1077,10 @@ app.get("/api/llm/models", (_req, res) => {
 // LLM: chat / control via Anthropic
 // ---------------------------------------------------------------------------
 
+function sanitizeForPrompt(s) {
+  return String(s || "").replace(/[\n\r]/g, " ").slice(0, 100);
+}
+
 function buildSystemPrompt(context, mode) {
   const devices  = context?.devices  || [];
   const routines = context?.routines || [];
@@ -1106,9 +1116,9 @@ function buildSystemPrompt(context, mode) {
     prompt += "\n\nAvailable devices:";
     for (const d of devices) {
       if (d.type === "light") {
-        prompt += `\n- Light "${d.name}" (id:${d.id}, floor:"${d.floor}", room:"${d.room}", ${d.on ? `ON at ${d.level}%` : "OFF"})`;
+        prompt += `\n- Light "${sanitizeForPrompt(d.name)}" (id:${d.id}, floor:"${sanitizeForPrompt(d.floor)}", room:"${sanitizeForPrompt(d.room)}", ${d.on ? `ON at ${d.level}%` : "OFF"})`;
       } else if (d.type === "thermostat") {
-        prompt += `\n- Thermostat "${d.name}" (id:${d.id}, floor:"${d.floor}", temp:${d.tempF ?? "?"}°F, heat:${d.heatF ?? "?"}°F, cool:${d.coolF ?? "?"}°F, mode:${d.hvacMode ?? "?"})`;
+        prompt += `\n- Thermostat "${sanitizeForPrompt(d.name)}" (id:${d.id}, floor:"${sanitizeForPrompt(d.floor)}", temp:${d.tempF ?? "?"}°F, heat:${d.heatF ?? "?"}°F, cool:${d.coolF ?? "?"}°F, mode:${d.hvacMode ?? "?"})`;
       }
     }
   }
@@ -1116,7 +1126,7 @@ function buildSystemPrompt(context, mode) {
   if (routines.length > 0) {
     prompt += "\n\nAvailable routines:";
     for (const r of routines) {
-      prompt += `\n- "${r.name}" (id:"${r.id}")`;
+      prompt += `\n- "${sanitizeForPrompt(r.name)}" (id:"${r.id}")`;
     }
   }
 
@@ -1179,13 +1189,17 @@ app.post("/api/llm/chat", async (req, res) => {
 
     res.json(parsed);
   } catch (err) {
-    // Try to surface a user-friendly error from the Anthropic error body
-    let errMsg = err.message;
+    // Only forward known Anthropic error types; generic message for all else
+    let errMsg = "LLM request failed";
     try {
       const bodyPart = err.message.replace(/^HTTP \d+: /, "");
       const json = JSON.parse(bodyPart);
-      if (json?.error?.message) errMsg = json.error.message;
+      const type = json?.error?.type;
+      if (type === "rate_limit_error" || type === "authentication_error" || type === "invalid_request_error") {
+        errMsg = json.error.message;
+      }
     } catch {}
+    console.error("[llm] Error:", err.message);
     res.status(500).json({ error: errMsg });
   }
 });
@@ -1207,10 +1221,13 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
   // 2. State machine — always re-create on new connection
   stateMachine = new StateMachine({
     apiFn: async (apiPath) => {
-      const params = new URLSearchParams({ ip: controllerIp, token: directorToken });
-      const sep = apiPath.includes("?") ? "&" : "?";
-      const url = `http://localhost:${PORT}/api/director/${apiPath}${sep}${params}`;
-      const resp = await requestText(url);
+      const url = `http://localhost:${PORT}/api/director/${apiPath}`;
+      const resp = await requestText(url, {
+        headers: {
+          "X-Director-IP": controllerIp,
+          "X-Director-Token": directorToken,
+        },
+      });
       if (resp.statusCode >= 400) throw new Error(`HTTP ${resp.statusCode}: ${resp.body}`);
       return JSON.parse(resp.body);
     },
@@ -1388,7 +1405,7 @@ app.post("/api/realtime/connect", async (req, res) => {
     });
   } catch (err) {
     console.error("[realtime] Init error:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Real-time initialization failed" });
   }
 });
 
@@ -1396,7 +1413,12 @@ app.post("/api/realtime/connect", async (req, res) => {
 // Real-time: SSE endpoint for browser
 // ---------------------------------------------------------------------------
 
+const MAX_SSE_CLIENTS = 50;
+
 app.get("/api/events", (req, res) => {
+  if (sseClients.length >= MAX_SSE_CLIENTS) {
+    return res.status(503).json({ error: "Too many SSE clients" });
+  }
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -1453,7 +1475,7 @@ app.get("/api/state/:itemId", (req, res) => {
 app.get("/api/trending/:itemId", (req, res) => {
   if (!trending) return res.status(503).json({ error: "Trending not initialized" });
   const itemId = parseInt(req.params.itemId, 10);
-  const hours = parseInt(req.query.hours, 10) || 24;
+  const hours = Math.min(parseInt(req.query.hours, 10) || 24, 720);
   if (!Number.isFinite(itemId)) return res.status(400).json({ error: "invalid itemId" });
   res.json(trending.getDeviceHistory(itemId, hours));
 });
@@ -1461,7 +1483,7 @@ app.get("/api/trending/:itemId", (req, res) => {
 app.get("/api/trending/:itemId/daily", (req, res) => {
   if (!trending) return res.status(503).json({ error: "Trending not initialized" });
   const itemId = parseInt(req.params.itemId, 10);
-  const days = parseInt(req.query.days, 10) || 7;
+  const days = Math.min(parseInt(req.query.days, 10) || 7, 90);
   if (!Number.isFinite(itemId)) return res.status(400).json({ error: "invalid itemId" });
   res.json(trending.getDailySummary(itemId, days));
 });
@@ -1582,7 +1604,11 @@ function startServer() {
     if (HTTP_REDIRECT) {
       const redirectApp = express();
       redirectApp.use((req, res) => {
-        const host = (req.headers.host || "").replace(/:\d+$/, "");
+        let host = (req.headers.host || "").replace(/:\d+$/, "");
+        // Validate host against hostname/IP pattern to prevent header injection
+        if (!/^[a-zA-Z0-9._-]+$/.test(host)) {
+          host = "localhost";
+        }
         // Validate the path to prevent open-redirect attacks
         let safePath = req.url;
         if (!safePath.startsWith("/") || safePath.startsWith("//")) {
@@ -1604,3 +1630,12 @@ function startServer() {
 
 startServer();
 startScheduler();
+
+function shutdown() {
+  console.log("[shutdown] Cleaning up...");
+  if (trending) trending.close();
+  if (c4ws) c4ws.disconnect();
+  process.exit(0);
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
