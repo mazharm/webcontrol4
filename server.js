@@ -462,8 +462,18 @@ app.post("/api/history/record", (req, res) => {
   }
 
   for (const [floorKey, onCount] of Object.entries(floors)) {
-    if (typeof floorKey === "string" && floorKey.length < 128) {
-      addHistoryPoint(`floor:${floorKey}`, { ts, onCount: Number(onCount) || 0 });
+    // Reject keys that could cause prototype pollution or key collisions;
+    // sanitize to keep only safe characters
+    if (
+      typeof floorKey === "string" &&
+      floorKey !== "__proto__" &&
+      floorKey !== "constructor" &&
+      floorKey !== "prototype"
+    ) {
+      const safeKey = floorKey.replace(/[^a-zA-Z0-9 _\-]/g, "").slice(0, 128);
+      if (safeKey) {
+        addHistoryPoint(`floor:${safeKey}`, { ts, onCount: Number(onCount) || 0 });
+      }
     }
   }
 
@@ -479,12 +489,17 @@ app.get("/api/history", (req, res) => {
   if (!type || !id) {
     return res.status(400).json({ error: "type and id query params required" });
   }
-  // Basic validation to prevent arbitrary key construction
+  // Validate type against allowlist
   const allowedTypes = ["light", "thermo", "floor"];
   if (!allowedTypes.includes(type)) {
     return res.status(400).json({ error: "type must be one of: light, thermo, floor" });
   }
-  const key = `${type}:${String(id)}`;
+  // Sanitize id: only allow alphanumeric chars, spaces, hyphens, underscores
+  const safeId = String(id).replace(/[^a-zA-Z0-9 _\-]/g, "").slice(0, 128);
+  if (!safeId) {
+    return res.status(400).json({ error: "invalid id" });
+  }
+  const key = `${type}:${safeId}`;
   res.json(historyStore[key] || []);
 });
 

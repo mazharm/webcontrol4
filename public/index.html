@@ -2179,16 +2179,20 @@
       return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     }
 
+    function destroyChart(canvasId) {
+      const el = document.getElementById(canvasId);
+      if (!el) return;
+      const existing = Chart.getChart(el);
+      if (existing) existing.destroy();
+    }
+
     async function loadLightHistory() {
       const floor   = document.getElementById("hist-floor-select").value;
       const lightId = document.getElementById("hist-light-select").value;
       const msgEl   = document.getElementById("hist-lights-msg");
       const wrap    = document.getElementById("chart-light-wrap");
 
-      const canvasEl = document.getElementById("chart-light-state");
-      const orphan = Chart.getChart(canvasEl);
-      if (orphan) orphan.destroy();
-      if (lightChart) { lightChart.destroy(); }
+      destroyChart("chart-light-state");
       lightChart = null;
 
       const COLORS = ["#f59e0b","#3b82f6","#22c55e","#a855f7","#ef4444","#06b6d4","#ec4899","#84cc16"];
@@ -2243,10 +2247,7 @@
       const msgEl    = document.getElementById("hist-thermo-msg");
       const wrap     = document.getElementById("chart-thermo-wrap");
 
-      const thermoCanvas = document.getElementById("chart-temperature");
-      const thermoOrphan = Chart.getChart(thermoCanvas);
-      if (thermoOrphan) thermoOrphan.destroy();
-      if (thermoChart) { thermoChart.destroy(); }
+      destroyChart("chart-temperature");
       thermoChart = null;
       if (!thermoId) return;
 
@@ -2277,13 +2278,11 @@
       const msgEl  = document.getElementById("hist-floor-msg");
       const wrap   = document.getElementById("chart-floor-wrap");
 
-      const floorCanvas = document.getElementById("chart-floor-activity");
-      const floorOrphan = Chart.getChart(floorCanvas);
-      if (floorOrphan) floorOrphan.destroy();
-      if (floorChart) { floorChart.destroy(); }
+      destroyChart("chart-floor-activity");
       floorChart = null;
       if (!floor) return;
 
+      // encodeURIComponent handles spaces; server sanitizes the same way
       const data = await api(`/api/history?type=floor&id=${encodeURIComponent(floor)}`).catch(() => []);
       const hasData = data.length > 0;
       msgEl.style.display = hasData ? "none" : "block";
