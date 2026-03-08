@@ -128,7 +128,7 @@ async function main() {
       if (!oauth.clientAllowsRedirectUri(client, redirect_uri)) {
         return res.status(400).send("redirect_uri must exactly match a registered redirect URI.");
       }
-      if (!code_challenge || (code_challenge_method && code_challenge_method !== "S256")) {
+      if (!code_challenge || code_challenge_method !== "S256") {
         return res.status(400).send("PKCE with S256 code_challenge is required.");
       }
 
