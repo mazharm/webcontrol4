@@ -9,6 +9,20 @@ A simple web client for controlling Control4 lights and thermostats from any bro
 - **Direct connection** - connect directly with a controller IP and bearer token (no cloud auth needed)
 - **Light control** - toggle on/off and adjust dimmer levels (0-100%) for all lights
 - **Thermostat control** - view current temperature, adjust heat/cool setpoints, and change HVAC mode
+- **Scenes** - activate Control4 scenes from the web UI
+- **Routines** - create multi-step automations combining lights and thermostats
+- **Scheduled routines** - run routines automatically at specific times and days of the week
+- **AI assistant** - control devices and analyze usage patterns via natural language (Anthropic Claude)
+- **Device history** - charts showing light states, temperature, and floor activity over time
+- **MCP server** - AI assistant integration via Model Context Protocol (STDIO and HTTP transports)
+
+## Documentation
+
+| Guide | Audience |
+|-------|----------|
+| [Deployment Guide](docs/deployment.md) | System administrators setting up WebControl4 |
+| [User Guide](docs/user-guide.md) | End users controlling their smart home |
+| [Design Documentation](docs/design.md) | Developers contributing to the codebase |
 
 ## Quick Start
 

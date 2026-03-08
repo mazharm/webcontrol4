@@ -72,6 +72,104 @@ function persistRoutines() {
 }
 
 // ---------------------------------------------------------------------------
+// Routine scheduler — runs routines at configured times
+// ---------------------------------------------------------------------------
+
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+let lastScheduleCheck = "";  // "YYYY-MM-DD HH:MM" to avoid double-firing
+
+function startScheduler() {
+  setInterval(() => {
+    const now = new Date();
+    const minuteKey = now.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:MM"
+    if (minuteKey === lastScheduleCheck) return;
+    lastScheduleCheck = minuteKey;
+
+    const currentDay = now.getDay(); // 0=Sunday
+    const currentTime = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+
+    for (const routine of routinesStore) {
+      const sched = routine.schedule;
+      if (!sched || !sched.enabled) continue;
+      if (sched.time !== currentTime) continue;
+      if (Array.isArray(sched.days) && sched.days.length > 0 && !sched.days.includes(currentDay)) continue;
+
+      console.log(`[Scheduler] Running routine "${routine.name}" (${currentTime} ${DAY_NAMES[currentDay]})`);
+      executeRoutineSteps(routine).catch((err) => {
+        console.error(`[Scheduler] Routine "${routine.name}" failed:`, err.message);
+      });
+    }
+  }, 15_000); // check every 15 seconds for responsive scheduling
+}
+
+async function executeRoutineSteps(routine) {
+  if (!routine.steps || routine.steps.length === 0) return;
+
+  for (const step of routine.steps) {
+    try {
+      switch (step.type) {
+        case "light_level":
+          await executeScheduledCommand(step.deviceId, "SET_LEVEL", { LEVEL: step.level });
+          break;
+        case "light_toggle":
+          await executeScheduledCommand(step.deviceId, "SET_LEVEL", { LEVEL: step.on ? 100 : 0 });
+          break;
+        case "hvac_mode":
+          await executeScheduledCommand(step.deviceId, "SET_MODE_HVAC", { MODE: step.mode });
+          break;
+        case "heat_setpoint":
+          await executeScheduledCommand(step.deviceId, "SET_SETPOINT_HEAT", { FAHRENHEIT: step.value });
+          break;
+        case "cool_setpoint":
+          await executeScheduledCommand(step.deviceId, "SET_SETPOINT_COOL", { FAHRENHEIT: step.value });
+          break;
+      }
+    } catch (err) {
+      console.error(`[Scheduler] Step failed (${step.type} device ${step.deviceId}):`, err.message);
+    }
+  }
+}
+
+// Execute a command against the mock controller or a real director.
+// Uses the last-known connection info from the most recent web session.
+let schedulerDirectorInfo = { ip: null, token: null };
+
+function setSchedulerDirectorInfo(ip, token) {
+  if (ip && token) {
+    schedulerDirectorInfo = { ip, token };
+  }
+}
+
+async function executeScheduledCommand(deviceId, command, tParams) {
+  const { ip, token } = schedulerDirectorInfo;
+
+  // Mock mode — execute directly against in-memory mock state
+  if (ip === "mock") {
+    const mockReq = { method: "POST", body: { command, tParams }, query: {} };
+    const mockRes = {
+      json: () => {},
+      status: () => ({ json: () => {} }),
+    };
+    handleMockRequest(mockReq, mockRes, `/api/v1/items/${deviceId}/commands`);
+    return;
+  }
+
+  if (!ip || !token) {
+    throw new Error("No director connection — connect from the web UI first");
+  }
+
+  const fullUrl = `https://${ip}/api/v1/items/${deviceId}/commands`;
+  await request(fullUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ async: true, command, tParams }),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // In-memory history storage (server lifetime, ~24 h at 10-s poll interval)
 // ---------------------------------------------------------------------------
 
@@ -588,6 +686,7 @@ app.get("/api/director/{*path}", async (req, res) => {
   if (!isValidDirectorIp(ip)) {
     return res.status(400).json({ error: "invalid ip address format" });
   }
+  setSchedulerDirectorInfo(ip, token);
   const apiPath = "/" + req.params.path.join("/");
   if (ip === "mock") {
     const handled = handleMockRequest(req, res, apiPath);
@@ -826,6 +925,17 @@ app.post("/api/routines", (req, res) => {
   }
   if (routine.steps.length > ROUTINE_STEPS_MAX) {
     return res.status(400).json({ error: `routine may have at most ${ROUTINE_STEPS_MAX} steps` });
+  }
+  // Validate optional schedule
+  if (routine.schedule) {
+    const s = routine.schedule;
+    if (typeof s.enabled !== "boolean") s.enabled = false;
+    if (typeof s.time !== "string" || !/^\d{2}:\d{2}$/.test(s.time)) {
+      return res.status(400).json({ error: "schedule.time must be HH:MM format" });
+    }
+    if (!Array.isArray(s.days) || s.days.some((d) => typeof d !== "number" || d < 0 || d > 6)) {
+      return res.status(400).json({ error: "schedule.days must be array of 0-6 (Sun-Sat)" });
+    }
   }
   const idx = routinesStore.findIndex((r) => r.id === routine.id);
   if (idx !== -1) {
@@ -1068,3 +1178,4 @@ function startServer() {
 }
 
 startServer();
+startScheduler();

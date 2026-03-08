@@ -310,7 +310,7 @@ function createMcpServer(config) {
 
   server.tool(
     "create_routine",
-    "Create a new routine with a list of steps",
+    "Create a new routine with a list of steps and an optional schedule",
     {
       name: z.string().describe("Routine name"),
       steps: z.array(
@@ -324,12 +324,19 @@ function createMcpServer(config) {
           value: z.number().optional().describe("Temperature value (for setpoints)"),
         })
       ).describe("Array of routine steps"),
+      schedule: z.object({
+        enabled: z.boolean().describe("Whether the schedule is active"),
+        time: z.string().regex(/^\d{2}:\d{2}$/).describe("Time to run in HH:MM format (24-hour)"),
+        days: z.array(z.number().min(0).max(6)).describe("Days of week to run (0=Sunday, 6=Saturday)"),
+      }).optional().describe("Optional schedule to run the routine automatically"),
     },
-    async ({ name, steps }) => {
+    async ({ name, steps, schedule }) => {
       const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
       const routine = { id, name, steps };
+      if (schedule) routine.schedule = schedule;
       await apiCall("/api/routines", { method: "POST", body: routine });
-      return { content: [{ type: "text", text: `Created routine "${name}" with ${steps.length} steps (id: ${id})` }] };
+      const schedDesc = schedule?.enabled ? ` (scheduled at ${schedule.time})` : "";
+      return { content: [{ type: "text", text: `Created routine "${name}" with ${steps.length} steps${schedDesc} (id: ${id})` }] };
     }
   );
 

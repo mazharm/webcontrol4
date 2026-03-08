@@ -708,6 +708,25 @@
     .settings-card-title { font-size: 15px; font-weight: 600; margin-bottom: 16px; }
     .key-row { display: flex; gap: 8px; }
     .key-row input { flex: 1; }
+
+    /* Schedule day checkboxes */
+    .day-checkbox {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 4px 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      user-select: none;
+    }
+    .day-checkbox:has(input:checked) {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .day-checkbox input { display: none; }
   </style>
 </head>
 <body>
@@ -918,6 +937,31 @@
         <select id="step-device" style="display:none;"></select>
         <div id="step-value-container" style="display:none;"></div>
         <button class="btn-sm primary" onclick="addStepToRoutine()" style="width:100%;margin-top:4px;">Add Step</button>
+      </div>
+      <!-- Schedule section -->
+      <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+        <div style="font-size:13px;color:var(--muted);margin-bottom:8px;">Schedule</div>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+            <input type="checkbox" id="schedule-enabled"> Enable schedule
+          </label>
+        </div>
+        <div id="schedule-options" style="display:none;">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+            <label style="font-size:13px;color:var(--muted);">Time:</label>
+            <input type="time" id="schedule-time" value="22:00"
+                   style="padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;">
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <label class="day-checkbox"><input type="checkbox" value="0" class="schedule-day"> Sun</label>
+            <label class="day-checkbox"><input type="checkbox" value="1" class="schedule-day" checked> Mon</label>
+            <label class="day-checkbox"><input type="checkbox" value="2" class="schedule-day" checked> Tue</label>
+            <label class="day-checkbox"><input type="checkbox" value="3" class="schedule-day" checked> Wed</label>
+            <label class="day-checkbox"><input type="checkbox" value="4" class="schedule-day" checked> Thu</label>
+            <label class="day-checkbox"><input type="checkbox" value="5" class="schedule-day" checked> Fri</label>
+            <label class="day-checkbox"><input type="checkbox" value="6" class="schedule-day"> Sat</label>
+          </div>
+        </div>
       </div>
       <div class="modal-footer">
         <button class="btn-sm" onclick="closeRoutineModal()">Cancel</button>
@@ -1862,6 +1906,19 @@
       renderRoutines();
     }
 
+    const SCHED_DAY_ABBR = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+    function describeSchedule(sched) {
+      if (!sched || !sched.enabled) return "";
+      const days = (sched.days || []).sort();
+      let dayStr;
+      if (days.length === 7) dayStr = "Every day";
+      else if (days.length === 5 && [1,2,3,4,5].every((d) => days.includes(d))) dayStr = "Weekdays";
+      else if (days.length === 2 && days.includes(0) && days.includes(6)) dayStr = "Weekends";
+      else dayStr = days.map((d) => SCHED_DAY_ABBR[d]).join(", ");
+      return `🕐 ${sched.time} · ${dayStr}`;
+    }
+
     function renderRoutines() {
       const grid = document.getElementById("routines-grid");
       if (!grid) return;
@@ -1874,10 +1931,15 @@
         const card = document.createElement("div");
         card.className = "routine-card";
         const stepsText = routine.steps.length === 1 ? "1 step" : `${routine.steps.length} steps`;
+        const schedText = describeSchedule(routine.schedule);
+        const schedHtml = schedText
+          ? `<div style="font-size:12px;color:var(--accent);margin-top:2px;">${esc(schedText)}</div>`
+          : "";
         card.innerHTML = `
           <div>
             <div class="routine-name">${esc(routine.name)}</div>
             <div class="routine-steps">${stepsText}</div>
+            ${schedHtml}
           </div>
           <div class="routine-actions">
             <button class="btn-run" data-run-routine data-routine-id>&#x25B6; Run</button>
@@ -1898,15 +1960,39 @@
       editingRoutineId = routineId || null;
       editingSteps = [];
       const nameInput = document.getElementById("routine-name");
+      const schedEnabled = document.getElementById("schedule-enabled");
+      const schedTime = document.getElementById("schedule-time");
+      const schedOptions = document.getElementById("schedule-options");
+      const dayBoxes = document.querySelectorAll(".schedule-day");
+
       if (routineId) {
         const routine = state.routines.find((r) => r.id === routineId);
         if (!routine) return;
         document.getElementById("modal-title").textContent = "Edit Routine";
         nameInput.value = routine.name;
         editingSteps = routine.steps.map((s) => ({ ...s }));
+
+        // Populate schedule
+        const sched = routine.schedule;
+        if (sched) {
+          schedEnabled.checked = sched.enabled;
+          schedTime.value = sched.time || "22:00";
+          const days = sched.days || [];
+          dayBoxes.forEach((cb) => { cb.checked = days.includes(parseInt(cb.value)); });
+          schedOptions.style.display = sched.enabled ? "block" : "none";
+        } else {
+          schedEnabled.checked = false;
+          schedTime.value = "22:00";
+          dayBoxes.forEach((cb) => { cb.checked = [1,2,3,4,5].includes(parseInt(cb.value)); });
+          schedOptions.style.display = "none";
+        }
       } else {
         document.getElementById("modal-title").textContent = "New Routine";
         nameInput.value = "";
+        schedEnabled.checked = false;
+        schedTime.value = "22:00";
+        dayBoxes.forEach((cb) => { cb.checked = [1,2,3,4,5].includes(parseInt(cb.value)); });
+        schedOptions.style.display = "none";
       }
       document.getElementById("step-action").value = "";
       document.getElementById("step-device").style.display = "none";
@@ -1914,6 +2000,11 @@
       renderModalSteps();
       document.getElementById("routine-modal").classList.add("open");
     }
+
+    // Toggle schedule options visibility
+    document.getElementById("schedule-enabled").addEventListener("change", (e) => {
+      document.getElementById("schedule-options").style.display = e.target.checked ? "block" : "none";
+    });
 
     function closeRoutineModal() {
       document.getElementById("routine-modal").classList.remove("open");
@@ -2045,18 +2136,32 @@
       renderModalSteps();
     }
 
+    function getScheduleFromModal() {
+      const enabled = document.getElementById("schedule-enabled").checked;
+      if (!enabled) return null;
+      const time = document.getElementById("schedule-time").value || "22:00";
+      const days = [...document.querySelectorAll(".schedule-day:checked")].map((cb) => parseInt(cb.value));
+      return { enabled: true, time, days };
+    }
+
     async function saveRoutine() {
       const name = document.getElementById("routine-name").value.trim();
       if (!name) { alert("Please enter a routine name."); return; }
+      const schedule = getScheduleFromModal();
       let routine;
       if (editingRoutineId) {
         routine = state.routines.find((r) => r.id === editingRoutineId);
-        if (routine) { routine.name = name; routine.steps = editingSteps; }
+        if (routine) {
+          routine.name = name;
+          routine.steps = editingSteps;
+          routine.schedule = schedule;
+        }
       } else {
         routine = {
           id: (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2),
           name,
           steps: editingSteps,
+          schedule,
         };
         state.routines.push(routine);
       }
