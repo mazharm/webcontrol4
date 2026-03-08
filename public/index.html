@@ -476,6 +476,19 @@
     .btn-run:hover { opacity: 0.85; }
     .btn-run:disabled { opacity: 0.5; cursor: not-allowed; }
 
+    /* Scene cards */
+    .scene-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .scene-card .scene-name { font-weight: 500; font-size: 15px; }
+
     /* Modal */
     .modal-backdrop {
       display: none;
@@ -725,6 +738,10 @@
       </div>
       <button type="submit" class="btn" id="btn-login">Sign In</button>
     </form>
+    <div class="manual-connect" style="text-align:center;">
+      <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">No Control4 account?</p>
+      <button class="btn" style="background:var(--green);" onclick="enterDemoMode()">Try Demo Mode</button>
+    </div>
   </div>
 
   <!-- Controller Selection View -->
@@ -758,6 +775,9 @@
     <div id="thermos-grid" class="device-grid">
       <div class="loading"><span class="spinner"></span> Loading thermostats...</div>
     </div>
+
+    <div class="section-title" style="margin-top:8px;"><span class="icon">&#x1F3AC;</span> Scenes</div>
+    <div id="scenes-container"></div>
 
     <div class="section-title" style="margin-top:8px;"><span class="icon">&#x26A1;</span> Routines</div>
     <div style="margin-bottom:16px;">
@@ -905,6 +925,12 @@
       return d.innerHTML;
     }
 
+    function enterDemoMode() {
+      document.getElementById("c4-username").value = "demo@demo.com";
+      document.getElementById("c4-password").value = "demo";
+      document.getElementById("login-form").requestSubmit();
+    }
+
     // -----------------------------------------------------------------------
     // State
     // -----------------------------------------------------------------------
@@ -915,6 +941,7 @@
       controllerCommonName: null,
       lights: [],
       thermostats: [],
+      scenes: [],
       routines: [],
     };
 
@@ -1154,6 +1181,7 @@
         controllerCommonName: null,
         lights: [],
         thermostats: [],
+        scenes: [],
         routines: [],
       };
       showView("login-view");
@@ -1222,7 +1250,7 @@
       const spinner = document.getElementById("refresh-spinner");
       spinner.style.display = "inline-block";
       try {
-        await Promise.all([loadLights(), loadThermostats()]);
+        await Promise.all([loadLights(), loadThermostats(), loadScenes()]);
       } catch (err) {
         console.error("Refresh error:", err);
       }
@@ -2609,6 +2637,203 @@
         msg.textContent  = "Error: " + err.message;
         msg.style.color  = "var(--red)";
         msg.style.display = "block";
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Scenes
+    // -----------------------------------------------------------------------
+    async function loadScenes() {
+      const container = document.getElementById("scenes-container");
+      if (!container) return;
+      container.innerHTML = '<div class="loading"><span class="spinner"></span> Loading scenes...</div>';
+      try {
+        // Try multiple category names — the correct one varies by controller
+        const categories = ["voice-scene", "scenes", "experience"];
+        let items = [];
+        for (const cat of categories) {
+          try {
+            const result = await directorGet(`api/v1/categories/${cat}`);
+            if (Array.isArray(result) && result.length > 0) {
+              items = result;
+              console.log(`Scenes loaded from category: ${cat}`, items);
+              break;
+            }
+          } catch {}
+        }
+        state.scenes = items;
+        renderScenes();
+      } catch (err) {
+        state.scenes = [];
+        container.innerHTML = `<div class="loading">Error loading scenes: ${esc(err.message)}</div>`;
+      }
+    }
+
+    function getSceneFloor(scene) {
+      const room = scene.roomName || "";
+      if (room.toLowerCase().includes("exterior")) return "Exterior";
+      const apiFloor = scene.floorName || "";
+      return FLOOR_NAME_MAP[apiFloor] || apiFloor || "Other";
+    }
+
+    function isWholeHouseScene(scene) {
+      const room = (scene.roomName || "").trim();
+      if (!room) return true;
+      return room.toLowerCase().includes("house");
+    }
+
+    function renderScenes() {
+      const container = document.getElementById("scenes-container");
+      if (!container) return;
+      container.innerHTML = "";
+
+      if (state.scenes.length === 0) {
+        container.innerHTML = '<div style="font-size:13px;color:var(--muted);margin-bottom:24px;">No scenes found.</div>';
+        return;
+      }
+
+      const wholeHouse = [];
+      const floorMap = {};
+
+      for (const scene of state.scenes) {
+        if (isWholeHouseScene(scene)) {
+          wholeHouse.push(scene);
+        } else {
+          const floor = getSceneFloor(scene);
+          const room = scene.roomName || "Unknown";
+          if (!floorMap[floor]) floorMap[floor] = {};
+          if (!floorMap[floor][room]) floorMap[floor][room] = [];
+          floorMap[floor][room].push(scene);
+        }
+      }
+
+      // Whole House scenes
+      if (wholeHouse.length > 0) {
+        const section = document.createElement("div");
+        section.style.marginBottom = "20px";
+        const label = document.createElement("div");
+        label.className = "room-header";
+        label.style.cursor = "default";
+        label.innerHTML = `<span class="room-name">Whole House</span><span class="room-count">(${wholeHouse.length})</span>`;
+        section.appendChild(label);
+        const grid = document.createElement("div");
+        grid.className = "device-grid";
+        for (const scene of wholeHouse) {
+          grid.appendChild(createSceneCard(scene));
+        }
+        section.appendChild(grid);
+        container.appendChild(section);
+      }
+
+      // Floor/Room hierarchy
+      const floorKeys = Object.keys(floorMap).sort((a, b) => {
+        const ia = FLOOR_ORDER.indexOf(a);
+        const ib = FLOOR_ORDER.indexOf(b);
+        if (ia !== -1 && ib !== -1) return ia - ib;
+        if (ia !== -1) return -1;
+        if (ib !== -1) return 1;
+        return a.localeCompare(b);
+      });
+
+      const floorRenames = getFloorRenames();
+      const roomRenames = getRoomRenames();
+
+      for (const floorKey of floorKeys) {
+        const rooms = floorMap[floorKey];
+        const floorDisplayName = floorRenames[floorKey] || floorKey;
+        const floorCollapseKey = "scene-floor:" + floorKey;
+        const floorIsCollapsed = isCollapsed(floorCollapseKey);
+
+        let floorTotal = 0;
+        for (const roomScenes of Object.values(rooms)) floorTotal += roomScenes.length;
+
+        const floorSection = document.createElement("div");
+        floorSection.className = "floor-section";
+
+        const floorHeader = document.createElement("div");
+        floorHeader.className = "floor-header";
+        floorHeader.innerHTML = `
+          <span class="chevron${floorIsCollapsed ? " collapsed" : ""}">&#9660;</span>
+          <span class="floor-name">${esc(floorDisplayName)}</span>
+          <span class="floor-count">${floorTotal} scene${floorTotal !== 1 ? "s" : ""}</span>
+        `;
+        floorHeader.addEventListener("click", () => {
+          toggleCollapse(floorCollapseKey);
+          renderScenes();
+        });
+        floorSection.appendChild(floorHeader);
+
+        if (!floorIsCollapsed) {
+          const roomsDiv = document.createElement("div");
+          roomsDiv.className = "floor-rooms";
+
+          const sortedRooms = Object.entries(rooms).sort((a, b) => a[0].localeCompare(b[0]));
+          for (const [roomKey, scenes] of sortedRooms) {
+            const roomDisplayName = roomRenames[roomKey] || roomKey;
+            const roomCollapseKey = "scene-room:" + roomKey;
+            const roomIsCollapsed = isCollapsed(roomCollapseKey);
+
+            const roomSection = document.createElement("div");
+            roomSection.className = "room-section";
+
+            const roomHeader = document.createElement("div");
+            roomHeader.className = "room-header";
+            roomHeader.innerHTML = `
+              <span class="chevron${roomIsCollapsed ? " collapsed" : ""}">&#9660;</span>
+              <span class="room-name">${esc(roomDisplayName)}</span>
+              <span class="room-count">(${scenes.length})</span>
+            `;
+            roomHeader.addEventListener("click", () => {
+              toggleCollapse(roomCollapseKey);
+              renderScenes();
+            });
+            roomSection.appendChild(roomHeader);
+
+            if (!roomIsCollapsed) {
+              const grid = document.createElement("div");
+              grid.className = "device-grid";
+              for (const scene of scenes) {
+                grid.appendChild(createSceneCard(scene));
+              }
+              roomSection.appendChild(grid);
+            }
+            roomsDiv.appendChild(roomSection);
+          }
+          floorSection.appendChild(roomsDiv);
+        }
+        container.appendChild(floorSection);
+      }
+    }
+
+    function createSceneCard(scene) {
+      const card = document.createElement("div");
+      card.className = "scene-card";
+      card.innerHTML = `
+        <span class="scene-name">${esc(scene.name || "Scene " + scene.id)}</span>
+        <button class="btn-run" data-scene-id="${scene.id}">Activate</button>
+      `;
+      card.querySelector(".btn-run").addEventListener("click", () => activateScene(scene.id));
+      return card;
+    }
+
+    async function activateScene(id) {
+      const btn = document.querySelector(`.scene-card [data-scene-id="${id}"]`);
+      if (btn) { btn.disabled = true; btn.textContent = "Activating\u2026"; }
+      try {
+        await directorPost(`api/v1/items/${id}/commands`, "PRESS", {});
+      } catch {
+        // Fall back to ACTIVATE if PRESS fails
+        try {
+          await directorPost(`api/v1/items/${id}/commands`, "ACTIVATE", {});
+        } catch (err) {
+          if (btn) { btn.disabled = false; btn.textContent = "Activate"; }
+          alert("Failed to activate scene: " + err.message);
+          return;
+        }
+      }
+      if (btn) {
+        btn.textContent = "\u2713 Done";
+        setTimeout(() => { btn.disabled = false; btn.textContent = "Activate"; }, 2000);
       }
     }
   </script>

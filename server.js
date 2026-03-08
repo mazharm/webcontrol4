@@ -26,7 +26,7 @@ if (!fs.existsSync(DATA_DIR)) {
 
 let appSettings = {
   anthropicKey: "",
-  anthropicModel: "claude-3-5-sonnet-20241022",
+  anthropicModel: "claude-haiku-4-5-20251001",
 };
 
 try {
@@ -66,12 +66,9 @@ function addHistoryPoint(key, point) {
 // ---------------------------------------------------------------------------
 
 const ANTHROPIC_MODELS = [
-  { id: "claude-opus-4-5",              name: "Claude Opus 4.5" },
-  { id: "claude-sonnet-4-5",            name: "Claude Sonnet 4.5" },
-  { id: "claude-3-5-sonnet-20241022",   name: "Claude 3.5 Sonnet" },
-  { id: "claude-3-5-haiku-20241022",    name: "Claude 3.5 Haiku" },
-  { id: "claude-3-opus-20240229",       name: "Claude 3 Opus" },
-  { id: "claude-3-haiku-20240307",      name: "Claude 3 Haiku" },
+  { id: "claude-haiku-4-5-20251001",    name: "Claude Haiku 4.5" },
+  { id: "claude-sonnet-4-6",            name: "Claude Sonnet 4.6" },
+  { id: "claude-opus-4-6",              name: "Claude Opus 4.6" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -189,6 +186,170 @@ const C4_ACCOUNTS_URL = "https://apis.control4.com/account/v3/rest/accounts";
 const APPLICATION_KEY = "78f6791373d61bea49fdb9fb8897f1f3af193f11";
 
 // ---------------------------------------------------------------------------
+// Mock controller state (for demo mode when ip=mock)
+// ---------------------------------------------------------------------------
+
+const mockState = {
+  lights: [
+    // Main Floor - Kitchen
+    { id: 100, name: "Kitchen Ceiling",    type: 7, roomName: "Kitchen",      roomParentId: 10, floorName: "Main", level: 80, on: true },
+    { id: 101, name: "Kitchen Island",     type: 7, roomName: "Kitchen",      roomParentId: 10, floorName: "Main", level: 0,  on: false },
+    { id: 102, name: "Kitchen Sink Light", type: 7, roomName: "Kitchen",      roomParentId: 10, floorName: "Main", level: 0,  on: false },
+    // Main Floor - Dining
+    { id: 110, name: "Dining Chandelier",  type: 7, roomName: "Dining Room",  roomParentId: 11, floorName: "Main", level: 0,  on: false },
+    { id: 111, name: "Dining Sconces",     type: 7, roomName: "Dining Room",  roomParentId: 11, floorName: "Main", level: 0,  on: false },
+    // Main Floor - Living Room
+    { id: 120, name: "Living Room Ceiling",type: 7, roomName: "Living Room",  roomParentId: 12, floorName: "Main", level: 60, on: true },
+    { id: 121, name: "Living Room Lamp",   type: 7, roomName: "Living Room",  roomParentId: 12, floorName: "Main", level: 0,  on: false },
+    // Main Floor - Hallway
+    { id: 130, name: "Hallway Light",      type: 7, roomName: "Hallway",      roomParentId: 13, floorName: "Main", level: 0,  on: false },
+    // Upper Floor
+    { id: 200, name: "Master Ceiling",     type: 7, roomName: "Master Bedroom", roomParentId: 20, floorName: "Upstairs", level: 0,  on: false },
+    { id: 201, name: "Master Nightstand",  type: 7, roomName: "Master Bedroom", roomParentId: 20, floorName: "Upstairs", level: 0,  on: false },
+    { id: 210, name: "Kids Room Light",    type: 7, roomName: "Kids Room",    roomParentId: 21, floorName: "Upstairs", level: 0,  on: false },
+    { id: 220, name: "Bathroom Vanity",    type: 7, roomName: "Bathroom",     roomParentId: 22, floorName: "Upstairs", level: 0,  on: false },
+    { id: 230, name: "Office Desk Light",  type: 7, roomName: "Office",       roomParentId: 23, floorName: "Upstairs", level: 100, on: true },
+    // Lower Floor
+    { id: 300, name: "Basement Ceiling",   type: 7, roomName: "Basement",     roomParentId: 30, floorName: "Lower Level", level: 0,  on: false },
+    { id: 301, name: "Basement Bar",       type: 7, roomName: "Basement",     roomParentId: 30, floorName: "Lower Level", level: 0,  on: false },
+    { id: 310, name: "Laundry Light",      type: 7, roomName: "Laundry",      roomParentId: 31, floorName: "Lower Level", level: 0,  on: false },
+    // Exterior
+    { id: 400, name: "Front Porch Light",  type: 7, roomName: "Exterior",     roomParentId: 40, floorName: "Main", level: 0,  on: false },
+    { id: 401, name: "Garage Light",       type: 7, roomName: "Exterior",     roomParentId: 40, floorName: "Main", level: 0,  on: false },
+    { id: 402, name: "Back Deck Light",    type: 7, roomName: "Exterior",     roomParentId: 40, floorName: "Main", level: 0,  on: false },
+  ],
+  thermostats: [
+    { id: 500, name: "Main Floor Thermostat",  type: 7, roomName: "Hallway",        roomParentId: 13, floorName: "Main",     tempF: 72, heatF: 68, coolF: 74, hvacMode: "Auto", humidity: 45 },
+    { id: 501, name: "Upper Floor Thermostat", type: 7, roomName: "Master Bedroom",  roomParentId: 20, floorName: "Upstairs", tempF: 70, heatF: 66, coolF: 73, hvacMode: "Heat", humidity: 40 },
+  ],
+  scenes: [
+    // Whole House
+    { id: 600, name: "Good Morning", type: 7, roomName: "",             roomParentId: null, floorName: "" },
+    { id: 601, name: "Good Night",   type: 7, roomName: "",             roomParentId: null, floorName: "" },
+    { id: 602, name: "Away",         type: 7, roomName: "",             roomParentId: null, floorName: "" },
+    { id: 603, name: "Movie Time",   type: 7, roomName: "",             roomParentId: null, floorName: "" },
+    // Main Floor
+    { id: 610, name: "Dinner Party", type: 7, roomName: "Dining Room",  roomParentId: 11, floorName: "Main" },
+    { id: 611, name: "Cooking Mode", type: 7, roomName: "Kitchen",      roomParentId: 10, floorName: "Main" },
+    // Upper Floor
+    { id: 620, name: "Bedtime",      type: 7, roomName: "Master Bedroom", roomParentId: 20, floorName: "Upstairs" },
+  ],
+};
+
+function handleMockRequest(req, res, apiPath) {
+  // GET categories
+  if (req.method === "GET") {
+    if (apiPath.match(/^\/api\/v1\/categories\/lights$/)) {
+      return res.json(mockState.lights);
+    }
+    if (apiPath.match(/^\/api\/v1\/categories\/thermostats$/)) {
+      return res.json(mockState.thermostats);
+    }
+    if (apiPath.match(/^\/api\/v1\/categories\/(voice-scene|scenes|experience)$/)) {
+      return res.json(mockState.scenes);
+    }
+
+    // GET variables for an item
+    const varMatch = apiPath.match(/^\/api\/v1\/items\/(\d+)\/variables$/);
+    if (varMatch) {
+      const id = parseInt(varMatch[1], 10);
+      const varnames = (req.query.varnames || "").split(",").filter(Boolean);
+
+      // Check lights
+      const light = mockState.lights.find(l => l.id === id);
+      if (light) {
+        const vars = [];
+        for (const v of varnames) {
+          if (v === "LIGHT_LEVEL") vars.push({ varName: "LIGHT_LEVEL", value: String(light.level) });
+          if (v === "LIGHT_STATE") vars.push({ varName: "LIGHT_STATE", value: light.on ? "1" : "0" });
+        }
+        return res.json(vars);
+      }
+
+      // Check thermostats
+      const thermo = mockState.thermostats.find(t => t.id === id);
+      if (thermo) {
+        const vars = [];
+        for (const v of varnames) {
+          if (v === "TEMPERATURE_F" && thermo.tempF != null) vars.push({ varName: "TEMPERATURE_F", value: String(thermo.tempF) });
+          if (v === "HEAT_SETPOINT_F" && thermo.heatF != null) vars.push({ varName: "HEAT_SETPOINT_F", value: String(thermo.heatF) });
+          if (v === "COOL_SETPOINT_F" && thermo.coolF != null) vars.push({ varName: "COOL_SETPOINT_F", value: String(thermo.coolF) });
+          if (v === "HVAC_MODE" && thermo.hvacMode != null) vars.push({ varName: "HVAC_MODE", value: thermo.hvacMode });
+          if (v === "HUMIDITY" && thermo.humidity != null) vars.push({ varName: "HUMIDITY", value: String(thermo.humidity) });
+          if (v === "HVAC_STATE") vars.push({ varName: "HVAC_STATE", value: thermo.hvacMode === "Off" ? "Off" : "Running" });
+          if (v === "FAN_MODE") vars.push({ varName: "FAN_MODE", value: "Auto" });
+        }
+        return res.json(vars);
+      }
+
+      return res.json([]);
+    }
+  }
+
+  // POST commands
+  if (req.method === "POST") {
+    const cmdMatch = apiPath.match(/^\/api\/v1\/items\/(\d+)\/commands$/);
+    if (cmdMatch) {
+      const id = parseInt(cmdMatch[1], 10);
+      const { command, tParams } = req.body;
+
+      // Light commands
+      const light = mockState.lights.find(l => l.id === id);
+      if (light) {
+        if (command === "SET_LEVEL") {
+          light.level = parseInt(tParams.LEVEL, 10) || 0;
+          light.on = light.level > 0;
+        }
+        return res.json({ ok: true });
+      }
+
+      // Thermostat commands
+      const thermo = mockState.thermostats.find(t => t.id === id);
+      if (thermo) {
+        if (command === "SET_MODE_HVAC") thermo.hvacMode = tParams.MODE || thermo.hvacMode;
+        if (command === "SET_SETPOINT_HEAT") thermo.heatF = tParams.FAHRENHEIT != null ? parseFloat(tParams.FAHRENHEIT) : thermo.heatF;
+        if (command === "SET_SETPOINT_COOL") thermo.coolF = tParams.FAHRENHEIT != null ? parseFloat(tParams.FAHRENHEIT) : thermo.coolF;
+        return res.json({ ok: true });
+      }
+
+      // Scene commands (PRESS / ACTIVATE)
+      const scene = mockState.scenes.find(s => s.id === id);
+      if (scene) {
+        return res.json({ ok: true });
+      }
+
+      return res.status(404).json({ error: "Item not found" });
+    }
+  }
+
+  // PUT update item/room name
+  if (req.method === "PUT") {
+    const itemMatch = apiPath.match(/^\/api\/v1\/items\/(\d+)$/);
+    if (itemMatch) {
+      const id = parseInt(itemMatch[1], 10);
+      const item = [...mockState.lights, ...mockState.thermostats, ...mockState.scenes].find(i => i.id === id);
+      if (item && req.body.name) item.name = req.body.name;
+      return res.json({ ok: true });
+    }
+    const roomMatch = apiPath.match(/^\/api\/v1\/rooms\/(\d+)$/);
+    if (roomMatch) {
+      const roomId = parseInt(roomMatch[1], 10);
+      const newName = req.body.name;
+      if (newName) {
+        for (const arr of [mockState.lights, mockState.thermostats, mockState.scenes]) {
+          for (const item of arr) {
+            if (item.roomParentId === roomId) item.roomName = newName;
+          }
+        }
+      }
+      return res.json({ ok: true });
+    }
+  }
+
+  return null; // not handled
+}
+
+// ---------------------------------------------------------------------------
 // SDDP network discovery
 // ---------------------------------------------------------------------------
 
@@ -254,6 +415,10 @@ app.post("/api/auth/login", async (req, res) => {
   if (!username || !password) {
     return res.status(400).json({ error: "username and password required" });
   }
+  // Demo mode
+  if (username === "demo@demo.com") {
+    return res.json({ accountToken: "mock-token" });
+  }
   try {
     const body = JSON.stringify({
       clientInfo: {
@@ -295,6 +460,10 @@ app.post("/api/auth/controllers", async (req, res) => {
   if (!accountToken) {
     return res.status(400).json({ error: "accountToken required" });
   }
+  // Demo mode
+  if (accountToken === "mock-token") {
+    return res.json([{ name: "Test Controller", controllerCommonName: "mock-controller", localIP: "mock" }]);
+  }
   try {
     const data = await request(C4_ACCOUNTS_URL, {
       headers: { Authorization: `Bearer ${accountToken}` },
@@ -316,6 +485,10 @@ app.post("/api/auth/director-token", async (req, res) => {
     return res
       .status(400)
       .json({ error: "accountToken and controllerCommonName required" });
+  }
+  // Demo mode
+  if (controllerCommonName === "mock-controller") {
+    return res.json({ directorToken: "mock-director-token", validSeconds: 999999 });
   }
   try {
     const body = JSON.stringify({
@@ -352,6 +525,11 @@ app.get("/api/director/{*path}", async (req, res) => {
     return res.status(400).json({ error: "ip and token query params required" });
   }
   const apiPath = "/" + req.params.path.join("/");
+  if (ip === "mock") {
+    const handled = handleMockRequest(req, res, apiPath);
+    if (handled !== null) return;
+    return res.json([]);
+  }
   const qs = new URLSearchParams(rest).toString();
   const fullUrl = `https://${ip}${apiPath}${qs ? "?" + qs : ""}`;
   try {
@@ -378,6 +556,11 @@ app.post("/api/director/{*path}", async (req, res) => {
     return res.status(400).json({ error: "ip and token query params required" });
   }
   const apiPath = "/" + req.params.path.join("/");
+  if (ip === "mock") {
+    const handled = handleMockRequest(req, res, apiPath);
+    if (handled !== null) return;
+    return res.json({ ok: true });
+  }
   const qs = new URLSearchParams(rest).toString();
   const fullUrl = `https://${ip}${apiPath}${qs ? "?" + qs : ""}`;
   try {
@@ -410,6 +593,11 @@ app.put("/api/director/{*path}", async (req, res) => {
     return res.status(400).json({ error: "ip and token query params required" });
   }
   const apiPath = "/" + req.params.path.join("/");
+  if (ip === "mock") {
+    const handled = handleMockRequest(req, res, apiPath);
+    if (handled !== null) return;
+    return res.json({ ok: true });
+  }
   const qs = new URLSearchParams(rest).toString();
   const fullUrl = `https://${ip}${apiPath}${qs ? "?" + qs : ""}`;
   try {
