@@ -47,7 +47,7 @@ try {
 
 function persistSettings() {
   try {
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(appSettings, null, 2));
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(appSettings, null, 2), { mode: 0o600 });
   } catch (err) {
     console.error("Failed to save settings:", err.message);
   }
@@ -70,7 +70,7 @@ try {
 
 function persistRoutines() {
   try {
-    fs.writeFileSync(ROUTINES_FILE, JSON.stringify(routinesStore, null, 2));
+    fs.writeFileSync(ROUTINES_FILE, JSON.stringify(routinesStore, null, 2), { mode: 0o600 });
   } catch (err) {
     console.error("Failed to save routines:", err.message);
   }
@@ -180,10 +180,16 @@ async function executeScheduledCommand(deviceId, command, tParams) {
 // ---------------------------------------------------------------------------
 
 const MAX_HISTORY_POINTS = 8640; // 24 h × 3600 s / 10 s
+const MAX_HISTORY_KEYS = 5000;
 const historyStore = Object.create(null); // key -> array of timestamped data points
+let historyKeyCount = 0;
 
 function addHistoryPoint(key, point) {
-  if (!historyStore[key]) historyStore[key] = [];
+  if (!historyStore[key]) {
+    if (historyKeyCount >= MAX_HISTORY_KEYS) return; // reject new keys when at capacity
+    historyStore[key] = [];
+    historyKeyCount++;
+  }
   historyStore[key].push(point);
   if (historyStore[key].length > MAX_HISTORY_POINTS) {
     historyStore[key].shift();
@@ -197,7 +203,7 @@ function addHistoryPoint(key, point) {
 let c4ws = null;              // C4WebSocket instance
 let stateMachine = null;      // StateMachine instance
 let trending = null;          // TrendingEngine instance
-let sseClients = [];          // Active Server-Sent Events clients
+const sseClients = new Set();  // Active Server-Sent Events clients
 let fallbackPollTimer = null; // Fallback polling when WS is down
 let mockEventTimer = null;    // Mock mode event simulator
 
@@ -232,6 +238,9 @@ app.use((_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Referrer-Policy", "same-origin");
+  if (HTTPS_ENABLED) {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
   res.setHeader(
     "Content-Security-Policy",
     "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://accounts.google.com"
@@ -593,20 +602,22 @@ app.get("/api/discover", (_req, res) => {
   });
 
   sock.on("message", (msg, rinfo) => {
-    const text = msg.toString();
+    if (found.length >= 100) return; // cap responses to prevent flooding
+    const text = msg.toString().slice(0, 4096); // limit response size
     const entry = Object.create(null);
     entry.ip = rinfo.address;
     entry.port = rinfo.port;
-    entry.raw = text;
-    // Parse SDDP headers
+    // Parse SDDP headers — only extract known fields
+    const knownFields = new Set(["type", "model", "manufacturer", "primary-proxy", "host-name", "uuid", "driver", "make"]);
     for (const line of text.split("\r\n")) {
       const idx = line.indexOf(":");
       if (idx > 0) {
         const key = line.slice(0, idx).trim().toLowerCase();
-        if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+        if (!knownFields.has(key)) continue;
         entry[key] = line
           .slice(idx + 1)
-          .trim();
+          .trim()
+          .slice(0, 256);
       }
     }
     found.push(entry);
@@ -749,16 +760,15 @@ function isValidDirectorIp(ip) {
 }
 
 app.get("/api/director/{*path}", async (req, res) => {
-  const ip = req.headers["x-director-ip"] || req.query.ip;
-  const token = req.headers["x-director-token"] || req.query.token;
-  const { ip: _ip, token: _token, ...rest } = req.query;
+  const ip = req.headers["x-director-ip"];
+  const token = req.headers["x-director-token"];
+  const rest = req.query;
   if (!ip || !token) {
     return res.status(400).json({ error: "ip and token required" });
   }
   if (!isValidDirectorIp(ip)) {
     return res.status(400).json({ error: "invalid ip address format" });
   }
-  setSchedulerDirectorInfo(ip, token);
   const apiPath = "/" + req.params.path.join("/");
   if (ip === "mock") {
     const handled = handleMockRequest(req, res, apiPath);
@@ -787,9 +797,9 @@ app.get("/api/director/{*path}", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.post("/api/director/{*path}", async (req, res) => {
-  const ip = req.headers["x-director-ip"] || req.query.ip;
-  const token = req.headers["x-director-token"] || req.query.token;
-  const { ip: _ip, token: _token, ...rest } = req.query;
+  const ip = req.headers["x-director-ip"];
+  const token = req.headers["x-director-token"];
+  const rest = req.query;
   if (!ip || !token) {
     return res.status(400).json({ error: "ip and token required" });
   }
@@ -830,9 +840,9 @@ app.post("/api/director/{*path}", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.put("/api/director/{*path}", async (req, res) => {
-  const ip = req.headers["x-director-ip"] || req.query.ip;
-  const token = req.headers["x-director-token"] || req.query.token;
-  const { ip: _ip, token: _token, ...rest } = req.query;
+  const ip = req.headers["x-director-ip"];
+  const token = req.headers["x-director-token"];
+  const rest = req.query;
   if (!ip || !token) {
     return res.status(400).json({ error: "ip and token required" });
   }
@@ -994,10 +1004,16 @@ app.get("/api/routines", (_req, res) => {
 const ROUTINE_NAME_MAX_LEN = 200;
 const ROUTINE_STEPS_MAX    = 100;
 
+const MAX_ROUTINES = 200;
+
 app.post("/api/routines", (req, res) => {
   const routine = req.body;
   if (!routine || !routine.id) {
     return res.status(400).json({ error: "routine with id required" });
+  }
+  // Validate routine ID is a safe string
+  if (typeof routine.id !== "string" || routine.id.length > 100 || !/^[a-zA-Z0-9_-]+$/.test(routine.id)) {
+    return res.status(400).json({ error: "routine id must be an alphanumeric string (max 100 chars)" });
   }
   if (!routine.name || typeof routine.name !== "string" || !routine.name.trim()) {
     return res.status(400).json({ error: "routine name required" });
@@ -1048,11 +1064,33 @@ app.post("/api/routines", (req, res) => {
       return res.status(400).json({ error: "schedule.days must be array of 0-6 (Sun-Sat)" });
     }
   }
-  const idx = routinesStore.findIndex((r) => r.id === routine.id);
+  // Build clean routine object from validated fields only (prevent mass assignment)
+  const cleanSteps = routine.steps.map(s => {
+    const clean = { type: s.type, deviceId: s.deviceId };
+    if (s.deviceName && typeof s.deviceName === "string") clean.deviceName = s.deviceName.slice(0, 200);
+    if (s.type === "light_level") clean.level = s.level;
+    if (s.type === "light_toggle") clean.on = s.on;
+    if (s.type === "hvac_mode") clean.mode = s.mode;
+    if (s.type === "heat_setpoint" || s.type === "cool_setpoint") clean.value = s.value;
+    return clean;
+  });
+  const cleanRoutine = { id: routine.id, name: routine.name.trim(), steps: cleanSteps };
+  if (routine.schedule) {
+    cleanRoutine.schedule = {
+      enabled: routine.schedule.enabled,
+      time: routine.schedule.time,
+      days: routine.schedule.days,
+    };
+  }
+
+  const idx = routinesStore.findIndex((r) => r.id === cleanRoutine.id);
   if (idx !== -1) {
-    routinesStore[idx] = routine;
+    routinesStore[idx] = cleanRoutine;
   } else {
-    routinesStore.push(routine);
+    if (routinesStore.length >= MAX_ROUTINES) {
+      return res.status(400).json({ error: `maximum of ${MAX_ROUTINES} routines reached` });
+    }
+    routinesStore.push(cleanRoutine);
   }
   persistRoutines();
   res.json({ ok: true });
@@ -1131,7 +1169,9 @@ function buildSystemPrompt(context, mode) {
   }
 
   if (historySummary) {
-    prompt += `\n\nHistorical data:\n${historySummary}`;
+    // Sanitize client-supplied history summary to prevent prompt injection
+    const safeHistory = String(historySummary).replace(/[\n\r]+/g, "\n").slice(0, 2000);
+    prompt += `\n\nHistorical data:\n${safeHistory}`;
   }
 
   return prompt;
@@ -1187,6 +1227,26 @@ app.post("/api/llm/chat", async (req, res) => {
       // Not valid JSON — treat raw text as the message
     }
 
+    // Validate actions from LLM output to prevent prompt injection attacks
+    if (Array.isArray(parsed.actions)) {
+      const validActionTypes = ["light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint", "run_routine", "create_routine"];
+      parsed.actions = parsed.actions.filter(a => {
+        if (!a || typeof a !== "object") return false;
+        if (!validActionTypes.includes(a.type)) return false;
+        if (a.type === "light_level" && (typeof a.deviceId !== "number" || typeof a.level !== "number" || a.level < 0 || a.level > 100)) return false;
+        if (a.type === "light_toggle" && (typeof a.deviceId !== "number" || typeof a.on !== "boolean")) return false;
+        if (a.type === "hvac_mode" && (typeof a.deviceId !== "number" || !["Off", "Heat", "Cool", "Auto"].includes(a.mode))) return false;
+        if (a.type === "heat_setpoint" && (typeof a.deviceId !== "number" || typeof a.value !== "number" || a.value < 32 || a.value > 120)) return false;
+        if (a.type === "cool_setpoint" && (typeof a.deviceId !== "number" || typeof a.value !== "number" || a.value < 32 || a.value > 120)) return false;
+        if (a.type === "run_routine" && typeof a.routineId !== "string") return false;
+        if (a.type === "create_routine" && (!a.name || !Array.isArray(a.steps))) return false;
+        return true;
+      });
+    } else {
+      parsed.actions = [];
+    }
+    parsed.message = String(parsed.message || "").slice(0, 10000);
+
     res.json(parsed);
   } catch (err) {
     // Only forward known Anthropic error types; generic message for all else
@@ -1209,6 +1269,9 @@ app.post("/api/llm/chat", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 async function initializeRealtime({ controllerIp, directorToken, accountToken, controllerCommonName }) {
+  // Store director info for scheduler (only set from explicit connect, not every proxy request)
+  setSchedulerDirectorInfo(controllerIp, directorToken);
+
   // 1. Trending engine (idempotent — keep existing if already running)
   if (!trending) {
     trending = new TrendingEngine({
@@ -1379,7 +1442,7 @@ function broadcastSSE(eventType, data) {
     timestamp: data.timestamp,
   });
   for (const client of sseClients) {
-    try { client.write(`data: ${payload}\n\n`); } catch {}
+    try { client.write(`data: ${payload}\n\n`); } catch { sseClients.delete(client); }
   }
 }
 
@@ -1416,7 +1479,7 @@ app.post("/api/realtime/connect", async (req, res) => {
 const MAX_SSE_CLIENTS = 50;
 
 app.get("/api/events", (req, res) => {
-  if (sseClients.length >= MAX_SSE_CLIENTS) {
+  if (sseClients.size >= MAX_SSE_CLIENTS) {
     return res.status(503).json({ error: "Too many SSE clients" });
   }
   res.setHeader("Content-Type", "text/event-stream");
@@ -1431,12 +1494,20 @@ app.get("/api/events", (req, res) => {
     res.write(`data: ${init}\n\n`);
   }
 
-  sseClients.push(res);
+  sseClients.add(res);
 
   req.on("close", () => {
-    sseClients = sseClients.filter(c => c !== res);
+    sseClients.delete(res);
   });
 });
+
+// SSE heartbeat — evict dead/half-open clients every 30s
+const sseHeartbeat = setInterval(() => {
+  for (const client of sseClients) {
+    try { client.write(":heartbeat\n\n"); } catch { sseClients.delete(client); }
+  }
+}, 30000);
+if (sseHeartbeat.unref) sseHeartbeat.unref();
 
 // ---------------------------------------------------------------------------
 // Real-time: state & trending REST endpoints
@@ -1517,7 +1588,7 @@ app.get("/api/health", (_req, res) => {
       initialized: !!trending,
       ...(trending ? trending.getStats() : {}),
     },
-    sseClients: sseClients.length,
+    sseClients: sseClients.size,
   };
 
   if (!stateMachine || (!c4ws?.isConnected() && !fallbackPollTimer && !mockEventTimer)) {
