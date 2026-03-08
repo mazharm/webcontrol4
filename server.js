@@ -218,6 +218,10 @@ app.use((_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Referrer-Policy", "same-origin");
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://accounts.google.com"
+  );
   next();
 });
 
@@ -462,7 +466,12 @@ function handleMockRequest(req, res, apiPath) {
       // Thermostat commands
       const thermo = mockState.thermostats.find(t => t.id === id);
       if (thermo) {
-        if (command === "SET_MODE_HVAC") thermo.hvacMode = tParams.MODE || thermo.hvacMode;
+        if (command === "SET_MODE_HVAC") {
+          const allowedModes = ["Off", "Heat", "Cool", "Auto"];
+          if (allowedModes.includes(tParams.MODE)) {
+            thermo.hvacMode = tParams.MODE;
+          }
+        }
         if (command === "SET_SETPOINT_HEAT") thermo.heatF = clampNumber(tParams?.FAHRENHEIT, 32, 120, thermo.heatF);
         if (command === "SET_SETPOINT_COOL") thermo.coolF = clampNumber(tParams?.FAHRENHEIT, 32, 120, thermo.coolF);
         return res.json({ ok: true });
@@ -484,17 +493,21 @@ function handleMockRequest(req, res, apiPath) {
     if (itemMatch) {
       const id = parseInt(itemMatch[1], 10);
       const item = [...mockState.lights, ...mockState.thermostats, ...mockState.scenes].find(i => i.id === id);
-      if (item && req.body.name) item.name = req.body.name;
+      if (item && req.body.name) {
+        const name = String(req.body.name).slice(0, 200);
+        item.name = name;
+      }
       return res.json({ ok: true });
     }
     const roomMatch = apiPath.match(/^\/api\/v1\/rooms\/(\d+)$/);
     if (roomMatch) {
       const roomId = parseInt(roomMatch[1], 10);
       const newName = req.body.name;
-      if (newName) {
+      if (newName && typeof newName === "string") {
+        const safeName = newName.slice(0, 200);
         for (const arr of [mockState.lights, mockState.thermostats, mockState.scenes]) {
           for (const item of arr) {
-            if (item.roomParentId === roomId) item.roomName = newName;
+            if (item.roomParentId === roomId) item.roomName = safeName;
           }
         }
       }
@@ -714,7 +727,8 @@ app.get("/api/director/{*path}", async (req, res) => {
       res.json({ ok: true, raw: data });
     }
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    console.error("Director GET proxy error:", err.message);
+    res.status(502).json({ error: "Director request failed" });
   }
 });
 
@@ -754,7 +768,8 @@ app.post("/api/director/{*path}", async (req, res) => {
       res.json({ ok: true, raw: data });
     }
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    console.error("Director POST proxy error:", err.message);
+    res.status(502).json({ error: "Director request failed" });
   }
 });
 
@@ -793,7 +808,8 @@ app.put("/api/director/{*path}", async (req, res) => {
       res.json({ ok: true, raw: data });
     }
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    console.error("Director PUT proxy error:", err.message);
+    res.status(502).json({ error: "Director request failed" });
   }
 });
 
@@ -948,7 +964,7 @@ app.post("/api/routines", (req, res) => {
       return res.status(400).json({ error: "each step must be an object" });
     }
     if (!validStepTypes.includes(step.type)) {
-      return res.status(400).json({ error: `invalid step type: ${step.type}` });
+      return res.status(400).json({ error: "invalid step type" });
     }
     if (typeof step.deviceId !== "number" || !Number.isFinite(step.deviceId)) {
       return res.status(400).json({ error: "each step must have a numeric deviceId" });
@@ -1204,7 +1220,12 @@ function startServer() {
       const redirectApp = express();
       redirectApp.use((req, res) => {
         const host = (req.headers.host || "").replace(/:\d+$/, "");
-        res.redirect(301, `https://${host}:${HTTPS_PORT}${req.url}`);
+        // Validate the path to prevent open-redirect attacks
+        let safePath = req.url;
+        if (!safePath.startsWith("/") || safePath.startsWith("//")) {
+          safePath = "/";
+        }
+        res.redirect(301, `https://${host}:${HTTPS_PORT}${safePath}`);
       });
       redirectApp.listen(PORT, () => {
         console.log(`HTTP :${PORT} redirecting to HTTPS :${HTTPS_PORT}`);

@@ -39,6 +39,14 @@ function randomId() {
   return crypto.randomBytes(32).toString("hex");
 }
 
+function timingSafeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
 function isConfigured() {
   return !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET);
 }
@@ -240,6 +248,11 @@ function getClient(clientId) {
   return registeredClients.get(clientId) || null;
 }
 
+function verifyClientSecret(client, secret) {
+  if (!client || !secret) return false;
+  return timingSafeEqual(client.clientSecret, String(secret));
+}
+
 // ---------------------------------------------------------------------------
 // MCP OAuth: Pending auth (tracks state while user is at Google)
 // ---------------------------------------------------------------------------
@@ -296,7 +309,7 @@ function exchangeAuthCode(code, codeVerifier, clientId) {
       .createHash("sha256")
       .update(codeVerifier)
       .digest("base64url");
-    if (hash !== c.codeChallenge) return null;
+    if (!timingSafeEqual(hash, c.codeChallenge)) return null;
   }
 
   authCodes.delete(code); // one-time use
@@ -344,6 +357,7 @@ module.exports = {
   // MCP OAuth AS
   registerClient,
   getClient,
+  verifyClientSecret,
   isValidRedirectUri,
   clientAllowsRedirectUri,
   createPendingAuth,

@@ -214,7 +214,7 @@ async function main() {
 
       // Validate client credentials
       const client = oauth.getClient(client_id);
-      if (!client || client.clientSecret !== client_secret) {
+      if (!client || !oauth.verifyClientSecret(client, client_secret)) {
         return res.status(401).json({ error: "invalid_client" });
       }
 
