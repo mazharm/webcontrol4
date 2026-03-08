@@ -10,6 +10,71 @@ const path = require("path");
 const dgram = require("dgram");
 
 // ---------------------------------------------------------------------------
+// Data directory (settings + any future persistence)
+// ---------------------------------------------------------------------------
+
+const DATA_DIR = path.join(__dirname, "data");
+const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
+
+if (!fs.existsSync(DATA_DIR)) {
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// App settings (persisted to data/settings.json)
+// ---------------------------------------------------------------------------
+
+let appSettings = {
+  anthropicKey: "",
+  anthropicModel: "claude-3-5-sonnet-20241022",
+};
+
+try {
+  if (fs.existsSync(SETTINGS_FILE)) {
+    const stored = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
+    appSettings = { ...appSettings, ...stored };
+  }
+} catch (err) {
+  console.error("Failed to load settings:", err.message);
+}
+
+function persistSettings() {
+  try {
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(appSettings, null, 2));
+  } catch (err) {
+    console.error("Failed to save settings:", err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// In-memory history storage (server lifetime, ~24 h at 10-s poll interval)
+// ---------------------------------------------------------------------------
+
+const MAX_HISTORY_POINTS = 8640; // 24 h × 3600 s / 10 s
+const historyStore = {}; // key -> array of timestamped data points
+
+function addHistoryPoint(key, point) {
+  if (!historyStore[key]) historyStore[key] = [];
+  historyStore[key].push(point);
+  if (historyStore[key].length > MAX_HISTORY_POINTS) {
+    historyStore[key].shift();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic model list
+// ---------------------------------------------------------------------------
+
+const ANTHROPIC_MODELS = [
+  { id: "claude-opus-4-5",              name: "Claude Opus 4.5" },
+  { id: "claude-sonnet-4-5",            name: "Claude Sonnet 4.5" },
+  { id: "claude-3-5-sonnet-20241022",   name: "Claude 3.5 Sonnet" },
+  { id: "claude-3-5-haiku-20241022",    name: "Claude 3.5 Haiku" },
+  { id: "claude-3-opus-20240229",       name: "Claude 3 Opus" },
+  { id: "claude-3-haiku-20240307",      name: "Claude 3 Haiku" },
+];
+
+// ---------------------------------------------------------------------------
 // Configuration (from .env or environment)
 // ---------------------------------------------------------------------------
 
@@ -363,6 +428,213 @@ app.put("/api/director/{*path}", async (req, res) => {
     }
   } catch (err) {
     res.status(502).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// History: record a state snapshot from the frontend
+// ---------------------------------------------------------------------------
+
+app.post("/api/history/record", (req, res) => {
+  const { lights = [], thermostats = [], floors = {} } = req.body;
+  const ts = Date.now();
+
+  for (const l of lights) {
+    if (l.id != null) {
+      addHistoryPoint(`light:${l.id}`, {
+        ts,
+        on: !!l.on,
+        level: Number(l.level) || 0,
+      });
+    }
+  }
+
+  for (const t of thermostats) {
+    if (t.id != null) {
+      addHistoryPoint(`thermo:${t.id}`, {
+        ts,
+        tempF: t.tempF != null ? Number(t.tempF) : null,
+        heatF: t.heatF != null ? Number(t.heatF) : null,
+        coolF: t.coolF != null ? Number(t.coolF) : null,
+        hvacMode: t.hvacMode || null,
+      });
+    }
+  }
+
+  for (const [floorKey, onCount] of Object.entries(floors)) {
+    if (typeof floorKey === "string" && floorKey.length < 128) {
+      addHistoryPoint(`floor:${floorKey}`, { ts, onCount: Number(onCount) || 0 });
+    }
+  }
+
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// History: query stored data points
+// ---------------------------------------------------------------------------
+
+app.get("/api/history", (req, res) => {
+  const { type, id } = req.query;
+  if (!type || !id) {
+    return res.status(400).json({ error: "type and id query params required" });
+  }
+  // Basic validation to prevent arbitrary key construction
+  const allowedTypes = ["light", "thermo", "floor"];
+  if (!allowedTypes.includes(type)) {
+    return res.status(400).json({ error: "type must be one of: light, thermo, floor" });
+  }
+  const key = `${type}:${String(id)}`;
+  res.json(historyStore[key] || []);
+});
+
+// ---------------------------------------------------------------------------
+// Settings: read (key is masked) / write
+// ---------------------------------------------------------------------------
+
+app.get("/api/settings", (_req, res) => {
+  res.json({
+    anthropicModel: appSettings.anthropicModel,
+    hasAnthropicKey: !!appSettings.anthropicKey,
+  });
+});
+
+app.post("/api/settings", (req, res) => {
+  const { anthropicKey, anthropicModel } = req.body;
+  if (anthropicKey !== undefined) appSettings.anthropicKey = String(anthropicKey);
+  if (anthropicModel)             appSettings.anthropicModel = String(anthropicModel);
+  persistSettings();
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// LLM: list available models
+// ---------------------------------------------------------------------------
+
+app.get("/api/llm/models", (_req, res) => {
+  res.json(ANTHROPIC_MODELS);
+});
+
+// ---------------------------------------------------------------------------
+// LLM: chat / control via Anthropic
+// ---------------------------------------------------------------------------
+
+function buildSystemPrompt(context, mode) {
+  const devices  = context?.devices  || [];
+  const routines = context?.routines || [];
+  const historySummary = context?.historySummary || "";
+
+  let prompt;
+
+  if (mode === "analyze") {
+    prompt =
+      "You are a smart home analytics assistant. " +
+      "Analyze the historical data provided and give specific, actionable recommendations " +
+      "for automations, routines, and energy savings. " +
+      "Reference actual device names and observed patterns.";
+  } else {
+    prompt =
+      "You are a smart home control assistant for a Control4 system. " +
+      "The user gives you natural language commands to control their home.\n\n" +
+      "ALWAYS respond with a JSON object and nothing else. The JSON must have:\n" +
+      '- "message": A friendly natural language confirmation of what you are doing\n' +
+      '- "actions": An array of device commands to execute (can be empty)\n\n' +
+      "Action types:\n" +
+      '- { "type": "light_level",    "deviceId": <number>, "level": <0-100> }\n' +
+      '- { "type": "light_toggle",   "deviceId": <number>, "on": <boolean> }\n' +
+      '- { "type": "hvac_mode",      "deviceId": <number>, "mode": "Off"|"Heat"|"Cool"|"Auto" }\n' +
+      '- { "type": "heat_setpoint",  "deviceId": <number>, "value": <temp_in_F> }\n' +
+      '- { "type": "cool_setpoint",  "deviceId": <number>, "value": <temp_in_F> }\n' +
+      '- { "type": "run_routine",    "routineId": "<id>" }\n' +
+      '- { "type": "create_routine", "name": "<name>", "steps": [<step objects as above>] }\n\n' +
+      "For modify_routine requests, use create_routine with the same name to replace it.";
+  }
+
+  if (devices.length > 0) {
+    prompt += "\n\nAvailable devices:";
+    for (const d of devices) {
+      if (d.type === "light") {
+        prompt += `\n- Light "${d.name}" (id:${d.id}, floor:"${d.floor}", room:"${d.room}", ${d.on ? `ON at ${d.level}%` : "OFF"})`;
+      } else if (d.type === "thermostat") {
+        prompt += `\n- Thermostat "${d.name}" (id:${d.id}, floor:"${d.floor}", temp:${d.tempF ?? "?"}°F, heat:${d.heatF ?? "?"}°F, cool:${d.coolF ?? "?"}°F, mode:${d.hvacMode ?? "?"})`;
+      }
+    }
+  }
+
+  if (routines.length > 0) {
+    prompt += "\n\nAvailable routines:";
+    for (const r of routines) {
+      prompt += `\n- "${r.name}" (id:"${r.id}")`;
+    }
+  }
+
+  if (historySummary) {
+    prompt += `\n\nHistorical data:\n${historySummary}`;
+  }
+
+  return prompt;
+}
+
+app.post("/api/llm/chat", async (req, res) => {
+  if (!appSettings.anthropicKey) {
+    return res.status(400).json({
+      error: "Anthropic API key not configured. Go to Settings to add your key.",
+    });
+  }
+
+  const { message, context, mode } = req.body;
+  if (!message) {
+    return res.status(400).json({ error: "message required" });
+  }
+
+  const systemPrompt = buildSystemPrompt(context, mode);
+
+  try {
+    const bodyStr = JSON.stringify({
+      model: appSettings.anthropicModel,
+      max_tokens: 2048,
+      system: systemPrompt,
+      messages: [{ role: "user", content: String(message) }],
+    });
+
+    const responseStr = await request("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": appSettings.anthropicKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: bodyStr,
+    });
+
+    const response = JSON.parse(responseStr);
+    const text = response?.content?.[0]?.text || "";
+
+    if (mode === "analyze") {
+      return res.json({ message: text, actions: [] });
+    }
+
+    // Try to parse as JSON (model may wrap in markdown code fences)
+    let parsed = { message: text, actions: [] };
+    try {
+      const jsonMatch = text.match(/```(?:json)?\n?([\s\S]*?)\n?```/);
+      const jsonStr = jsonMatch ? jsonMatch[1] : text.trim();
+      const j = JSON.parse(jsonStr);
+      if (j && j.message) parsed = j;
+    } catch {
+      // Not valid JSON — treat raw text as the message
+    }
+
+    res.json(parsed);
+  } catch (err) {
+    // Try to surface a user-friendly error from the Anthropic error body
+    let errMsg = err.message;
+    try {
+      const bodyPart = err.message.replace(/^HTTP \d+: /, "");
+      const json = JSON.parse(bodyPart);
+      if (json?.error?.message) errMsg = json.error.message;
+    } catch {}
+    res.status(500).json({ error: errMsg });
   }
 });
 

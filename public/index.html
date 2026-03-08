@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WebControl4</title>
+  <script src="/chart.min.js"></script>
   <style>
     :root {
       --bg: #0f1117;
@@ -147,7 +148,7 @@
     .controller-card .common-name { font-size: 12px; color: var(--muted); font-family: monospace; }
 
     /* Dashboard */
-    #dashboard-view { padding: 24px; max-width: 1100px; margin: 0 auto; }
+    #dashboard-view { /* padding handled per tab */ }
     .section-title {
       font-size: 16px;
       font-weight: 600;
@@ -542,6 +543,158 @@
       outline: none;
     }
     .modal-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+
+    /* ---- Tab bar (inside dashboard) ---- */
+    .tab-bar {
+      display: flex;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      overflow-x: auto;
+    }
+    .tab-btn {
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--muted);
+      padding: 14px 20px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      white-space: nowrap;
+      transition: color 0.2s;
+    }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .dash-tab { display: none; }
+    .dash-tab.active { display: block; }
+
+    /* ---- History sub-tabs ---- */
+    .history-tabs { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+    .hist-tab-btn {
+      padding: 8px 16px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .hist-tab-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .hist-tab-btn.active { background: var(--accent); border-color: var(--accent); color: white; }
+    .hist-tab { display: none; }
+    .hist-tab.active { display: block; }
+    .chart-container { position: relative; height: 300px; margin-top: 12px; }
+    .hist-select-row {
+      display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 8px;
+    }
+    .hist-select-row label { font-size: 13px; color: var(--muted); }
+    .hist-select-row select {
+      padding: 6px 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .hist-select-row select:focus { border-color: var(--accent); outline: none; }
+    .no-data-msg { font-size: 13px; color: var(--muted); padding: 40px; text-align: center; }
+
+    /* ---- AI assistant ---- */
+    .ai-mode-row { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+    .ai-mode-btn {
+      padding: 8px 16px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .ai-mode-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .ai-mode-btn.active { background: var(--accent); border-color: var(--accent); color: white; }
+    #ai-messages {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      min-height: 180px;
+      max-height: 380px;
+      overflow-y: auto;
+      margin-bottom: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .ai-message { display: flex; flex-direction: column; }
+    .ai-user .ai-msg-content {
+      background: var(--accent);
+      color: white;
+      padding: 10px 14px;
+      border-radius: 12px 12px 4px 12px;
+      font-size: 14px;
+      align-self: flex-end;
+      max-width: 85%;
+      word-break: break-word;
+    }
+    .ai-assistant .ai-msg-content {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 10px 14px;
+      border-radius: 12px 12px 12px 4px;
+      font-size: 14px;
+      align-self: flex-start;
+      max-width: 90%;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .ai-error .ai-msg-content {
+      background: rgba(239,68,68,0.08);
+      border: 1px solid rgba(239,68,68,0.3);
+      color: var(--red);
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 14px;
+      align-self: flex-start;
+      max-width: 90%;
+    }
+    .ai-input-row { display: flex; gap: 8px; align-items: flex-start; }
+    .ai-input-row textarea {
+      flex: 1;
+      padding: 10px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 14px;
+      resize: vertical;
+      font-family: inherit;
+      outline: none;
+      min-height: 64px;
+    }
+    .ai-input-row textarea:focus { border-color: var(--accent); }
+    #ai-actions-preview {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      margin-top: 16px;
+    }
+    #ai-actions-preview .section-title { margin-bottom: 10px; font-size: 14px; }
+    .ai-exec-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+
+    /* ---- Settings ---- */
+    .settings-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .settings-card-title { font-size: 15px; font-weight: 600; margin-bottom: 16px; }
+    .key-row { display: flex; gap: 8px; }
+    .key-row input { flex: 1; }
   </style>
 </head>
 <body>
@@ -583,6 +736,17 @@
 
   <!-- Dashboard View -->
   <div id="dashboard-view" class="view">
+    <!-- Tab navigation -->
+    <div class="tab-bar" id="tab-bar">
+      <button class="tab-btn active" data-tab="main"     onclick="switchDashTab('main')">🏠 Dashboard</button>
+      <button class="tab-btn"        data-tab="history"  onclick="switchDashTab('history')">📊 History</button>
+      <button class="tab-btn"        data-tab="ai"       onclick="switchDashTab('ai')">🤖 AI Assistant</button>
+      <button class="tab-btn"        data-tab="settings" onclick="switchDashTab('settings')">⚙️ Settings</button>
+    </div>
+
+    <!-- ===== Dashboard tab ===== -->
+    <div class="dash-tab active" id="dash-tab-main">
+    <div style="padding:24px;max-width:1100px;margin:0 auto;">
     <button class="refresh-btn" onclick="refreshDevices()"><span class="spinner" style="display:none;" id="refresh-spinner"></span>Refresh Devices</button>
 
     <div class="section-title"><span class="icon">&#x1F4A1;</span> Lights</div>
@@ -600,7 +764,105 @@
       <button class="btn-sm primary" onclick="openRoutineModal()">+ New Routine</button>
     </div>
     <div id="routines-grid" class="device-grid"></div>
-  </div>
+    </div><!-- /inner padding -->
+    </div><!-- /dash-tab-main -->
+
+    <!-- ===== History tab ===== -->
+    <div class="dash-tab" id="dash-tab-history">
+      <div style="padding:24px;max-width:1100px;margin:0 auto;">
+        <div class="section-title">📊 Device History</div>
+        <div class="history-tabs">
+          <button class="hist-tab-btn active" data-htab="lights"         onclick="switchHistoryTab('lights')">Light States</button>
+          <button class="hist-tab-btn"        data-htab="temperature"    onclick="switchHistoryTab('temperature')">Temperature</button>
+          <button class="hist-tab-btn"        data-htab="floor-activity" onclick="switchHistoryTab('floor-activity')">Floor Activity</button>
+        </div>
+
+        <!-- Light States -->
+        <div class="hist-tab active" id="htab-lights">
+          <div class="hist-select-row">
+            <label>Floor:</label>
+            <select id="hist-floor-select" onchange="onHistFloorChange()"></select>
+            <label>Light:</label>
+            <select id="hist-light-select" onchange="loadLightHistory()">
+              <option value="">All lights on floor</option>
+            </select>
+          </div>
+          <div id="hist-lights-msg" class="no-data-msg" style="display:none;">No history recorded yet. Data accumulates while the dashboard is open.</div>
+          <div class="chart-container" id="chart-light-wrap"><canvas id="chart-light-state"></canvas></div>
+        </div>
+
+        <!-- Temperature -->
+        <div class="hist-tab" id="htab-temperature">
+          <div class="hist-select-row">
+            <label>Thermostat:</label>
+            <select id="hist-thermo-select" onchange="loadThermoHistory()"></select>
+          </div>
+          <div id="hist-thermo-msg" class="no-data-msg" style="display:none;">No history recorded yet. Data accumulates while the dashboard is open.</div>
+          <div class="chart-container" id="chart-thermo-wrap"><canvas id="chart-temperature"></canvas></div>
+        </div>
+
+        <!-- Floor Activity -->
+        <div class="hist-tab" id="htab-floor-activity">
+          <div class="hist-select-row">
+            <label>Floor:</label>
+            <select id="hist-floor-activity-select" onchange="loadFloorActivity()"></select>
+          </div>
+          <div id="hist-floor-msg" class="no-data-msg" style="display:none;">No history recorded yet. Data accumulates while the dashboard is open.</div>
+          <div class="chart-container" id="chart-floor-wrap"><canvas id="chart-floor-activity"></canvas></div>
+        </div>
+      </div>
+    </div><!-- /dash-tab-history -->
+
+    <!-- ===== AI Assistant tab ===== -->
+    <div class="dash-tab" id="dash-tab-ai">
+      <div style="padding:24px;max-width:800px;margin:0 auto;">
+        <div class="section-title">🤖 AI Assistant</div>
+        <div class="ai-mode-row">
+          <button class="ai-mode-btn active" id="ai-mode-control"  onclick="setAiMode('control')">🎮 Control Devices</button>
+          <button class="ai-mode-btn"        id="ai-mode-analyze"  onclick="setAiMode('analyze')">📈 Analyze Trends</button>
+        </div>
+        <div id="ai-messages"></div>
+        <div class="ai-input-row">
+          <textarea id="ai-input" placeholder="e.g. Turn off all lights on the main floor" rows="3"></textarea>
+          <button class="btn" id="ai-send-btn" onclick="sendAiCommand()" style="width:auto;padding:12px 20px;margin-top:0;">Send</button>
+        </div>
+        <div id="ai-actions-preview" style="display:none;">
+          <div class="section-title">Pending Actions</div>
+          <div id="ai-actions-list"></div>
+          <div class="ai-exec-row">
+            <button class="btn-sm primary" onclick="executeAiActions()">✓ Execute</button>
+            <button class="btn-sm"         onclick="clearAiActions()">Dismiss</button>
+            <button class="btn-sm"         onclick="saveAiRoutine()">💾 Save as Routine</button>
+          </div>
+        </div>
+      </div>
+    </div><!-- /dash-tab-ai -->
+
+    <!-- ===== Settings tab ===== -->
+    <div class="dash-tab" id="dash-tab-settings">
+      <div style="padding:24px;max-width:500px;margin:0 auto;">
+        <div class="section-title">⚙️ Settings</div>
+        <div class="settings-card">
+          <div class="settings-card-title">🤖 AI Integration (Anthropic)</div>
+          <div class="form-group">
+            <label>Anthropic API Key</label>
+            <div class="key-row">
+              <input type="password" id="setting-api-key" placeholder="sk-ant-…">
+              <button class="btn-sm" onclick="toggleKeyVisibility()">Show</button>
+            </div>
+            <div id="api-key-status" style="font-size:12px;color:var(--muted);margin-top:4px;"></div>
+          </div>
+          <div class="form-group">
+            <label>Model</label>
+            <select id="setting-model" class="mode-select"></select>
+          </div>
+          <button class="btn" onclick="saveAppSettings()" style="margin-top:8px;">Save Settings</button>
+          <div id="settings-msg" style="font-size:13px;margin-top:8px;display:none;"></div>
+        </div>
+      </div>
+    </div><!-- /dash-tab-settings -->
+
+  </div><!-- /dashboard-view -->
 
   <!-- Routine Editor Modal -->
   <div id="routine-modal" class="modal-backdrop">
@@ -883,6 +1145,8 @@
 
     function logout() {
       if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+      historyPollCount = 0;
+      pendingAiActions = [];
       state = {
         accountToken: null,
         directorToken: null,
@@ -902,6 +1166,7 @@
       showView("dashboard-view");
       loadRoutines();
       await refreshDevices();
+      recordHistoryNow(); // capture initial state immediately
       // Poll for state changes every 10 seconds
       if (refreshTimer) clearInterval(refreshTimer);
       refreshTimer = setInterval(() => refreshDeviceState(), 10000);
@@ -910,6 +1175,7 @@
     async function refreshDeviceState() {
       try {
         await Promise.all([refreshLightState(), refreshThermostatState()]);
+        maybeRecordHistory();
       } catch {}
     }
 
@@ -1771,6 +2037,579 @@
           if (t) { if (useFahrenheit) t.coolF = step.value; else t.coolC = step.value; }
           break;
         }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tab management
+    // -----------------------------------------------------------------------
+    let activeDashTab = "main";
+
+    function switchDashTab(tab) {
+      activeDashTab = tab;
+      document.querySelectorAll(".tab-btn").forEach((b) => {
+        b.classList.toggle("active", b.dataset.tab === tab);
+      });
+      document.querySelectorAll(".dash-tab").forEach((t) => {
+        t.classList.toggle("active", t.id === `dash-tab-${tab}`);
+      });
+      if (tab === "history")  initHistory();
+      if (tab === "settings") loadAppSettings();
+    }
+
+    // -----------------------------------------------------------------------
+    // History recording (send state snapshots to server every ~60 s)
+    // -----------------------------------------------------------------------
+    let historyPollCount = 0;
+
+    function maybeRecordHistory() {
+      historyPollCount++;
+      if (historyPollCount % 6 !== 0) return; // every 6th poll ≈ 60 s
+      recordHistoryNow();
+    }
+
+    async function recordHistoryNow() {
+      if (!state.lights.length && !state.thermostats.length) return;
+
+      // Build per-floor on-counts
+      const floors = {};
+      for (const l of state.lights) {
+        const floor = getFloorForLight(l);
+        if (!floors[floor]) floors[floor] = 0;
+        if (l.on) floors[floor]++;
+      }
+
+      try {
+        await api("/api/history/record", {
+          method: "POST",
+          body: {
+            lights:      state.lights.map((l) => ({ id: l.id, on: l.on, level: l.level })),
+            thermostats: state.thermostats.map((t) => ({
+              id: t.id, tempF: t.tempF, heatF: t.heatF, coolF: t.coolF, hvacMode: t.hvacMode,
+            })),
+            floors,
+          },
+        });
+      } catch { /* non-fatal */ }
+    }
+
+    // -----------------------------------------------------------------------
+    // History charts
+    // -----------------------------------------------------------------------
+    let lightChart      = null;
+    let thermoChart     = null;
+    let floorChart      = null;
+    let currentHistTab  = "lights";
+
+    function initHistory() {
+      populateHistorySelectors();
+      switchHistoryTab(currentHistTab);
+    }
+
+    function populateHistorySelectors() {
+      const floors = [...new Set(state.lights.map((l) => getFloorForLight(l)))].sort();
+
+      const floorSel = document.getElementById("hist-floor-select");
+      floorSel.innerHTML = floors.map((f) => `<option value="${esc(f)}">${esc(f)}</option>`).join("");
+
+      // Populate light selector for first floor WITHOUT triggering chart load
+      const floor    = floorSel.value;
+      const lightSel = document.getElementById("hist-light-select");
+      const lights   = state.lights.filter((l) => getFloorForLight(l) === floor);
+      lightSel.innerHTML =
+        '<option value="">All lights on floor</option>' +
+        lights.map((l) => `<option value="${l.id}">${esc(getLightDisplayName(l))}</option>`).join("");
+
+      const thermoSel = document.getElementById("hist-thermo-select");
+      thermoSel.innerHTML = state.thermostats.length
+        ? state.thermostats.map((t) =>
+            `<option value="${t.id}">${esc(t.name || "Thermostat " + t.id)}</option>`).join("")
+        : '<option value="">No thermostats</option>';
+
+      const floorActSel = document.getElementById("hist-floor-activity-select");
+      floorActSel.innerHTML = floors.map((f) => `<option value="${esc(f)}">${esc(f)}</option>`).join("");
+    }
+
+    function onHistFloorChange() {
+      const floor    = document.getElementById("hist-floor-select").value;
+      const lightSel = document.getElementById("hist-light-select");
+      const lights   = state.lights.filter((l) => getFloorForLight(l) === floor);
+      lightSel.innerHTML =
+        '<option value="">All lights on floor</option>' +
+        lights.map((l) => `<option value="${l.id}">${esc(getLightDisplayName(l))}</option>`).join("");
+      loadLightHistory();
+    }
+
+    function switchHistoryTab(tab) {
+      currentHistTab = tab;
+      document.querySelectorAll(".hist-tab-btn").forEach((b) => {
+        b.classList.toggle("active", b.dataset.htab === tab);
+      });
+      document.querySelectorAll(".hist-tab").forEach((t) => {
+        t.classList.toggle("active", t.id === `htab-${tab}`);
+      });
+      if (tab === "lights")         loadLightHistory();
+      else if (tab === "temperature")    loadThermoHistory();
+      else if (tab === "floor-activity") loadFloorActivity();
+    }
+
+    function histChartOptions({ yLabel = "", max } = {}) {
+      return {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: "#e4e4e7" } } },
+        scales: {
+          x: {
+            ticks: { color: "#71717a", maxTicksLimit: 10, maxRotation: 0 },
+            grid:  { color: "#2a2d3a" },
+          },
+          y: {
+            min: 0,
+            ...(max != null ? { max } : {}),
+            ticks: { color: "#71717a" },
+            grid:  { color: "#2a2d3a" },
+            title: { display: !!yLabel, text: yLabel, color: "#71717a" },
+          },
+        },
+      };
+    }
+
+    function formatTs(ts) {
+      const d = new Date(ts);
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+
+    async function loadLightHistory() {
+      const floor   = document.getElementById("hist-floor-select").value;
+      const lightId = document.getElementById("hist-light-select").value;
+      const msgEl   = document.getElementById("hist-lights-msg");
+      const wrap    = document.getElementById("chart-light-wrap");
+
+      const canvasEl = document.getElementById("chart-light-state");
+      const orphan = Chart.getChart(canvasEl);
+      if (orphan) orphan.destroy();
+      if (lightChart) { lightChart.destroy(); }
+      lightChart = null;
+
+      const COLORS = ["#f59e0b","#3b82f6","#22c55e","#a855f7","#ef4444","#06b6d4","#ec4899","#84cc16"];
+      let labels = [], datasets = [];
+
+      if (lightId) {
+        const data = await api(`/api/history?type=light&id=${lightId}`).catch(() => []);
+        if (data.length) {
+          labels   = data.map((p) => formatTs(p.ts));
+          datasets = [{
+            label: getLightDisplayName(state.lights.find((l) => l.id == lightId)) || "Light",
+            data: data.map((p) => p.level),
+            borderColor: "#f59e0b",
+            backgroundColor: "rgba(245,158,11,0.1)",
+            fill: true, stepped: true, tension: 0,
+          }];
+        }
+      } else {
+        const lights = state.lights.filter((l) => getFloorForLight(l) === floor).slice(0, 10);
+        const results = await Promise.all(
+          lights.map((l) => api(`/api/history?type=light&id=${l.id}`).catch(() => []))
+        );
+        // Merge timestamps
+        const allTs = [...new Set(results.flatMap((d) => d.map((p) => p.ts)))].sort((a,b)=>a-b);
+        labels = allTs.map(formatTs);
+        datasets = lights.map((l, i) => {
+          const map = Object.fromEntries((results[i] || []).map((p) => [p.ts, p.level]));
+          return {
+            label: getLightDisplayName(l),
+            data: allTs.map((ts) => map[ts] ?? null),
+            borderColor: COLORS[i % COLORS.length],
+            fill: false, stepped: true, spanGaps: true,
+          };
+        });
+      }
+
+      const hasData = labels.length > 0;
+      msgEl.style.display  = hasData ? "none" : "block";
+      wrap.style.display   = hasData ? "block" : "none";
+      if (!hasData) return;
+
+      const ctx = document.getElementById("chart-light-state").getContext("2d");
+      lightChart = new Chart(ctx, {
+        type: "line",
+        data: { labels, datasets },
+        options: histChartOptions({ yLabel: "Level (%)", max: 100 }),
+      });
+    }
+
+    async function loadThermoHistory() {
+      const thermoId = document.getElementById("hist-thermo-select").value;
+      const msgEl    = document.getElementById("hist-thermo-msg");
+      const wrap     = document.getElementById("chart-thermo-wrap");
+
+      const thermoCanvas = document.getElementById("chart-temperature");
+      const thermoOrphan = Chart.getChart(thermoCanvas);
+      if (thermoOrphan) thermoOrphan.destroy();
+      if (thermoChart) { thermoChart.destroy(); }
+      thermoChart = null;
+      if (!thermoId) return;
+
+      const data = await api(`/api/history?type=thermo&id=${thermoId}`).catch(() => []);
+      const hasData = data.length > 0;
+      msgEl.style.display = hasData ? "none" : "block";
+      wrap.style.display  = hasData ? "block" : "none";
+      if (!hasData) return;
+
+      const labels = data.map((p) => formatTs(p.ts));
+      const ctx = document.getElementById("chart-temperature").getContext("2d");
+      thermoChart = new Chart(ctx, {
+        type: "line",
+        data: {
+          labels,
+          datasets: [
+            { label: "Actual Temp (°F)",   data: data.map((p) => p.tempF), borderColor: "#3b82f6", fill: false },
+            { label: "Heat Setpoint (°F)", data: data.map((p) => p.heatF), borderColor: "#ef4444", borderDash: [5,5], fill: false },
+            { label: "Cool Setpoint (°F)", data: data.map((p) => p.coolF), borderColor: "#06b6d4", borderDash: [5,5], fill: false },
+          ],
+        },
+        options: histChartOptions({ yLabel: "Temperature (°F)" }),
+      });
+    }
+
+    async function loadFloorActivity() {
+      const floor  = document.getElementById("hist-floor-activity-select").value;
+      const msgEl  = document.getElementById("hist-floor-msg");
+      const wrap   = document.getElementById("chart-floor-wrap");
+
+      const floorCanvas = document.getElementById("chart-floor-activity");
+      const floorOrphan = Chart.getChart(floorCanvas);
+      if (floorOrphan) floorOrphan.destroy();
+      if (floorChart) { floorChart.destroy(); }
+      floorChart = null;
+      if (!floor) return;
+
+      const data = await api(`/api/history?type=floor&id=${encodeURIComponent(floor)}`).catch(() => []);
+      const hasData = data.length > 0;
+      msgEl.style.display = hasData ? "none" : "block";
+      wrap.style.display  = hasData ? "block" : "none";
+      if (!hasData) return;
+
+      const total = state.lights.filter((l) => getFloorForLight(l) === floor).length;
+      const labels = data.map((p) => formatTs(p.ts));
+      const ctx = document.getElementById("chart-floor-activity").getContext("2d");
+      floorChart = new Chart(ctx, {
+        type: "line",
+        data: {
+          labels,
+          datasets: [{
+            label: "Lights On",
+            data: data.map((p) => p.onCount),
+            borderColor: "#f59e0b",
+            backgroundColor: "rgba(245,158,11,0.1)",
+            fill: true, stepped: true,
+          }],
+        },
+        options: histChartOptions({ yLabel: "Lights On", max: total || undefined }),
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // AI Assistant
+    // -----------------------------------------------------------------------
+    let aiMode           = "control";
+    let pendingAiActions = [];
+
+    function setAiMode(mode) {
+      aiMode = mode;
+      document.getElementById("ai-mode-control").classList.toggle("active", mode === "control");
+      document.getElementById("ai-mode-analyze").classList.toggle("active", mode === "analyze");
+      document.getElementById("ai-input").placeholder = mode === "control"
+        ? "e.g. Turn off all lights on the main floor, or Set thermostat to 72°F"
+        : "e.g. Analyze my lighting patterns and suggest routines, or How can I save energy?";
+    }
+
+    function buildAiContext() {
+      const floorRenames = getFloorRenames();
+      const devices = [];
+
+      for (const l of state.lights) {
+        const floor = getFloorForLight(l);
+        devices.push({
+          type:  "light",
+          id:    l.id,
+          name:  getLightDisplayName(l),
+          floor: floorRenames[floor] || floor,
+          room:  l.roomName || "Unknown",
+          on:    l.on,
+          level: l.level,
+        });
+      }
+
+      for (const t of state.thermostats) {
+        const floor = t.floorName || "Unknown";
+        devices.push({
+          type:     "thermostat",
+          id:       t.id,
+          name:     t.name || `Thermostat ${t.id}`,
+          floor:    floorRenames[floor] || floor,
+          tempF:    t.tempF,
+          heatF:    t.heatF,
+          coolF:    t.coolF,
+          hvacMode: t.hvacMode,
+        });
+      }
+
+      return {
+        devices,
+        routines: state.routines.map((r) => ({ id: r.id, name: r.name })),
+      };
+    }
+
+    async function buildHistorySummaryForAi() {
+      let summary = "";
+      try {
+        const floors = [...new Set(state.lights.map((l) => getFloorForLight(l)))];
+        for (const floor of floors) {
+          const data = await api(`/api/history?type=floor&id=${encodeURIComponent(floor)}`).catch(() => []);
+          if (data.length) {
+            const total = state.lights.filter((l) => getFloorForLight(l) === floor).length;
+            const avg = (data.reduce((s, p) => s + p.onCount, 0) / data.length).toFixed(1);
+            summary += `Floor "${floor}": avg ${avg}/${total} lights on over ${data.length} samples\n`;
+          }
+        }
+        for (const t of state.thermostats) {
+          const data = await api(`/api/history?type=thermo&id=${t.id}`).catch(() => []);
+          if (data.length) {
+            const temps = data.filter((p) => p.tempF != null).map((p) => p.tempF);
+            if (temps.length) {
+              const min = Math.min(...temps).toFixed(1);
+              const max = Math.max(...temps).toFixed(1);
+              const avg = (temps.reduce((a, b) => a + b, 0) / temps.length).toFixed(1);
+              summary += `Thermostat "${t.name || t.id}": temp range ${min}°F–${max}°F, avg ${avg}°F\n`;
+            }
+          }
+        }
+      } catch { /* non-fatal */ }
+      return summary;
+    }
+
+    function addAiMessage(role, text) {
+      const el  = document.getElementById("ai-messages");
+      const div = document.createElement("div");
+      div.className = `ai-message ai-${role}`;
+      div.innerHTML = `<div class="ai-msg-content">${esc(text)}</div>`;
+      el.appendChild(div);
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function describeAiAction(action) {
+      const light  = state.lights.find((l) => l.id === action.deviceId);
+      const thermo = state.thermostats.find((t) => t.id === action.deviceId);
+      const name   = light
+        ? getLightDisplayName(light)
+        : (thermo ? (thermo.name || `Thermostat ${action.deviceId}`) : `Device ${action.deviceId}`);
+
+      switch (action.type) {
+        case "light_level":    return `${name}: Set level to ${action.level}%`;
+        case "light_toggle":   return `${name}: Turn ${action.on ? "on" : "off"}`;
+        case "hvac_mode":      return `${name}: Set HVAC to ${action.mode}`;
+        case "heat_setpoint":  return `${name}: Heat setpoint → ${action.value}°F`;
+        case "cool_setpoint":  return `${name}: Cool setpoint → ${action.value}°F`;
+        case "run_routine":    {
+          const r = state.routines.find((r) => r.id === action.routineId);
+          return `Run routine: ${r ? r.name : action.routineId}`;
+        }
+        case "create_routine": return `Create routine "${action.name}" (${(action.steps || []).length} steps)`;
+        default:               return JSON.stringify(action);
+      }
+    }
+
+    function showAiActionPreview(actions) {
+      const list = document.getElementById("ai-actions-list");
+      list.innerHTML = "";
+      for (const action of actions) {
+        const div = document.createElement("div");
+        div.className = "step-item";
+        div.innerHTML = `<span>${esc(describeAiAction(action))}</span>`;
+        list.appendChild(div);
+      }
+      document.getElementById("ai-actions-preview").style.display = "block";
+    }
+
+    function clearAiActions() {
+      pendingAiActions = [];
+      document.getElementById("ai-actions-preview").style.display = "none";
+    }
+
+    async function sendAiCommand() {
+      const input   = document.getElementById("ai-input");
+      const message = input.value.trim();
+      if (!message) return;
+
+      const sendBtn = document.getElementById("ai-send-btn");
+      sendBtn.disabled  = true;
+      sendBtn.textContent = "Thinking…";
+
+      addAiMessage("user", message);
+      input.value = "";
+
+      try {
+        const context = buildAiContext();
+        if (aiMode === "analyze") {
+          context.historySummary = await buildHistorySummaryForAi();
+        }
+
+        const result = await api("/api/llm/chat", {
+          method: "POST",
+          body: { message, context, mode: aiMode },
+        });
+
+        if (result.error) {
+          addAiMessage("error", result.error);
+        } else {
+          addAiMessage("assistant", result.message || "Done.");
+          if (Array.isArray(result.actions) && result.actions.length > 0) {
+            pendingAiActions = result.actions;
+            showAiActionPreview(result.actions);
+          }
+        }
+      } catch (err) {
+        addAiMessage("error", err.message);
+      } finally {
+        sendBtn.disabled    = false;
+        sendBtn.textContent = "Send";
+      }
+    }
+
+    async function executeAiActions() {
+      if (!pendingAiActions.length) return;
+      const btn = document.querySelector('[onclick="executeAiActions()"]');
+      if (btn) { btn.disabled = true; btn.textContent = "Executing…"; }
+
+      try {
+        for (const action of pendingAiActions) {
+          if (action.type === "run_routine") {
+            await executeRoutine(action.routineId);
+          } else if (action.type === "create_routine") {
+            const newId = (typeof crypto !== "undefined" && crypto.randomUUID)
+              ? crypto.randomUUID()
+              : Date.now().toString(36) + Math.random().toString(36).slice(2);
+            const routine = {
+              id: newId,
+              name: action.name,
+              steps: (action.steps || []).map((s) => {
+                const d = [...state.lights, ...state.thermostats].find((x) => x.id === s.deviceId);
+                return { ...s, deviceName: d ? (getLightDisplayName(d) || d.name) : `Device ${s.deviceId}` };
+              }),
+            };
+            state.routines.push(routine);
+            saveRoutinesToStorage();
+            renderRoutines();
+            addAiMessage("assistant", `✓ Created routine "${routine.name}"`);
+          } else {
+            await executeStep(action);
+            await new Promise((r) => setTimeout(r, 200));
+          }
+        }
+        renderLights();
+        renderThermostats();
+        addAiMessage("assistant", "✓ All actions completed.");
+      } catch (err) {
+        addAiMessage("error", `Failed: ${err.message}`);
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = "✓ Execute"; }
+        clearAiActions();
+      }
+    }
+
+    async function saveAiRoutine() {
+      const steps = pendingAiActions.filter(
+        (a) => a.type !== "run_routine" && a.type !== "create_routine"
+      );
+      if (!steps.length) { alert("No saveable steps in the pending actions."); return; }
+
+      const name = prompt("Routine name:", "AI Routine " + new Date().toLocaleDateString());
+      if (!name) return;
+
+      const enrichedSteps = steps.map((s) => {
+        const d = [...state.lights, ...state.thermostats].find((x) => x.id === s.deviceId);
+        return { ...s, deviceName: d ? (getLightDisplayName(d) || d.name) : `Device ${s.deviceId}` };
+      });
+
+      state.routines.push({
+        id: (typeof crypto !== "undefined" && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : Date.now().toString(36) + Math.random().toString(36).slice(2),
+        name,
+        steps: enrichedSteps,
+      });
+      saveRoutinesToStorage();
+      renderRoutines();
+      clearAiActions();
+      addAiMessage("assistant", `✓ Saved routine "${name}" (${enrichedSteps.length} steps).`);
+    }
+
+    // Also allow pressing Enter (without Shift) in the AI input to submit
+    document.addEventListener("DOMContentLoaded", () => {
+      const aiInput = document.getElementById("ai-input");
+      if (aiInput) {
+        aiInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            sendAiCommand();
+          }
+        });
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // Settings
+    // -----------------------------------------------------------------------
+    async function loadAppSettings() {
+      try {
+        const [settings, models] = await Promise.all([
+          api("/api/settings"),
+          api("/api/llm/models"),
+        ]);
+
+        const keyStatus = document.getElementById("api-key-status");
+        keyStatus.textContent = settings.hasAnthropicKey ? "✓ API key is configured" : "No API key set";
+        keyStatus.style.color = settings.hasAnthropicKey ? "var(--green)" : "var(--muted)";
+
+        const modelSel = document.getElementById("setting-model");
+        if (Array.isArray(models)) {
+          modelSel.innerHTML = models.map((m) =>
+            `<option value="${esc(m.id)}" ${m.id === settings.anthropicModel ? "selected" : ""}>${esc(m.name)}</option>`
+          ).join("");
+        }
+      } catch (err) {
+        console.error("Failed to load app settings:", err);
+      }
+    }
+
+    function toggleKeyVisibility() {
+      const input = document.getElementById("setting-api-key");
+      input.type  = input.type === "password" ? "text" : "password";
+    }
+
+    async function saveAppSettings() {
+      const key   = document.getElementById("setting-api-key").value.trim();
+      const model = document.getElementById("setting-model").value;
+      const msg   = document.getElementById("settings-msg");
+
+      try {
+        const body = { anthropicModel: model };
+        if (key) body.anthropicKey = key;
+
+        const result = await api("/api/settings", { method: "POST", body });
+        if (result.error) throw new Error(result.error);
+
+        msg.textContent  = "Settings saved successfully.";
+        msg.style.color  = "var(--green)";
+        msg.style.display = "block";
+        document.getElementById("setting-api-key").value = "";
+        await loadAppSettings();
+        setTimeout(() => { msg.style.display = "none"; }, 3000);
+      } catch (err) {
+        msg.textContent  = "Error: " + err.message;
+        msg.style.color  = "var(--red)";
+        msg.style.display = "block";
       }
     }
   </script>
