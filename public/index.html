@@ -1199,13 +1199,28 @@
           state.controllerIP = ip;
         }
 
+        // Initialize server-side real-time engine
+        try {
+          await api("/api/realtime/connect", {
+            method: "POST",
+            body: {
+              controllerIp: state.controllerIP,
+              directorToken: state.directorToken,
+              accountToken: state.accountToken,
+              controllerCommonName: state.controllerCommonName,
+            },
+          });
+        } catch (err) {
+          console.warn("Real-time init failed (non-fatal):", err.message);
+        }
+
         enterDashboard();
       } catch (err) {
         alert("Failed to get director token: " + err.message);
       }
     }
 
-    function directConnect() {
+    async function directConnect() {
       const ip = document.getElementById("direct-ip").value.trim();
       const token = document.getElementById("direct-token").value.trim();
       if (!ip || !token) {
@@ -1214,6 +1229,20 @@
       }
       state.controllerIP = ip;
       state.directorToken = token;
+
+      // Initialize server-side real-time engine
+      try {
+        await api("/api/realtime/connect", {
+          method: "POST",
+          body: {
+            controllerIp: state.controllerIP,
+            directorToken: state.directorToken,
+          },
+        });
+      } catch (err) {
+        console.warn("Real-time init failed (non-fatal):", err.message);
+      }
+
       enterDashboard();
     }
 
@@ -1254,9 +1283,11 @@
     }
 
     let refreshTimer = null;
+    let eventSource = null;
 
     function logout() {
       if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+      if (eventSource) { eventSource.close(); eventSource = null; }
       historyPollCount = 0;
       pendingAiActions = [];
       state = {
@@ -1273,6 +1304,80 @@
     }
 
     // -----------------------------------------------------------------------
+    // Server-Sent Events (SSE) for real-time updates
+    // -----------------------------------------------------------------------
+
+    function connectSSE() {
+      if (eventSource) eventSource.close();
+      eventSource = new EventSource("/api/events");
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "stateChange") {
+            applyStateChange(data);
+          }
+        } catch {}
+      };
+
+      eventSource.onopen = () => {
+        // SSE connected — stop polling fallback
+        if (refreshTimer) {
+          clearInterval(refreshTimer);
+          refreshTimer = null;
+        }
+      };
+
+      eventSource.onerror = () => {
+        // SSE disconnected — fall back to polling
+        if (eventSource) eventSource.close();
+        eventSource = null;
+        if (!refreshTimer) {
+          refreshTimer = setInterval(() => refreshDeviceState(), 10000);
+        }
+        // Try to reconnect SSE after 5 seconds
+        setTimeout(() => {
+          if (!eventSource && state.directorToken) connectSSE();
+        }, 5000);
+      };
+    }
+
+    function applyStateChange(data) {
+      // Update local light state
+      const light = state.lights.find(l => l.id === data.itemId);
+      if (light) {
+        if (data.varName === "LIGHT_LEVEL") light.level = parseInt(data.value) || 0;
+        if (data.varName === "LIGHT_STATE") {
+          light.on = data.value === "1" || data.value === 1;
+          // Sync level if turned off
+          if (!light.on) light.level = 0;
+        }
+        renderLights();
+        return;
+      }
+
+      // Update local thermostat state
+      const thermo = state.thermostats.find(t => t.id === data.itemId);
+      if (thermo) {
+        const varMap = {
+          TEMPERATURE_F: "tempF",
+          HEAT_SETPOINT_F: "heatF",
+          COOL_SETPOINT_F: "coolF",
+          HVAC_MODE: "hvacMode",
+          HUMIDITY: "humidity",
+          HVAC_STATE: "hvacState",
+          FAN_MODE: "fanMode",
+        };
+        const prop = varMap[data.varName];
+        if (prop) {
+          const num = parseFloat(data.value);
+          thermo[prop] = Number.isFinite(num) ? num : data.value;
+          renderThermostats();
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
     // Dashboard
     // -----------------------------------------------------------------------
     async function enterDashboard() {
@@ -1280,7 +1385,10 @@
       loadRoutines();
       await refreshDevices();
       recordHistoryNow(); // capture initial state immediately
-      // Poll for state changes every 10 seconds
+
+      // Try SSE first, fall back to polling
+      connectSSE();
+      // Also start polling as immediate fallback (SSE onopen will clear it)
       if (refreshTimer) clearInterval(refreshTimer);
       refreshTimer = setInterval(() => refreshDeviceState(), 10000);
     }

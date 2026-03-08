@@ -10,6 +10,9 @@ const path = require("path");
 const dgram = require("dgram");
 const oauth = require("./oauth");
 const { isPrivateOrLocalHost, requestText } = require("./http-client");
+const { C4WebSocket } = require("./c4-websocket");
+const { StateMachine } = require("./state-machine");
+const { TrendingEngine } = require("./trending");
 
 // ---------------------------------------------------------------------------
 // Data directory (settings + any future persistence)
@@ -186,6 +189,17 @@ function addHistoryPoint(key, point) {
     historyStore[key].shift();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Real-time engine singletons (WebSocket + state machine + trending)
+// ---------------------------------------------------------------------------
+
+let c4ws = null;              // C4WebSocket instance
+let stateMachine = null;      // StateMachine instance
+let trending = null;          // TrendingEngine instance
+let sseClients = [];          // Active Server-Sent Events clients
+let fallbackPollTimer = null; // Fallback polling when WS is down
+let mockEventTimer = null;    // Mock mode event simulator
 
 // ---------------------------------------------------------------------------
 // Anthropic model list
@@ -408,6 +422,10 @@ function handleMockRequest(req, res, apiPath) {
     if (apiPath.match(/^\/api\/v1\/categories\/(voice-scene|scenes|experience)$/)) {
       return res.json(mockState.scenes);
     }
+    // Additional categories for state-machine discovery (return empty for mock)
+    if (apiPath.match(/^\/api\/v1\/categories\/(locks|sensors|security|comfort|media)$/)) {
+      return res.json([]);
+    }
 
     // GET variables for an item
     const varMatch = apiPath.match(/^\/api\/v1\/items\/(\d+)\/variables$/);
@@ -459,6 +477,11 @@ function handleMockRequest(req, res, apiPath) {
         if (command === "SET_LEVEL") {
           light.level = clampNumber(tParams?.LEVEL, 0, 100, 0);
           light.on = light.level > 0;
+          // Push through state machine so SSE/trending/derived state update
+          emitMockDeviceEvents(id, [
+            { varName: "LIGHT_LEVEL", value: String(light.level) },
+            { varName: "LIGHT_STATE", value: light.on ? "1" : "0" },
+          ]);
         }
         return res.json({ ok: true });
       }
@@ -466,14 +489,26 @@ function handleMockRequest(req, res, apiPath) {
       // Thermostat commands
       const thermo = mockState.thermostats.find(t => t.id === id);
       if (thermo) {
+        const events = [];
         if (command === "SET_MODE_HVAC") {
           const allowedModes = ["Off", "Heat", "Cool", "Auto"];
           if (allowedModes.includes(tParams.MODE)) {
             thermo.hvacMode = tParams.MODE;
+            events.push({ varName: "HVAC_MODE", value: thermo.hvacMode });
+            // HVAC_STATE follows mode
+            const hvacState = thermo.hvacMode === "Off" ? "Off" : "Running";
+            events.push({ varName: "HVAC_STATE", value: hvacState });
           }
         }
-        if (command === "SET_SETPOINT_HEAT") thermo.heatF = clampNumber(tParams?.FAHRENHEIT, 32, 120, thermo.heatF);
-        if (command === "SET_SETPOINT_COOL") thermo.coolF = clampNumber(tParams?.FAHRENHEIT, 32, 120, thermo.coolF);
+        if (command === "SET_SETPOINT_HEAT") {
+          thermo.heatF = clampNumber(tParams?.FAHRENHEIT, 32, 120, thermo.heatF);
+          events.push({ varName: "HEAT_SETPOINT_F", value: String(thermo.heatF) });
+        }
+        if (command === "SET_SETPOINT_COOL") {
+          thermo.coolF = clampNumber(tParams?.FAHRENHEIT, 32, 120, thermo.coolF);
+          events.push({ varName: "COOL_SETPOINT_F", value: String(thermo.coolF) });
+        }
+        emitMockDeviceEvents(id, events);
         return res.json({ ok: true });
       }
 
@@ -516,6 +551,19 @@ function handleMockRequest(req, res, apiPath) {
   }
 
   return null; // not handled
+}
+
+/**
+ * Push variable-change events from mock commands into the state machine,
+ * exactly like the real Director would push WebSocket events after a command.
+ */
+function emitMockDeviceEvents(itemId, events) {
+  if (!stateMachine) return;
+  for (const { varName, value } of events) {
+    try {
+      stateMachine.handleDeviceEvent({ itemId, varName, value });
+    } catch {}
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1140,6 +1188,321 @@ app.post("/api/llm/chat", async (req, res) => {
     } catch {}
     res.status(500).json({ error: errMsg });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Real-time: initialise WebSocket + state machine + trending
+// ---------------------------------------------------------------------------
+
+async function initializeRealtime({ controllerIp, directorToken, accountToken, controllerCommonName }) {
+  // 1. Trending engine (idempotent — keep existing if already running)
+  if (!trending) {
+    trending = new TrendingEngine({
+      dbPath: path.join(DATA_DIR, "trending.db"),
+      logger: (...args) => console.log("[trending]", ...args),
+    });
+    trending.init();
+  }
+
+  // 2. State machine — always re-create on new connection
+  stateMachine = new StateMachine({
+    apiFn: async (apiPath) => {
+      const params = new URLSearchParams({ ip: controllerIp, token: directorToken });
+      const sep = apiPath.includes("?") ? "&" : "?";
+      const url = `http://localhost:${PORT}/api/director/${apiPath}${sep}${params}`;
+      const resp = await requestText(url);
+      if (resp.statusCode >= 400) throw new Error(`HTTP ${resp.statusCode}: ${resp.body}`);
+      return JSON.parse(resp.body);
+    },
+    logger: (...args) => console.log("[state]", ...args),
+  });
+
+  await stateMachine.discover();
+  await stateMachine.readInitialState();
+
+  // 3. Wire state changes → trending + SSE
+  let prevMode = null;
+  stateMachine.on("stateChange", (change) => {
+    trending.recordEvent({
+      itemId: change.itemId,
+      varName: change.varName,
+      value: change.value,
+      oldValue: change.oldValue,
+      timestamp: change.timestamp,
+    });
+
+    // Track home-mode transitions
+    const homeState = stateMachine.getHomeState();
+    if (homeState.mode !== prevMode) {
+      trending.recordModeChange(homeState.mode, homeState.confidence);
+      prevMode = homeState.mode;
+    }
+
+    broadcastSSE("stateChange", change);
+  });
+
+  // 4. WebSocket (skip for mock)
+  if (controllerIp !== "mock") {
+    // Clean up previous connection
+    if (c4ws) {
+      c4ws.disconnect();
+      c4ws = null;
+    }
+    stopFallbackPolling();
+
+    const refreshTokenFn = async () => {
+      const body = JSON.stringify({
+        serviceInfo: { commonName: controllerCommonName, services: "director" },
+      });
+      const data = await request(C4_CONTROLLER_AUTH_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${accountToken}` },
+        body,
+      });
+      const json = JSON.parse(data);
+      return { token: json.authToken.token, validSeconds: json.authToken.validSeconds };
+    };
+
+    c4ws = new C4WebSocket({
+      directorIp: controllerIp,
+      directorToken,
+      refreshTokenFn,
+      logger: (...args) => console.log("[ws]", ...args),
+    });
+
+    c4ws.onAnyChange((payload) => {
+      stateMachine.handleDeviceEvent(payload);
+    });
+
+    c4ws.on("disconnected", () => startFallbackPolling(controllerIp, directorToken));
+    c4ws.on("reconnected", async () => {
+      stopFallbackPolling();
+      try { await stateMachine.readInitialState(); } catch {}
+    });
+    c4ws.on("reconnectFailed", () => startFallbackPolling(controllerIp, directorToken));
+
+    // Connect with retry
+    try {
+      await connectWithRetry(c4ws);
+    } catch {
+      console.log("[ws] Initial connection failed, using fallback polling");
+      startFallbackPolling(controllerIp, directorToken);
+    }
+  } else {
+    // Mock mode: simulate periodic events
+    startMockEventEmitter();
+  }
+
+  console.log(`[realtime] Initialized (${controllerIp === "mock" ? "mock" : "websocket"} mode, ${stateMachine.getAllDeviceStates().size} devices)`);
+}
+
+async function connectWithRetry(wsInstance, maxAttempts = 5) {
+  let attempt = 0;
+  while (attempt < maxAttempts) {
+    try {
+      await wsInstance.connect();
+      return;
+    } catch (err) {
+      attempt++;
+      const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
+      console.log(`[ws] Connection attempt ${attempt} failed, retrying in ${delay}ms: ${err.message}`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw new Error(`Failed after ${maxAttempts} attempts`);
+}
+
+function startFallbackPolling(controllerIp, directorToken) {
+  if (fallbackPollTimer) return;
+  if (!stateMachine) return;
+  console.log("[resilience] Starting fallback polling (15s interval)");
+
+  fallbackPollTimer = setInterval(async () => {
+    try {
+      await stateMachine.readInitialState();
+    } catch (err) {
+      console.error("[resilience] Fallback poll error:", err.message);
+    }
+  }, 15000);
+  if (fallbackPollTimer.unref) fallbackPollTimer.unref();
+}
+
+function stopFallbackPolling() {
+  if (fallbackPollTimer) {
+    clearInterval(fallbackPollTimer);
+    fallbackPollTimer = null;
+    console.log("[resilience] Stopped fallback polling");
+  }
+}
+
+function startMockEventEmitter() {
+  if (mockEventTimer) clearInterval(mockEventTimer);
+
+  mockEventTimer = setInterval(() => {
+    if (!stateMachine) return;
+    const devices = [...stateMachine.getAllDeviceStates().values()].filter(d => d.type === "light");
+    if (devices.length === 0) return;
+
+    const device = devices[Math.floor(Math.random() * devices.length)];
+    const newLevel = Math.random() > 0.3 ? Math.floor(Math.random() * 100) : 0;
+
+    stateMachine.handleDeviceEvent({ itemId: device.itemId, varName: "LIGHT_LEVEL", value: String(newLevel) });
+    stateMachine.handleDeviceEvent({ itemId: device.itemId, varName: "LIGHT_STATE", value: newLevel > 0 ? "1" : "0" });
+  }, 30000);
+  if (mockEventTimer.unref) mockEventTimer.unref();
+}
+
+function broadcastSSE(eventType, data) {
+  const payload = JSON.stringify({
+    type: eventType,
+    itemId: data.itemId,
+    varName: data.varName,
+    value: data.value,
+    oldValue: data.oldValue,
+    timestamp: data.timestamp,
+  });
+  for (const client of sseClients) {
+    try { client.write(`data: ${payload}\n\n`); } catch {}
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Real-time: POST /api/realtime/connect
+// ---------------------------------------------------------------------------
+
+app.post("/api/realtime/connect", async (req, res) => {
+  const { controllerIp, directorToken, accountToken, controllerCommonName } = req.body;
+  if (!controllerIp || !directorToken) {
+    return res.status(400).json({ error: "controllerIp and directorToken required" });
+  }
+  if (controllerIp !== "mock" && !isValidDirectorIp(controllerIp)) {
+    return res.status(400).json({ error: "invalid controller IP" });
+  }
+  try {
+    await initializeRealtime({ controllerIp, directorToken, accountToken, controllerCommonName });
+    res.json({
+      ok: true,
+      mode: controllerIp === "mock" ? "mock" : "websocket",
+      devices: stateMachine ? stateMachine.getAllDeviceStates().size : 0,
+      rooms: stateMachine ? stateMachine.getAllRoomStates().size : 0,
+    });
+  } catch (err) {
+    console.error("[realtime] Init error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Real-time: SSE endpoint for browser
+// ---------------------------------------------------------------------------
+
+app.get("/api/events", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  // Send initial state
+  if (stateMachine) {
+    const init = JSON.stringify({ type: "init", summary: stateMachine.getStateSummary() });
+    res.write(`data: ${init}\n\n`);
+  }
+
+  sseClients.push(res);
+
+  req.on("close", () => {
+    sseClients = sseClients.filter(c => c !== res);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Real-time: state & trending REST endpoints
+// ---------------------------------------------------------------------------
+
+app.get("/api/state", (_req, res) => {
+  if (!stateMachine) return res.status(503).json({ error: "State not initialized" });
+  res.json({
+    home: stateMachine.getHomeState(),
+    summary: stateMachine.getStateSummary(),
+    deviceCount: stateMachine.getAllDeviceStates().size,
+    roomCount: stateMachine.getAllRoomStates().size,
+  });
+});
+
+// NB: /api/state/room/:roomId must come before /api/state/:itemId
+// to avoid "room" being parsed as an itemId
+app.get("/api/state/room/:roomId", (req, res) => {
+  if (!stateMachine) return res.status(503).json({ error: "State not initialized" });
+  const roomId = parseInt(req.params.roomId, 10);
+  if (!Number.isFinite(roomId)) return res.status(400).json({ error: "invalid roomId" });
+  const room = stateMachine.getRoomState(roomId);
+  if (!room) return res.status(404).json({ error: "room not found" });
+  res.json(room);
+});
+
+app.get("/api/state/:itemId", (req, res) => {
+  if (!stateMachine) return res.status(503).json({ error: "State not initialized" });
+  const itemId = parseInt(req.params.itemId, 10);
+  if (!Number.isFinite(itemId)) return res.status(400).json({ error: "invalid itemId" });
+  const device = stateMachine.getDeviceState(itemId);
+  if (!device) return res.status(404).json({ error: "device not found" });
+  res.json(device);
+});
+
+app.get("/api/trending/:itemId", (req, res) => {
+  if (!trending) return res.status(503).json({ error: "Trending not initialized" });
+  const itemId = parseInt(req.params.itemId, 10);
+  const hours = parseInt(req.query.hours, 10) || 24;
+  if (!Number.isFinite(itemId)) return res.status(400).json({ error: "invalid itemId" });
+  res.json(trending.getDeviceHistory(itemId, hours));
+});
+
+app.get("/api/trending/:itemId/daily", (req, res) => {
+  if (!trending) return res.status(503).json({ error: "Trending not initialized" });
+  const itemId = parseInt(req.params.itemId, 10);
+  const days = parseInt(req.query.days, 10) || 7;
+  if (!Number.isFinite(itemId)) return res.status(400).json({ error: "invalid itemId" });
+  res.json(trending.getDailySummary(itemId, days));
+});
+
+app.get("/api/alerts", (_req, res) => {
+  if (!stateMachine || !trending) return res.status(503).json({ error: "Not initialized" });
+  const alerts = stateMachine.getHomeState().alerts || [];
+  const anomalies = trending.getAnomalies(24);
+  res.json({ alerts, anomalies });
+});
+
+// ---------------------------------------------------------------------------
+// Health endpoint
+// ---------------------------------------------------------------------------
+
+app.get("/api/health", (_req, res) => {
+  const health = {
+    status: "ok",
+    uptime: Math.round(process.uptime()),
+    timestamp: Date.now(),
+    websocket: {
+      connected: c4ws ? c4ws.isConnected() : false,
+      mode: c4ws ? "websocket" : (stateMachine ? (fallbackPollTimer ? "polling" : "mock") : "disconnected"),
+    },
+    stateMachine: {
+      initialized: !!stateMachine,
+      deviceCount: stateMachine ? stateMachine.getAllDeviceStates().size : 0,
+      roomCount: stateMachine ? stateMachine.getAllRoomStates().size : 0,
+    },
+    trending: {
+      initialized: !!trending,
+      ...(trending ? trending.getStats() : {}),
+    },
+    sseClients: sseClients.length,
+  };
+
+  if (!stateMachine || (!c4ws?.isConnected() && !fallbackPollTimer && !mockEventTimer)) {
+    health.status = "degraded";
+  }
+
+  res.json(health);
 });
 
 // ---------------------------------------------------------------------------
