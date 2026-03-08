@@ -7,7 +7,7 @@ const { z } = require("zod");
 const { requestText } = require("./http-client");
 
 /**
- * Creates a configured MCP server with all 13 smart-home tools.
+ * Creates a configured MCP server with all 18 smart-home tools.
  *
  * @param {object} config
  * @param {string} config.baseUrl        – Express server origin, e.g. "http://localhost:3000"
@@ -337,6 +337,102 @@ function createMcpServer(config) {
       await apiCall("/api/routines", { method: "POST", body: routine });
       const schedDesc = schedule?.enabled ? ` (scheduled at ${schedule.time})` : "";
       return { content: [{ type: "text", text: `Created routine "${name}" with ${steps.length} steps${schedDesc} (id: ${id})` }] };
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Real-Time State & Trending Tools (5)
+  // -------------------------------------------------------------------------
+
+  server.tool(
+    "get_home_state",
+    "Get current home state summary including mode, occupied rooms, and alerts. Returns a compact LLM-friendly text summary.",
+    {},
+    async () => {
+      try {
+        const data = await apiCall("/api/state");
+        return { content: [{ type: "text", text: data.summary || JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `State not available: ${err.message}. Connect to a controller first.` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    "get_device_state",
+    "Get current real-time state of a specific device including all tracked variables",
+    { itemId: z.number().describe("Device item ID") },
+    async ({ itemId }) => {
+      try {
+        const data = await apiCall(`/api/state/${itemId}`);
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Device ${itemId} not found or state not initialized: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    "get_device_trend",
+    "Get historical trend data for a device over a time period. Returns raw events.",
+    {
+      itemId: z.number().describe("Device item ID"),
+      hours: z.number().optional().describe("Hours of history to retrieve (default 24)"),
+    },
+    async ({ itemId, hours }) => {
+      try {
+        const h = hours || 24;
+        const data = await apiCall(`/api/trending/${itemId}?hours=${h}`);
+        const summary = Array.isArray(data)
+          ? `${data.length} events in the last ${h}h. ${data.length > 0 ? `Latest: ${JSON.stringify(data[0])}` : ""}`
+          : JSON.stringify(data);
+        return { content: [{ type: "text", text: summary }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Trending not available: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    "get_alerts",
+    "Get current active alerts (door open, HVAC issues, battery low, temp out of range) and statistical anomalies",
+    {},
+    async () => {
+      try {
+        const data = await apiCall("/api/alerts");
+        const alerts = data.alerts || [];
+        const anomalies = data.anomalies || [];
+        let text = `Alerts (${alerts.length}):`;
+        if (alerts.length === 0) text += " none";
+        for (const a of alerts) text += `\n- [${a.type}] ${a.message}`;
+        text += `\n\nAnomalies (${anomalies.length}):`;
+        if (anomalies.length === 0) text += " none";
+        for (const a of anomalies) text += `\n- Device ${a.itemId} ${a.varName}: today avg ${a.todayAvg} vs baseline ${a.baselineMean} (${a.deviationSigma}σ)`;
+        return { content: [{ type: "text", text }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Alerts not available: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    "get_anomalies",
+    "Get statistical anomalies compared to 14-day baseline. Detects unusual device behavior.",
+    {
+      itemId: z.number().optional().describe("Filter to a specific device (omit for all devices)"),
+    },
+    async ({ itemId }) => {
+      try {
+        const data = await apiCall("/api/alerts");
+        let anomalies = data.anomalies || [];
+        if (itemId) anomalies = anomalies.filter(a => a.itemId === itemId);
+        if (anomalies.length === 0) {
+          return { content: [{ type: "text", text: itemId ? `No anomalies for device ${itemId}` : "No anomalies detected" }] };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(anomalies, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Anomalies not available: ${err.message}` }], isError: true };
+      }
     }
   );
 
