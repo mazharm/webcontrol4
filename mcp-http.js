@@ -181,8 +181,12 @@ async function main() {
         const { code, state } = req.query;
         if (!code) return res.status(400).json({ error: "Missing authorization code" });
 
-        // Extract pending auth ID from state
-        const pendingId = (state || "").replace(/^mcp:/, "");
+        // Extract pending auth ID from state — must start with "mcp:" prefix
+        const stateStr = state || "";
+        if (!stateStr.startsWith("mcp:")) {
+          return res.status(400).json({ error: "Invalid authorization state format" });
+        }
+        const pendingId = stateStr.slice(4);
         const pending = oauth.getPendingAuth(pendingId);
         if (!pending) {
           return res.status(400).json({ error: "Invalid or expired authorization state" });

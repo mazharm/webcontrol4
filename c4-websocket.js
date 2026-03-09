@@ -307,7 +307,10 @@ class C4WebSocket extends EventEmitter {
         }
         this._connected = false;
 
-        this._setupSocket();
+        this._setupSocket(
+          () => this.emit("reconnected"),
+          (err) => this._logger("ws-token-refresh-reconnect-error", err.message)
+        );
       } catch (err) {
         this._logger("ws-token-refresh-error", err.message);
         // Try again in 5 minutes
