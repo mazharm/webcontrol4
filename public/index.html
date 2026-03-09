@@ -768,10 +768,6 @@
       </div>
       <button type="submit" class="btn" id="btn-login">Sign In</button>
     </form>
-    <div class="manual-connect" style="text-align:center;">
-      <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">No Control4 account?</p>
-      <button class="btn" style="background:var(--green);" onclick="enterDemoMode()">Try Demo Mode</button>
-    </div>
   </div>
 
   <!-- Controller Selection View -->
@@ -980,11 +976,6 @@
       return d.innerHTML;
     }
 
-    function enterDemoMode() {
-      document.getElementById("c4-username").value = "demo@demo.com";
-      document.getElementById("c4-password").value = "demo";
-      document.getElementById("login-form").requestSubmit();
-    }
 
     // -----------------------------------------------------------------------
     // Auth initialization – check Google OAuth status on load
@@ -1141,6 +1132,7 @@
       // Auto-discover local IPs via SDDP and match to cloud controllers
       // Cloud uses "control4_ea5_000FFF93E27D", SDDP uses "ea5-000FFF93E27D"
       function normalize(s) { return s.replace(/[_\-"]/g, "").toLowerCase(); }
+      let discoveredAny = false;
       try {
         const devices = await api("/api/discover");
         if (Array.isArray(devices)) {
@@ -1150,10 +1142,22 @@
               const host = normalize(d.host || "");
               return host && cn && (cn.includes(host) || host.includes(cn));
             });
-            if (match) c.localIP = match.ip;
+            if (match) {
+              c.localIP = match.ip;
+              discoveredAny = true;
+            }
           }
         }
       } catch {}
+
+      // If no controllers were discovered on the network, fall back to demo controller
+      if (!discoveredAny && !controllers.some(c => c.localIP)) {
+        list.innerHTML = '<div style="text-align:center;padding:24px;color:var(--muted);font-size:14px;">No controller found on the network. Falling back to a demo controller.</div>';
+        setTimeout(() => {
+          selectController({ name: "Demo Controller", controllerCommonName: "mock-controller", localIP: "mock" });
+        }, 2000);
+        return;
+      }
 
       // Auto-connect if only one controller
       if (controllers.length === 1) {
@@ -1191,8 +1195,8 @@
         state.directorToken = tokenRes.directorToken;
 
         if (controller.localIP) {
-          // Validate discovered IP format
-          if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(controller.localIP)) {
+          // Validate discovered IP format (allow "mock" for demo fallback)
+          if (controller.localIP !== "mock" && !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(controller.localIP)) {
             alert("Invalid controller IP discovered. Please enter manually.");
             controller.localIP = null;
           }
