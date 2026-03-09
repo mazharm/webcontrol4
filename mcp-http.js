@@ -15,6 +15,7 @@
 require("dotenv").config();
 
 const express = require("express");
+const rateLimit = require("express-rate-limit");
 const { StreamableHTTPServerTransport } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const { createMcpServer } = require("./mcp-server.js");
 const { requestJson } = require("./http-client");
@@ -73,8 +74,28 @@ async function main() {
   };
 
   const app = express();
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
+  app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+
+  const tokenRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many token requests. Please try again later." },
+  });
+
+  // Trust proxy only when explicitly configured
+  if (process.env.TRUST_PROXY) {
+    app.set("trust proxy", process.env.TRUST_PROXY);
+  }
+
+  // Security headers
+  app.use((_req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    next();
+  });
 
   // -------------------------------------------------------------------------
   // OAuth 2.0 Authorization Server endpoints (for MCP clients)
@@ -84,10 +105,15 @@ async function main() {
   if (oauth.isConfigured()) {
     console.log("MCP OAuth enabled (Google login required for MCP clients)");
 
+    function getSafeHost(req) {
+      const host = req.headers.host || "";
+      return /^[a-zA-Z0-9._:\[\]-]+$/.test(host) ? host : `localhost:${MCP_PORT}`;
+    }
+
     // --- Authorization Server Metadata (RFC 8414) ---
     app.get("/.well-known/oauth-authorization-server", (req, res) => {
-      const proto = req.headers["x-forwarded-proto"] || req.protocol;
-      const host = req.headers.host;
+      const proto = req.protocol;
+      const host = getSafeHost(req);
       const issuer = `${proto}://${host}`;
       res.json({
         issuer,
@@ -150,8 +176,8 @@ async function main() {
         clientState: state,
       });
 
-      const proto = req.headers["x-forwarded-proto"] || req.protocol;
-      const host = req.headers.host;
+      const proto = req.protocol;
+      const host = getSafeHost(req);
       const googleCallback = `${proto}://${host}/auth/google/callback`;
       const googleState = `mcp:${pendingId}`;
 
@@ -164,15 +190,19 @@ async function main() {
         const { code, state } = req.query;
         if (!code) return res.status(400).json({ error: "Missing authorization code" });
 
-        // Extract pending auth ID from state
-        const pendingId = (state || "").replace(/^mcp:/, "");
+        // Extract pending auth ID from state — must start with "mcp:" prefix
+        const stateStr = state || "";
+        if (!stateStr.startsWith("mcp:")) {
+          return res.status(400).json({ error: "Invalid authorization state format" });
+        }
+        const pendingId = stateStr.slice(4);
         const pending = oauth.getPendingAuth(pendingId);
         if (!pending) {
           return res.status(400).json({ error: "Invalid or expired authorization state" });
         }
 
-        const proto = req.headers["x-forwarded-proto"] || req.protocol;
-        const host = req.headers.host;
+        const proto = req.protocol;
+        const host = getSafeHost(req);
         const callbackUrl = `${proto}://${host}/auth/google/callback`;
 
         const tokens = await oauth.googleExchangeCode(code, callbackUrl);
@@ -205,7 +235,7 @@ async function main() {
     });
 
     // --- Token Endpoint ---
-    app.post("/token", (req, res) => {
+    app.post("/token", tokenRateLimiter, (req, res) => {
       const { grant_type, code, code_verifier, client_id, client_secret } = req.body;
 
       if (grant_type !== "authorization_code") {
@@ -218,7 +248,8 @@ async function main() {
         return res.status(401).json({ error: "invalid_client" });
       }
 
-      const tokenResponse = oauth.exchangeAuthCode(code, code_verifier, client_id);
+      const { redirect_uri } = req.body;
+      const tokenResponse = oauth.exchangeAuthCode(code, code_verifier, client_id, redirect_uri);
       if (!tokenResponse) {
         return res.status(400).json({ error: "invalid_grant" });
       }
@@ -228,7 +259,7 @@ async function main() {
 
     // --- Protect /mcp with Bearer token ---
     app.use("/mcp", (req, res, next) => {
-      if (req.method === "GET" || req.method === "DELETE") return next(); // handled below (405)
+      // All methods require auth when OAuth is configured
       const token = oauth.getTokenFromReq(req);
       if (!token) {
         res.status(401).json({ error: "Bearer token required" });

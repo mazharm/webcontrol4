@@ -10,6 +10,9 @@ const path = require("path");
 const dgram = require("dgram");
 const oauth = require("./oauth");
 const { isPrivateOrLocalHost, requestText } = require("./http-client");
+const { C4WebSocket } = require("./c4-websocket");
+const { StateMachine } = require("./state-machine");
+const { TrendingEngine } = require("./trending");
 
 // ---------------------------------------------------------------------------
 // Data directory (settings + any future persistence)
@@ -44,7 +47,7 @@ try {
 
 function persistSettings() {
   try {
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(appSettings, null, 2));
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(appSettings, null, 2), { mode: 0o600 });
   } catch (err) {
     console.error("Failed to save settings:", err.message);
   }
@@ -59,7 +62,17 @@ let routinesStore = [];
 
 try {
   if (fs.existsSync(ROUTINES_FILE)) {
-    routinesStore = JSON.parse(fs.readFileSync(ROUTINES_FILE, "utf8"));
+    const raw = JSON.parse(fs.readFileSync(ROUTINES_FILE, "utf8"));
+    // Validate loaded routines to prevent persisted malicious data
+    if (Array.isArray(raw)) {
+      const validStepTypes = ["light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"];
+      routinesStore = raw.filter(r =>
+        r && typeof r.id === "string" && /^[a-zA-Z0-9_-]+$/.test(r.id) &&
+        typeof r.name === "string" && r.name.length <= 200 &&
+        Array.isArray(r.steps) && r.steps.length <= 100 &&
+        r.steps.every(s => s && typeof s === "object" && validStepTypes.includes(s.type) && Number.isFinite(s.deviceId))
+      ).slice(0, 200);
+    }
   }
 } catch (err) {
   console.error("Failed to load routines:", err.message);
@@ -67,7 +80,7 @@ try {
 
 function persistRoutines() {
   try {
-    fs.writeFileSync(ROUTINES_FILE, JSON.stringify(routinesStore, null, 2));
+    fs.writeFileSync(ROUTINES_FILE, JSON.stringify(routinesStore, null, 2), { mode: 0o600 });
   } catch (err) {
     console.error("Failed to save routines:", err.message);
   }
@@ -177,15 +190,32 @@ async function executeScheduledCommand(deviceId, command, tParams) {
 // ---------------------------------------------------------------------------
 
 const MAX_HISTORY_POINTS = 8640; // 24 h × 3600 s / 10 s
+const MAX_HISTORY_KEYS = 5000;
 const historyStore = Object.create(null); // key -> array of timestamped data points
+let historyKeyCount = 0;
 
 function addHistoryPoint(key, point) {
-  if (!historyStore[key]) historyStore[key] = [];
+  if (!historyStore[key]) {
+    if (historyKeyCount >= MAX_HISTORY_KEYS) return; // reject new keys when at capacity
+    historyStore[key] = [];
+    historyKeyCount++;
+  }
   historyStore[key].push(point);
   if (historyStore[key].length > MAX_HISTORY_POINTS) {
     historyStore[key].shift();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Real-time engine singletons (WebSocket + state machine + trending)
+// ---------------------------------------------------------------------------
+
+let c4ws = null;              // C4WebSocket instance
+let stateMachine = null;      // StateMachine instance
+let trending = null;          // TrendingEngine instance
+const sseClients = new Set();  // Active Server-Sent Events clients
+let fallbackPollTimer = null; // Fallback polling when WS is down
+let mockEventTimer = null;    // Mock mode event simulator
 
 // ---------------------------------------------------------------------------
 // Anthropic model list
@@ -218,6 +248,9 @@ app.use((_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Referrer-Policy", "same-origin");
+  if (HTTPS_ENABLED) {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
   res.setHeader(
     "Content-Security-Policy",
     "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://accounts.google.com"
@@ -408,6 +441,10 @@ function handleMockRequest(req, res, apiPath) {
     if (apiPath.match(/^\/api\/v1\/categories\/(voice-scene|scenes|experience)$/)) {
       return res.json(mockState.scenes);
     }
+    // Additional categories for state-machine discovery (return empty for mock)
+    if (apiPath.match(/^\/api\/v1\/categories\/(locks|sensors|security|comfort|media)$/)) {
+      return res.json([]);
+    }
 
     // GET variables for an item
     const varMatch = apiPath.match(/^\/api\/v1\/items\/(\d+)\/variables$/);
@@ -459,6 +496,11 @@ function handleMockRequest(req, res, apiPath) {
         if (command === "SET_LEVEL") {
           light.level = clampNumber(tParams?.LEVEL, 0, 100, 0);
           light.on = light.level > 0;
+          // Push through state machine so SSE/trending/derived state update
+          emitMockDeviceEvents(id, [
+            { varName: "LIGHT_LEVEL", value: String(light.level) },
+            { varName: "LIGHT_STATE", value: light.on ? "1" : "0" },
+          ]);
         }
         return res.json({ ok: true });
       }
@@ -466,14 +508,26 @@ function handleMockRequest(req, res, apiPath) {
       // Thermostat commands
       const thermo = mockState.thermostats.find(t => t.id === id);
       if (thermo) {
+        const events = [];
         if (command === "SET_MODE_HVAC") {
           const allowedModes = ["Off", "Heat", "Cool", "Auto"];
           if (allowedModes.includes(tParams.MODE)) {
             thermo.hvacMode = tParams.MODE;
+            events.push({ varName: "HVAC_MODE", value: thermo.hvacMode });
+            // HVAC_STATE follows mode
+            const hvacState = thermo.hvacMode === "Off" ? "Off" : "Running";
+            events.push({ varName: "HVAC_STATE", value: hvacState });
           }
         }
-        if (command === "SET_SETPOINT_HEAT") thermo.heatF = clampNumber(tParams?.FAHRENHEIT, 32, 120, thermo.heatF);
-        if (command === "SET_SETPOINT_COOL") thermo.coolF = clampNumber(tParams?.FAHRENHEIT, 32, 120, thermo.coolF);
+        if (command === "SET_SETPOINT_HEAT") {
+          thermo.heatF = clampNumber(tParams?.FAHRENHEIT, 32, 120, thermo.heatF);
+          events.push({ varName: "HEAT_SETPOINT_F", value: String(thermo.heatF) });
+        }
+        if (command === "SET_SETPOINT_COOL") {
+          thermo.coolF = clampNumber(tParams?.FAHRENHEIT, 32, 120, thermo.coolF);
+          events.push({ varName: "COOL_SETPOINT_F", value: String(thermo.coolF) });
+        }
+        emitMockDeviceEvents(id, events);
         return res.json({ ok: true });
       }
 
@@ -518,6 +572,19 @@ function handleMockRequest(req, res, apiPath) {
   return null; // not handled
 }
 
+/**
+ * Push variable-change events from mock commands into the state machine,
+ * exactly like the real Director would push WebSocket events after a command.
+ */
+function emitMockDeviceEvents(itemId, events) {
+  if (!stateMachine) return;
+  for (const { varName, value } of events) {
+    try {
+      stateMachine.handleDeviceEvent({ itemId, varName, value });
+    } catch (err) { console.warn("[mock] Event emit error:", err.message); }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // SDDP network discovery
 // ---------------------------------------------------------------------------
@@ -545,20 +612,22 @@ app.get("/api/discover", (_req, res) => {
   });
 
   sock.on("message", (msg, rinfo) => {
-    const text = msg.toString();
+    if (found.length >= 100) return; // cap responses to prevent flooding
+    const text = msg.toString().slice(0, 4096); // limit response size
     const entry = Object.create(null);
     entry.ip = rinfo.address;
     entry.port = rinfo.port;
-    entry.raw = text;
-    // Parse SDDP headers
+    // Parse SDDP headers — only extract known fields
+    const knownFields = new Set(["type", "model", "manufacturer", "primary-proxy", "host-name", "uuid", "driver", "make"]);
     for (const line of text.split("\r\n")) {
       const idx = line.indexOf(":");
       if (idx > 0) {
         const key = line.slice(0, idx).trim().toLowerCase();
-        if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+        if (!knownFields.has(key)) continue;
         entry[key] = line
           .slice(idx + 1)
-          .trim();
+          .trim()
+          .slice(0, 256);
       }
     }
     found.push(entry);
@@ -700,16 +769,31 @@ function isValidDirectorIp(ip) {
   return isPrivateOrLocalHost(ip);
 }
 
+function sanitizeApiPath(pathSegments) {
+  const joined = "/" + pathSegments.join("/");
+  // Reject path traversal attempts
+  if (/(?:^|\/)\.\.(\/|$)/.test(joined)) return null;
+  // Reject encoded traversal
+  if (/%2e%2e|%2f/i.test(joined)) return null;
+  // Reject backslashes
+  if (/\\/.test(joined)) return null;
+  return joined;
+}
+
 app.get("/api/director/{*path}", async (req, res) => {
-  const { ip, token, ...rest } = req.query;
+  const ip = req.headers["x-director-ip"];
+  const token = req.headers["x-director-token"];
+  const rest = req.query;
   if (!ip || !token) {
-    return res.status(400).json({ error: "ip and token query params required" });
+    return res.status(400).json({ error: "ip and token required" });
   }
   if (!isValidDirectorIp(ip)) {
     return res.status(400).json({ error: "invalid ip address format" });
   }
-  setSchedulerDirectorInfo(ip, token);
-  const apiPath = "/" + req.params.path.join("/");
+  const apiPath = sanitizeApiPath(req.params.path);
+  if (!apiPath) {
+    return res.status(400).json({ error: "invalid path" });
+  }
   if (ip === "mock") {
     const handled = handleMockRequest(req, res, apiPath);
     if (handled !== null) return;
@@ -737,14 +821,19 @@ app.get("/api/director/{*path}", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.post("/api/director/{*path}", async (req, res) => {
-  const { ip, token, ...rest } = req.query;
+  const ip = req.headers["x-director-ip"];
+  const token = req.headers["x-director-token"];
+  const rest = req.query;
   if (!ip || !token) {
-    return res.status(400).json({ error: "ip and token query params required" });
+    return res.status(400).json({ error: "ip and token required" });
   }
   if (!isValidDirectorIp(ip)) {
     return res.status(400).json({ error: "invalid ip address format" });
   }
-  const apiPath = "/" + req.params.path.join("/");
+  const apiPath = sanitizeApiPath(req.params.path);
+  if (!apiPath) {
+    return res.status(400).json({ error: "invalid path" });
+  }
   if (ip === "mock") {
     const handled = handleMockRequest(req, res, apiPath);
     if (handled !== null) return;
@@ -778,14 +867,19 @@ app.post("/api/director/{*path}", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.put("/api/director/{*path}", async (req, res) => {
-  const { ip, token, ...rest } = req.query;
+  const ip = req.headers["x-director-ip"];
+  const token = req.headers["x-director-token"];
+  const rest = req.query;
   if (!ip || !token) {
-    return res.status(400).json({ error: "ip and token query params required" });
+    return res.status(400).json({ error: "ip and token required" });
   }
   if (!isValidDirectorIp(ip)) {
     return res.status(400).json({ error: "invalid ip address format" });
   }
-  const apiPath = "/" + req.params.path.join("/");
+  const apiPath = sanitizeApiPath(req.params.path);
+  if (!apiPath) {
+    return res.status(400).json({ error: "invalid path" });
+  }
   if (ip === "mock") {
     const handled = handleMockRequest(req, res, apiPath);
     if (handled !== null) return;
@@ -832,8 +926,9 @@ app.post("/api/history/record", (req, res) => {
   const ts = Date.now();
 
   for (const l of lights) {
-    if (l.id != null) {
-      addHistoryPoint(`light:${l.id}`, {
+    const lid = Number(l.id);
+    if (Number.isFinite(lid) && Number.isInteger(lid)) {
+      addHistoryPoint(`light:${lid}`, {
         ts,
         on: !!l.on,
         level: Number(l.level) || 0,
@@ -842,8 +937,9 @@ app.post("/api/history/record", (req, res) => {
   }
 
   for (const t of thermostats) {
-    if (t.id != null) {
-      addHistoryPoint(`thermo:${t.id}`, {
+    const tid = Number(t.id);
+    if (Number.isFinite(tid) && Number.isInteger(tid)) {
+      addHistoryPoint(`thermo:${tid}`, {
         ts,
         tempF: t.tempF != null ? Number(t.tempF) : null,
         heatF: t.heatF != null ? Number(t.heatF) : null,
@@ -940,10 +1036,16 @@ app.get("/api/routines", (_req, res) => {
 const ROUTINE_NAME_MAX_LEN = 200;
 const ROUTINE_STEPS_MAX    = 100;
 
+const MAX_ROUTINES = 200;
+
 app.post("/api/routines", (req, res) => {
   const routine = req.body;
   if (!routine || !routine.id) {
     return res.status(400).json({ error: "routine with id required" });
+  }
+  // Validate routine ID is a safe string
+  if (typeof routine.id !== "string" || routine.id.length > 100 || !/^[a-zA-Z0-9_-]+$/.test(routine.id)) {
+    return res.status(400).json({ error: "routine id must be an alphanumeric string (max 100 chars)" });
   }
   if (!routine.name || typeof routine.name !== "string" || !routine.name.trim()) {
     return res.status(400).json({ error: "routine name required" });
@@ -966,10 +1068,10 @@ app.post("/api/routines", (req, res) => {
     if (!validStepTypes.includes(step.type)) {
       return res.status(400).json({ error: "invalid step type" });
     }
-    if (typeof step.deviceId !== "number" || !Number.isFinite(step.deviceId)) {
+    if (!Number.isFinite(step.deviceId)) {
       return res.status(400).json({ error: "each step must have a numeric deviceId" });
     }
-    if (step.type === "light_level" && (typeof step.level !== "number" || step.level < 0 || step.level > 100)) {
+    if (step.type === "light_level" && (!Number.isFinite(step.level) || step.level < 0 || step.level > 100)) {
       return res.status(400).json({ error: "light_level step requires level 0-100" });
     }
     if (step.type === "light_toggle" && typeof step.on !== "boolean") {
@@ -979,7 +1081,7 @@ app.post("/api/routines", (req, res) => {
       return res.status(400).json({ error: "hvac_mode step requires mode: Off, Heat, Cool, or Auto" });
     }
     if ((step.type === "heat_setpoint" || step.type === "cool_setpoint") &&
-        (typeof step.value !== "number" || step.value < 32 || step.value > 120)) {
+        (!Number.isFinite(step.value) || step.value < 32 || step.value > 120)) {
       return res.status(400).json({ error: "setpoint step requires value between 32 and 120" });
     }
   }
@@ -987,18 +1089,40 @@ app.post("/api/routines", (req, res) => {
   if (routine.schedule) {
     const s = routine.schedule;
     if (typeof s.enabled !== "boolean") s.enabled = false;
-    if (typeof s.time !== "string" || !/^\d{2}:\d{2}$/.test(s.time)) {
-      return res.status(400).json({ error: "schedule.time must be HH:MM format" });
+    if (typeof s.time !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(s.time)) {
+      return res.status(400).json({ error: "schedule.time must be valid HH:MM (00:00-23:59)" });
     }
     if (!Array.isArray(s.days) || s.days.some((d) => typeof d !== "number" || d < 0 || d > 6)) {
       return res.status(400).json({ error: "schedule.days must be array of 0-6 (Sun-Sat)" });
     }
   }
-  const idx = routinesStore.findIndex((r) => r.id === routine.id);
+  // Build clean routine object from validated fields only (prevent mass assignment)
+  const cleanSteps = routine.steps.map(s => {
+    const clean = { type: s.type, deviceId: s.deviceId };
+    if (s.deviceName && typeof s.deviceName === "string") clean.deviceName = s.deviceName.slice(0, 200);
+    if (s.type === "light_level") clean.level = s.level;
+    if (s.type === "light_toggle") clean.on = s.on;
+    if (s.type === "hvac_mode") clean.mode = s.mode;
+    if (s.type === "heat_setpoint" || s.type === "cool_setpoint") clean.value = s.value;
+    return clean;
+  });
+  const cleanRoutine = { id: routine.id, name: routine.name.trim(), steps: cleanSteps };
+  if (routine.schedule) {
+    cleanRoutine.schedule = {
+      enabled: routine.schedule.enabled,
+      time: routine.schedule.time,
+      days: routine.schedule.days,
+    };
+  }
+
+  const idx = routinesStore.findIndex((r) => r.id === cleanRoutine.id);
   if (idx !== -1) {
-    routinesStore[idx] = routine;
+    routinesStore[idx] = cleanRoutine;
   } else {
-    routinesStore.push(routine);
+    if (routinesStore.length >= MAX_ROUTINES) {
+      return res.status(400).json({ error: `maximum of ${MAX_ROUTINES} routines reached` });
+    }
+    routinesStore.push(cleanRoutine);
   }
   persistRoutines();
   res.json({ ok: true });
@@ -1022,6 +1146,10 @@ app.get("/api/llm/models", (_req, res) => {
 // ---------------------------------------------------------------------------
 // LLM: chat / control via Anthropic
 // ---------------------------------------------------------------------------
+
+function sanitizeForPrompt(s) {
+  return String(s || "").replace(/[\n\r]/g, " ").slice(0, 100);
+}
 
 function buildSystemPrompt(context, mode) {
   const devices  = context?.devices  || [];
@@ -1058,9 +1186,9 @@ function buildSystemPrompt(context, mode) {
     prompt += "\n\nAvailable devices:";
     for (const d of devices) {
       if (d.type === "light") {
-        prompt += `\n- Light "${d.name}" (id:${d.id}, floor:"${d.floor}", room:"${d.room}", ${d.on ? `ON at ${d.level}%` : "OFF"})`;
+        prompt += `\n- Light "${sanitizeForPrompt(d.name)}" (id:${d.id}, floor:"${sanitizeForPrompt(d.floor)}", room:"${sanitizeForPrompt(d.room)}", ${d.on ? `ON at ${d.level}%` : "OFF"})`;
       } else if (d.type === "thermostat") {
-        prompt += `\n- Thermostat "${d.name}" (id:${d.id}, floor:"${d.floor}", temp:${d.tempF ?? "?"}°F, heat:${d.heatF ?? "?"}°F, cool:${d.coolF ?? "?"}°F, mode:${d.hvacMode ?? "?"})`;
+        prompt += `\n- Thermostat "${sanitizeForPrompt(d.name)}" (id:${d.id}, floor:"${sanitizeForPrompt(d.floor)}", temp:${d.tempF ?? "?"}°F, heat:${d.heatF ?? "?"}°F, cool:${d.coolF ?? "?"}°F, mode:${d.hvacMode ?? "?"})`;
       }
     }
   }
@@ -1068,12 +1196,14 @@ function buildSystemPrompt(context, mode) {
   if (routines.length > 0) {
     prompt += "\n\nAvailable routines:";
     for (const r of routines) {
-      prompt += `\n- "${r.name}" (id:"${r.id}")`;
+      prompt += `\n- "${sanitizeForPrompt(r.name)}" (id:"${r.id}")`;
     }
   }
 
   if (historySummary) {
-    prompt += `\n\nHistorical data:\n${historySummary}`;
+    // Sanitize client-supplied history summary to prevent prompt injection
+    const safeHistory = String(historySummary).replace(/[\n\r]+/g, "\n").slice(0, 2000);
+    prompt += `\n\nHistorical data:\n${safeHistory}`;
   }
 
   return prompt;
@@ -1087,8 +1217,11 @@ app.post("/api/llm/chat", async (req, res) => {
   }
 
   const { message, context, mode } = req.body;
-  if (!message) {
+  if (!message || typeof message !== "string") {
     return res.status(400).json({ error: "message required" });
+  }
+  if (message.length > 10000) {
+    return res.status(400).json({ error: "message too long (max 10000 characters)" });
   }
 
   const systemPrompt = buildSystemPrompt(context, mode);
@@ -1129,17 +1262,375 @@ app.post("/api/llm/chat", async (req, res) => {
       // Not valid JSON — treat raw text as the message
     }
 
+    // Validate actions from LLM output to prevent prompt injection attacks
+    if (Array.isArray(parsed.actions)) {
+      const validActionTypes = ["light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint", "run_routine", "create_routine"];
+      parsed.actions = parsed.actions.filter(a => {
+        if (!a || typeof a !== "object") return false;
+        if (!validActionTypes.includes(a.type)) return false;
+        if (a.type === "light_level" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.level) || a.level < 0 || a.level > 100)) return false;
+        if (a.type === "light_toggle" && (!Number.isFinite(a.deviceId) || typeof a.on !== "boolean")) return false;
+        if (a.type === "hvac_mode" && (!Number.isFinite(a.deviceId) || !["Off", "Heat", "Cool", "Auto"].includes(a.mode))) return false;
+        if (a.type === "heat_setpoint" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.value) || a.value < 32 || a.value > 120)) return false;
+        if (a.type === "cool_setpoint" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.value) || a.value < 32 || a.value > 120)) return false;
+        if (a.type === "run_routine" && (typeof a.routineId !== "string" || a.routineId.length > 100 || !/^[a-zA-Z0-9_-]+$/.test(a.routineId))) return false;
+        if (a.type === "create_routine" && (!a.name || typeof a.name !== "string" || a.name.length > 200 || !Array.isArray(a.steps) || a.steps.length > 100)) return false;
+        return true;
+      });
+    } else {
+      parsed.actions = [];
+    }
+    parsed.message = String(parsed.message || "").slice(0, 10000);
+
     res.json(parsed);
   } catch (err) {
-    // Try to surface a user-friendly error from the Anthropic error body
-    let errMsg = err.message;
+    // Only forward known Anthropic error types; generic message for all else
+    let errMsg = "LLM request failed";
     try {
       const bodyPart = err.message.replace(/^HTTP \d+: /, "");
       const json = JSON.parse(bodyPart);
-      if (json?.error?.message) errMsg = json.error.message;
+      const type = json?.error?.type;
+      if (type === "rate_limit_error" || type === "authentication_error" || type === "invalid_request_error") {
+        errMsg = json.error.message;
+      }
     } catch {}
+    console.error("[llm] Error:", err.message);
     res.status(500).json({ error: errMsg });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Real-time: initialise WebSocket + state machine + trending
+// ---------------------------------------------------------------------------
+
+async function initializeRealtime({ controllerIp, directorToken, accountToken, controllerCommonName }) {
+  // Store director info for scheduler (only set from explicit connect, not every proxy request)
+  setSchedulerDirectorInfo(controllerIp, directorToken);
+
+  // 1. Trending engine (idempotent — keep existing if already running)
+  if (!trending) {
+    trending = new TrendingEngine({
+      dbPath: path.join(DATA_DIR, "trending.db"),
+      logger: (...args) => console.log("[trending]", ...args),
+    });
+    trending.init();
+  }
+
+  // 2. State machine — always re-create on new connection
+  stateMachine = new StateMachine({
+    apiFn: async (apiPath) => {
+      const url = `http://localhost:${PORT}/api/director/${apiPath}`;
+      const resp = await requestText(url, {
+        headers: {
+          "X-Director-IP": controllerIp,
+          "X-Director-Token": directorToken,
+        },
+      });
+      if (resp.statusCode >= 400) throw new Error(`HTTP ${resp.statusCode}: ${resp.body}`);
+      return JSON.parse(resp.body);
+    },
+    logger: (...args) => console.log("[state]", ...args),
+  });
+
+  await stateMachine.discover();
+  await stateMachine.readInitialState();
+
+  // 3. Wire state changes → trending + SSE
+  let prevMode = null;
+  stateMachine.on("stateChange", (change) => {
+    trending.recordEvent({
+      itemId: change.itemId,
+      varName: change.varName,
+      value: change.value,
+      oldValue: change.oldValue,
+      timestamp: change.timestamp,
+    });
+
+    // Track home-mode transitions
+    const homeState = stateMachine.getHomeState();
+    if (homeState.mode !== prevMode) {
+      trending.recordModeChange(homeState.mode, homeState.confidence);
+      prevMode = homeState.mode;
+    }
+
+    broadcastSSE("stateChange", change);
+  });
+
+  // 4. WebSocket (skip for mock)
+  if (controllerIp !== "mock") {
+    // Clean up previous connection
+    if (c4ws) {
+      c4ws.disconnect();
+      c4ws = null;
+    }
+    stopFallbackPolling();
+
+    const refreshTokenFn = async () => {
+      const body = JSON.stringify({
+        serviceInfo: { commonName: controllerCommonName, services: "director" },
+      });
+      const data = await request(C4_CONTROLLER_AUTH_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${accountToken}` },
+        body,
+      });
+      const json = JSON.parse(data);
+      return { token: json.authToken.token, validSeconds: json.authToken.validSeconds };
+    };
+
+    c4ws = new C4WebSocket({
+      directorIp: controllerIp,
+      directorToken,
+      refreshTokenFn,
+      logger: (...args) => console.log("[ws]", ...args),
+    });
+
+    c4ws.onAnyChange((payload) => {
+      stateMachine.handleDeviceEvent(payload);
+    });
+
+    c4ws.on("disconnected", () => startFallbackPolling(controllerIp, directorToken));
+    c4ws.on("reconnected", async () => {
+      stopFallbackPolling();
+      try { await stateMachine.readInitialState(); } catch {}
+    });
+    c4ws.on("reconnectFailed", () => startFallbackPolling(controllerIp, directorToken));
+
+    // Connect with retry
+    try {
+      await connectWithRetry(c4ws);
+    } catch {
+      console.log("[ws] Initial connection failed, using fallback polling");
+      startFallbackPolling(controllerIp, directorToken);
+    }
+  } else {
+    // Mock mode: simulate periodic events
+    startMockEventEmitter();
+  }
+
+  console.log(`[realtime] Initialized (${controllerIp === "mock" ? "mock" : "websocket"} mode, ${stateMachine.getAllDeviceStates().size} devices)`);
+}
+
+async function connectWithRetry(wsInstance, maxAttempts = 5) {
+  let attempt = 0;
+  while (attempt < maxAttempts) {
+    try {
+      await wsInstance.connect();
+      return;
+    } catch (err) {
+      attempt++;
+      const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
+      console.log(`[ws] Connection attempt ${attempt} failed, retrying in ${delay}ms: ${err.message}`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw new Error(`Failed after ${maxAttempts} attempts`);
+}
+
+function startFallbackPolling(controllerIp, directorToken) {
+  if (fallbackPollTimer) return;
+  if (!stateMachine) return;
+  console.log("[resilience] Starting fallback polling (15s interval)");
+
+  fallbackPollTimer = setInterval(async () => {
+    try {
+      await stateMachine.readInitialState();
+    } catch (err) {
+      console.error("[resilience] Fallback poll error:", err.message);
+    }
+  }, 15000);
+  if (fallbackPollTimer.unref) fallbackPollTimer.unref();
+}
+
+function stopFallbackPolling() {
+  if (fallbackPollTimer) {
+    clearInterval(fallbackPollTimer);
+    fallbackPollTimer = null;
+    console.log("[resilience] Stopped fallback polling");
+  }
+}
+
+function startMockEventEmitter() {
+  if (mockEventTimer) clearInterval(mockEventTimer);
+
+  mockEventTimer = setInterval(() => {
+    if (!stateMachine) return;
+    const devices = [...stateMachine.getAllDeviceStates().values()].filter(d => d.type === "light");
+    if (devices.length === 0) return;
+
+    const device = devices[Math.floor(Math.random() * devices.length)];
+    const newLevel = Math.random() > 0.3 ? Math.floor(Math.random() * 100) : 0;
+
+    stateMachine.handleDeviceEvent({ itemId: device.itemId, varName: "LIGHT_LEVEL", value: String(newLevel) });
+    stateMachine.handleDeviceEvent({ itemId: device.itemId, varName: "LIGHT_STATE", value: newLevel > 0 ? "1" : "0" });
+  }, 30000);
+  if (mockEventTimer.unref) mockEventTimer.unref();
+}
+
+function broadcastSSE(eventType, data) {
+  const payload = JSON.stringify({
+    type: eventType,
+    itemId: data.itemId,
+    varName: data.varName,
+    value: data.value,
+    oldValue: data.oldValue,
+    timestamp: data.timestamp,
+  });
+  for (const client of sseClients) {
+    try { client.write(`data: ${payload}\n\n`); } catch { sseClients.delete(client); }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Real-time: POST /api/realtime/connect
+// ---------------------------------------------------------------------------
+
+app.post("/api/realtime/connect", async (req, res) => {
+  const { controllerIp, directorToken, accountToken, controllerCommonName } = req.body;
+  if (!controllerIp || !directorToken) {
+    return res.status(400).json({ error: "controllerIp and directorToken required" });
+  }
+  if (controllerIp !== "mock" && !isValidDirectorIp(controllerIp)) {
+    return res.status(400).json({ error: "invalid controller IP" });
+  }
+  try {
+    await initializeRealtime({ controllerIp, directorToken, accountToken, controllerCommonName });
+    res.json({
+      ok: true,
+      mode: controllerIp === "mock" ? "mock" : "websocket",
+      devices: stateMachine ? stateMachine.getAllDeviceStates().size : 0,
+      rooms: stateMachine ? stateMachine.getAllRoomStates().size : 0,
+    });
+  } catch (err) {
+    console.error("[realtime] Init error:", err);
+    res.status(500).json({ error: "Real-time initialization failed" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Real-time: SSE endpoint for browser
+// ---------------------------------------------------------------------------
+
+const MAX_SSE_CLIENTS = 50;
+
+app.get("/api/events", (req, res) => {
+  if (sseClients.size >= MAX_SSE_CLIENTS) {
+    return res.status(503).json({ error: "Too many SSE clients" });
+  }
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  // Send initial state
+  if (stateMachine) {
+    const init = JSON.stringify({ type: "init", summary: stateMachine.getStateSummary() });
+    res.write(`data: ${init}\n\n`);
+  }
+
+  sseClients.add(res);
+
+  req.on("close", () => {
+    sseClients.delete(res);
+  });
+});
+
+// SSE heartbeat — evict dead/half-open clients every 30s
+const sseHeartbeat = setInterval(() => {
+  for (const client of sseClients) {
+    try { client.write(":heartbeat\n\n"); } catch { sseClients.delete(client); }
+  }
+}, 30000);
+if (sseHeartbeat.unref) sseHeartbeat.unref();
+
+// ---------------------------------------------------------------------------
+// Real-time: state & trending REST endpoints
+// ---------------------------------------------------------------------------
+
+app.get("/api/state", (_req, res) => {
+  if (!stateMachine) return res.status(503).json({ error: "State not initialized" });
+  res.json({
+    home: stateMachine.getHomeState(),
+    summary: stateMachine.getStateSummary(),
+    deviceCount: stateMachine.getAllDeviceStates().size,
+    roomCount: stateMachine.getAllRoomStates().size,
+  });
+});
+
+// NB: /api/state/room/:roomId must come before /api/state/:itemId
+// to avoid "room" being parsed as an itemId
+app.get("/api/state/room/:roomId", (req, res) => {
+  if (!stateMachine) return res.status(503).json({ error: "State not initialized" });
+  const roomId = parseInt(req.params.roomId, 10);
+  if (!Number.isFinite(roomId)) return res.status(400).json({ error: "invalid roomId" });
+  const room = stateMachine.getRoomState(roomId);
+  if (!room) return res.status(404).json({ error: "room not found" });
+  res.json(room);
+});
+
+app.get("/api/state/:itemId", (req, res) => {
+  if (!stateMachine) return res.status(503).json({ error: "State not initialized" });
+  const itemId = parseInt(req.params.itemId, 10);
+  if (!Number.isFinite(itemId)) return res.status(400).json({ error: "invalid itemId" });
+  const device = stateMachine.getDeviceState(itemId);
+  if (!device) return res.status(404).json({ error: "device not found" });
+  res.json(device);
+});
+
+app.get("/api/trending/:itemId", (req, res) => {
+  if (!trending) return res.status(503).json({ error: "Trending not initialized" });
+  const itemId = parseInt(req.params.itemId, 10);
+  const hours = Math.max(1, Math.min(parseInt(req.query.hours, 10) || 24, 720));
+  if (!Number.isFinite(itemId) || itemId < 0) return res.status(400).json({ error: "invalid itemId" });
+  res.json(trending.getDeviceHistory(itemId, hours));
+});
+
+app.get("/api/trending/:itemId/daily", (req, res) => {
+  if (!trending) return res.status(503).json({ error: "Trending not initialized" });
+  const itemId = parseInt(req.params.itemId, 10);
+  const days = Math.max(1, Math.min(parseInt(req.query.days, 10) || 7, 90));
+  if (!Number.isFinite(itemId) || itemId < 0) return res.status(400).json({ error: "invalid itemId" });
+  res.json(trending.getDailySummary(itemId, days));
+});
+
+app.get("/api/alerts", (_req, res) => {
+  if (!stateMachine || !trending) return res.status(503).json({ error: "Not initialized" });
+  const alerts = stateMachine.getHomeState().alerts || [];
+  const anomalies = trending.getAnomalies(24);
+  res.json({ alerts, anomalies });
+});
+
+// ---------------------------------------------------------------------------
+// Health endpoint
+// ---------------------------------------------------------------------------
+
+app.get("/api/health", (_req, res) => {
+  const health = {
+    status: "ok",
+    uptime: Math.round(process.uptime()),
+    timestamp: Date.now(),
+    websocket: {
+      connected: c4ws ? c4ws.isConnected() : false,
+      mode: c4ws ? "websocket" : (stateMachine ? (fallbackPollTimer ? "polling" : "mock") : "disconnected"),
+    },
+    stateMachine: {
+      initialized: !!stateMachine,
+      deviceCount: stateMachine ? stateMachine.getAllDeviceStates().size : 0,
+      roomCount: stateMachine ? stateMachine.getAllRoomStates().size : 0,
+    },
+    trending: {
+      initialized: !!trending,
+      ...(trending ? trending.getStats() : {}),
+    },
+    sseClients: sseClients.size,
+  };
+
+  if (!stateMachine || (!c4ws?.isConnected() && !fallbackPollTimer && !mockEventTimer)) {
+    health.status = "degraded";
+  }
+
+  res.json(health);
 });
 
 // ---------------------------------------------------------------------------
@@ -1219,7 +1710,11 @@ function startServer() {
     if (HTTP_REDIRECT) {
       const redirectApp = express();
       redirectApp.use((req, res) => {
-        const host = (req.headers.host || "").replace(/:\d+$/, "");
+        let host = (req.headers.host || "").replace(/:\d+$/, "");
+        // Validate host against hostname/IP pattern to prevent header injection
+        if (!/^[a-zA-Z0-9._-]+$/.test(host)) {
+          host = "localhost";
+        }
         // Validate the path to prevent open-redirect attacks
         let safePath = req.url;
         if (!safePath.startsWith("/") || safePath.startsWith("//")) {
@@ -1241,3 +1736,12 @@ function startServer() {
 
 startServer();
 startScheduler();
+
+function shutdown() {
+  console.log("[shutdown] Cleaning up...");
+  if (trending) trending.close();
+  if (c4ws) c4ws.disconnect();
+  process.exit(0);
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
