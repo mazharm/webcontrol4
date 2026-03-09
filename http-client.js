@@ -19,20 +19,26 @@ function isPrivateOrLocalHost(hostname) {
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a === 127;
 }
 
+const SENSITIVE_HEADERS = [
+  "authorization",
+  "cookie",
+  "x-api-key",
+  "proxy-authorization",
+  "x-director-token",
+  "x-director-ip",
+];
+
 function filterRedirectHeaders(headers, fromUrl, toUrl) {
   if (fromUrl.origin === toUrl.origin) {
     return { ...headers };
   }
 
-  const filtered = { ...headers };
-  delete filtered.Authorization;
-  delete filtered.authorization;
-  delete filtered.Cookie;
-  delete filtered.cookie;
-  delete filtered["x-api-key"];
-  delete filtered["X-API-Key"];
-  delete filtered["Proxy-Authorization"];
-  delete filtered["proxy-authorization"];
+  const filtered = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (!SENSITIVE_HEADERS.includes(key.toLowerCase())) {
+      filtered[key] = value;
+    }
+  }
   return filtered;
 }
 
@@ -78,10 +84,23 @@ function requestText(url, options = {}, redirectCount = 0) {
           );
         }
 
+        const maxResponseSize = options.maxResponseSize || 10 * 1024 * 1024; // 10 MB default
         let body = "";
+        let totalSize = 0;
+        let destroyed = false;
         res.setEncoding("utf8");
-        res.on("data", (chunk) => (body += chunk));
-        res.on("end", () => resolve({ statusCode: res.statusCode || 0, headers: res.headers, body }));
+        res.on("data", (chunk) => {
+          totalSize += Buffer.byteLength(chunk, "utf8");
+          if (totalSize > maxResponseSize) {
+            destroyed = true;
+            req.destroy(new Error("Response body too large"));
+            return;
+          }
+          body += chunk;
+        });
+        res.on("end", () => {
+          if (!destroyed) resolve({ statusCode: res.statusCode || 0, headers: res.headers, body });
+        });
       }
     );
 

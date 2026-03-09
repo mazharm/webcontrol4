@@ -7,7 +7,7 @@ const { z } = require("zod");
 const { requestText } = require("./http-client");
 
 /**
- * Creates a configured MCP server with all 13 smart-home tools.
+ * Creates a configured MCP server with all 18 smart-home tools.
  *
  * @param {object} config
  * @param {string} config.baseUrl        – Express server origin, e.g. "http://localhost:3000"
@@ -29,7 +29,7 @@ function createMcpServer(config) {
   // -------------------------------------------------------------------------
 
   async function apiCall(path, options = {}) {
-    const headers = { "Content-Type": "application/json" };
+    const headers = { "Content-Type": "application/json", ...options.headers };
     if (authHeader) {
       if (authHeader.startsWith("Cookie:")) {
         headers["Cookie"] = authHeader.replace("Cookie: ", "");
@@ -55,22 +55,21 @@ function createMcpServer(config) {
   }
 
   function directorGet(apiPath) {
-    const params = new URLSearchParams({
-      ip: controllerIp,
-      token: directorToken,
+    return apiCall(`/api/director/${apiPath}`, {
+      headers: {
+        "X-Director-IP": controllerIp,
+        "X-Director-Token": directorToken,
+      },
     });
-    const sep = apiPath.includes("?") ? "&" : "?";
-    return apiCall(`/api/director/${apiPath}${sep}${params}`);
   }
 
   function directorPost(apiPath, command, tParams = {}) {
-    const params = new URLSearchParams({
-      ip: controllerIp,
-      token: directorToken,
-    });
-    const sep = apiPath.includes("?") ? "&" : "?";
-    return apiCall(`/api/director/${apiPath}${sep}${params}`, {
+    return apiCall(`/api/director/${apiPath}`, {
       method: "POST",
+      headers: {
+        "X-Director-IP": controllerIp,
+        "X-Director-Token": directorToken,
+      },
       body: { async: true, command, tParams },
     });
   }
@@ -195,7 +194,7 @@ function createMcpServer(config) {
     "set_light_level",
     "Set brightness level for a light (0 = off, 100 = full)",
     {
-      deviceId: z.number().describe("Light device ID"),
+      deviceId: z.number().int().nonnegative().describe("Light device ID"),
       level: z.number().min(0).max(100).describe("Brightness level (0-100)"),
     },
     async ({ deviceId, level }) => {
@@ -208,7 +207,7 @@ function createMcpServer(config) {
     "set_thermostat_mode",
     "Set HVAC mode for a thermostat",
     {
-      deviceId: z.number().describe("Thermostat device ID"),
+      deviceId: z.number().int().nonnegative().describe("Thermostat device ID"),
       mode: z.enum(["Off", "Heat", "Cool", "Auto"]).describe("HVAC mode"),
     },
     async ({ deviceId, mode }) => {
@@ -221,7 +220,7 @@ function createMcpServer(config) {
     "set_heat_setpoint",
     "Set heat setpoint temperature (Fahrenheit)",
     {
-      deviceId: z.number().describe("Thermostat device ID"),
+      deviceId: z.number().int().nonnegative().describe("Thermostat device ID"),
       temperature: z.number().min(32).max(120).describe("Heat setpoint in Fahrenheit (32-120)"),
     },
     async ({ deviceId, temperature }) => {
@@ -234,7 +233,7 @@ function createMcpServer(config) {
     "set_cool_setpoint",
     "Set cool setpoint temperature (Fahrenheit)",
     {
-      deviceId: z.number().describe("Thermostat device ID"),
+      deviceId: z.number().int().nonnegative().describe("Thermostat device ID"),
       temperature: z.number().min(32).max(120).describe("Cool setpoint in Fahrenheit (32-120)"),
     },
     async ({ deviceId, temperature }) => {
@@ -246,7 +245,7 @@ function createMcpServer(config) {
   server.tool(
     "activate_scene",
     "Activate (trigger) a scene",
-    { sceneId: z.number().describe("Scene ID to activate") },
+    { sceneId: z.number().int().nonnegative().describe("Scene ID to activate") },
     async ({ sceneId }) => {
       try {
         await directorPost(`api/v1/items/${sceneId}/commands`, "PRESS", {});
@@ -326,7 +325,7 @@ function createMcpServer(config) {
       steps: z.array(
         z.object({
           type: z.enum(["light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"]).describe("Step type"),
-          deviceId: z.number().describe("Device ID"),
+          deviceId: z.number().int().nonnegative().describe("Device ID"),
           deviceName: z.string().optional().describe("Device name for display"),
           level: z.number().optional().describe("Brightness level (for light_level)"),
           on: z.boolean().optional().describe("On/off (for light_toggle)"),
@@ -347,6 +346,102 @@ function createMcpServer(config) {
       await apiCall("/api/routines", { method: "POST", body: routine });
       const schedDesc = schedule?.enabled ? ` (scheduled at ${schedule.time})` : "";
       return { content: [{ type: "text", text: `Created routine "${name}" with ${steps.length} steps${schedDesc} (id: ${id})` }] };
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Real-Time State & Trending Tools (5)
+  // -------------------------------------------------------------------------
+
+  server.tool(
+    "get_home_state",
+    "Get current home state summary including mode, occupied rooms, and alerts. Returns a compact LLM-friendly text summary.",
+    {},
+    async () => {
+      try {
+        const data = await apiCall("/api/state");
+        return { content: [{ type: "text", text: data.summary || JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `State not available: ${err.message}. Connect to a controller first.` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    "get_device_state",
+    "Get current real-time state of a specific device including all tracked variables",
+    { itemId: z.number().int().nonnegative().describe("Device item ID") },
+    async ({ itemId }) => {
+      try {
+        const data = await apiCall(`/api/state/${itemId}`);
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Device ${itemId} not found or state not initialized: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    "get_device_trend",
+    "Get historical trend data for a device over a time period. Returns raw events.",
+    {
+      itemId: z.number().int().nonnegative().describe("Device item ID"),
+      hours: z.number().optional().describe("Hours of history to retrieve (default 24)"),
+    },
+    async ({ itemId, hours }) => {
+      try {
+        const h = hours || 24;
+        const data = await apiCall(`/api/trending/${itemId}?hours=${h}`);
+        const summary = Array.isArray(data)
+          ? `${data.length} events in the last ${h}h. ${data.length > 0 ? `Latest: ${JSON.stringify(data[0])}` : ""}`
+          : JSON.stringify(data);
+        return { content: [{ type: "text", text: summary }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Trending not available: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    "get_alerts",
+    "Get current active alerts (door open, HVAC issues, battery low, temp out of range) and statistical anomalies",
+    {},
+    async () => {
+      try {
+        const data = await apiCall("/api/alerts");
+        const alerts = data.alerts || [];
+        const anomalies = data.anomalies || [];
+        let text = `Alerts (${alerts.length}):`;
+        if (alerts.length === 0) text += " none";
+        for (const a of alerts) text += `\n- [${a.type}] ${a.message}`;
+        text += `\n\nAnomalies (${anomalies.length}):`;
+        if (anomalies.length === 0) text += " none";
+        for (const a of anomalies) text += `\n- Device ${a.itemId} ${a.varName}: today avg ${a.todayAvg} vs baseline ${a.baselineMean} (${a.deviationSigma}σ)`;
+        return { content: [{ type: "text", text }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Alerts not available: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    "get_anomalies",
+    "Get statistical anomalies compared to 14-day baseline. Detects unusual device behavior.",
+    {
+      itemId: z.number().int().nonnegative().optional().describe("Filter to a specific device (omit for all devices)"),
+    },
+    async ({ itemId }) => {
+      try {
+        const data = await apiCall("/api/alerts");
+        let anomalies = data.anomalies || [];
+        if (itemId) anomalies = anomalies.filter(a => a.itemId === itemId);
+        if (anomalies.length === 0) {
+          return { content: [{ type: "text", text: itemId ? `No anomalies for device ${itemId}` : "No anomalies detected" }] };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(anomalies, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Anomalies not available: ${err.message}` }], isError: true };
+      }
     }
   );
 
