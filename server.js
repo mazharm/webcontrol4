@@ -14,7 +14,19 @@ const ring = require("./ring-client");
 const notify = require("./notify");
 const { C4WebSocket } = require("./c4-websocket");
 const { StateMachine } = require("./state-machine");
-const { TrendingEngine } = require("./trending");
+let TrendingEngine = null;
+let trendingUnavailableReason = null;
+
+try {
+  ({ TrendingEngine } = require("./trending"));
+} catch (err) {
+  if (err?.code === "MODULE_NOT_FOUND" && /better-sqlite3/.test(err.message || "")) {
+    trendingUnavailableReason = err.message;
+    console.warn("Trending disabled:", err.message);
+  } else {
+    throw err;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Data directory (settings + any future persistence)
@@ -1726,7 +1738,7 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
   setSchedulerDirectorInfo(controllerIp, directorToken);
 
   // 1. Trending engine (idempotent — keep existing if already running)
-  if (!trending) {
+  if (TrendingEngine && !trending) {
     trending = new TrendingEngine({
       dbPath: path.join(DATA_DIR, "trending.db"),
       logger: (...args) => console.log("[trending]", ...args),
@@ -1756,17 +1768,19 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
   // 3. Wire state changes → trending + SSE
   let prevMode = null;
   stateMachine.on("stateChange", (change) => {
-    trending.recordEvent({
-      itemId: change.itemId,
-      varName: change.varName,
-      value: change.value,
-      oldValue: change.oldValue,
-      timestamp: change.timestamp,
-    });
+    if (trending) {
+      trending.recordEvent({
+        itemId: change.itemId,
+        varName: change.varName,
+        value: change.value,
+        oldValue: change.oldValue,
+        timestamp: change.timestamp,
+      });
+    }
 
     // Track home-mode transitions
     const homeState = stateMachine.getHomeState();
-    if (homeState.mode !== prevMode) {
+    if (trending && homeState.mode !== prevMode) {
       trending.recordModeChange(homeState.mode, homeState.confidence);
       prevMode = homeState.mode;
     }
@@ -2040,6 +2054,7 @@ app.get("/api/health", (_req, res) => {
     },
     trending: {
       initialized: !!trending,
+      unavailableReason: trending ? undefined : trendingUnavailableReason,
       ...(trending ? trending.getStats() : {}),
     },
     sseClients: sseClients.size,
