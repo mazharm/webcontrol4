@@ -10,6 +10,8 @@ const path = require("path");
 const dgram = require("dgram");
 const oauth = require("./oauth");
 const { isPrivateOrLocalHost, requestText } = require("./http-client");
+const ring = require("./ring-client");
+const notify = require("./notify");
 const { C4WebSocket } = require("./c4-websocket");
 const { StateMachine } = require("./state-machine");
 const { TrendingEngine } = require("./trending");
@@ -34,6 +36,8 @@ if (!fs.existsSync(DATA_DIR)) {
 let appSettings = {
   anthropicKey: "",
   anthropicModel: "claude-haiku-4-5-20251001",
+  pushoverAppToken: "",
+  pushoverUserKey: "",
 };
 
 try {
@@ -44,6 +48,13 @@ try {
 } catch (err) {
   console.error("Failed to load settings:", err.message);
 }
+
+// Apply persisted Pushover keys to process.env (notify.js reads from env)
+function applyPushoverEnv() {
+  if (appSettings.pushoverAppToken) process.env.PUSHOVER_APP_TOKEN = appSettings.pushoverAppToken;
+  if (appSettings.pushoverUserKey) process.env.PUSHOVER_USER_KEY = appSettings.pushoverUserKey;
+}
+applyPushoverEnv();
 
 function persistSettings() {
   try {
@@ -1112,6 +1123,8 @@ app.get("/api/settings", (_req, res) => {
   res.json({
     anthropicModel: appSettings.anthropicModel,
     hasAnthropicKey: !!appSettings.anthropicKey,
+    hasPushoverAppToken: !!appSettings.pushoverAppToken || !!process.env.PUSHOVER_APP_TOKEN,
+    hasPushoverUserKey: !!appSettings.pushoverUserKey || !!process.env.PUSHOVER_USER_KEY,
   });
 });
 
@@ -1131,7 +1144,25 @@ app.post("/api/settings", (req, res) => {
     }
     appSettings.anthropicModel = validModel.id;
   }
+
+  const { pushoverAppToken, pushoverUserKey } = req.body;
+  if (pushoverAppToken !== undefined) {
+    const tokenStr = String(pushoverAppToken).trim();
+    if (tokenStr.length > 100) {
+      return res.status(400).json({ error: "pushoverAppToken is too long" });
+    }
+    appSettings.pushoverAppToken = tokenStr;
+  }
+  if (pushoverUserKey !== undefined) {
+    const keyStr = String(pushoverUserKey).trim();
+    if (keyStr.length > 100) {
+      return res.status(400).json({ error: "pushoverUserKey is too long" });
+    }
+    appSettings.pushoverUserKey = keyStr;
+  }
+
   persistSettings();
+  applyPushoverEnv();
   res.json({ ok: true });
 });
 
@@ -1484,6 +1515,206 @@ app.post("/api/llm/chat", async (req, res) => {
     console.error("[llm] Error:", err.message);
     res.status(500).json({ error: errMsg });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Ring Integration
+// ---------------------------------------------------------------------------
+
+// Auto-connect on startup if token exists
+if (process.env.RING_REFRESH_TOKEN) {
+  ring.initialize(process.env.RING_REFRESH_TOKEN);
+}
+
+app.get("/ring/status", async (_req, res) => {
+  res.json(ring.getStatus());
+});
+
+app.post("/ring/login", async (req, res) => {
+  // Support both email/password and raw refresh token
+  const { email, password, refreshToken } = req.body;
+
+  if (refreshToken && typeof refreshToken === "string") {
+    if (refreshToken.length > 1000) {
+      return res.status(400).json({ error: "refreshToken too long" });
+    }
+    const result = await ring.initialize(refreshToken);
+    return res.status(result.success ? 200 : 401).json(result);
+  }
+
+  if (!email || typeof email !== "string" || !password || typeof password !== "string") {
+    return res.status(400).json({ error: "email and password required (or refreshToken)" });
+  }
+  if (email.length > 256 || password.length > 256) {
+    return res.status(400).json({ error: "credentials too long" });
+  }
+
+  const result = await ring.loginWithEmail(email, password);
+  if (result.requires2FA) {
+    return res.json(result);
+  }
+  res.status(result.success ? 200 : 401).json(result);
+});
+
+app.post("/ring/verify", async (req, res) => {
+  const { code } = req.body;
+  if (!code || typeof code !== "string" || code.length > 10) {
+    return res.status(400).json({ error: "code required (string, max 10 chars)" });
+  }
+  const result = await ring.verify2FA(code);
+  if (result.requires2FA) {
+    return res.json(result);
+  }
+  res.status(result.success ? 200 : 401).json(result);
+});
+
+app.get("/ring/alarm/mode", async (_req, res) => {
+  try {
+    res.json(await ring.getAlarmMode());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/ring/alarm/mode", async (req, res) => {
+  const { mode, bypass } = req.body;
+  if (!mode || !["away", "home", "disarm"].includes(mode)) {
+    return res.status(400).json({ error: "mode must be away|home|disarm" });
+  }
+  if (bypass && (!Array.isArray(bypass) || bypass.some((b) => typeof b !== "string"))) {
+    return res.status(400).json({ error: "bypass must be an array of string ZIDs" });
+  }
+  try {
+    res.json(await ring.setAlarmMode(mode, bypass));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/ring/alarm/siren", async (req, res) => {
+  const { action } = req.body;
+  if (!action || !["on", "off"].includes(action)) {
+    return res.status(400).json({ error: "action must be on|off" });
+  }
+  try {
+    res.json(await ring.controlSiren(action));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/ring/devices", async (_req, res) => {
+  try {
+    res.json(await ring.getDevices());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/ring/sensors", async (_req, res) => {
+  try {
+    res.json(await ring.getSensorStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/ring/cameras", async (_req, res) => {
+  try {
+    res.json(await ring.getCameras());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/ring/cameras/:id/snapshot", async (req, res) => {
+  const cameraId = Number(req.params.id);
+  if (!Number.isFinite(cameraId)) {
+    return res.status(400).json({ error: "Invalid camera ID" });
+  }
+  try {
+    const buf = await ring.getCameraSnapshot(cameraId);
+    res.set("Content-Type", "image/jpeg");
+    res.set("Cache-Control", "no-store");
+    res.send(buf);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/ring/cameras/:id/light", async (req, res) => {
+  const cameraId = Number(req.params.id);
+  if (!Number.isFinite(cameraId)) {
+    return res.status(400).json({ error: "Invalid camera ID" });
+  }
+  if (typeof req.body.on !== "boolean") {
+    return res.status(400).json({ error: "on must be a boolean" });
+  }
+  try {
+    res.json(await ring.setCameraLight(cameraId, req.body.on));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/ring/cameras/:id/siren", async (req, res) => {
+  const cameraId = Number(req.params.id);
+  if (!Number.isFinite(cameraId)) {
+    return res.status(400).json({ error: "Invalid camera ID" });
+  }
+  if (typeof req.body.on !== "boolean") {
+    return res.status(400).json({ error: "on must be a boolean" });
+  }
+  try {
+    res.json(await ring.setCameraSiren(cameraId, req.body.on));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Pushover Notifications
+// ---------------------------------------------------------------------------
+
+app.get("/notify/status", (_req, res) => {
+  res.json({
+    configured: !!(process.env.PUSHOVER_APP_TOKEN && process.env.PUSHOVER_USER_KEY),
+    enabled: process.env.PUSHOVER_ENABLED !== "false",
+    device: process.env.PUSHOVER_DEVICE || "all",
+  });
+});
+
+app.get("/notify/log", (req, res) => {
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
+  res.json(notify.getLog(limit));
+});
+
+app.post("/notify/test", async (req, res) => {
+  const message = (req.body.message && typeof req.body.message === "string")
+    ? req.body.message.slice(0, 1024)
+    : "Test notification from WebControl4";
+  const title = (req.body.title && typeof req.body.title === "string")
+    ? req.body.title.slice(0, 250)
+    : "WebControl4 Test";
+  const result = await notify.send({ title, message, priority: notify.Priority.NORMAL });
+  res.json(result);
+});
+
+app.post("/notify/send", async (req, res) => {
+  if (!req.body.message || typeof req.body.message !== "string") {
+    return res.status(400).json({ error: "message required" });
+  }
+  const opts = {
+    message: String(req.body.message).slice(0, 1024),
+  };
+  if (req.body.title && typeof req.body.title === "string") opts.title = req.body.title.slice(0, 250);
+  if (Number.isFinite(req.body.priority) && req.body.priority >= -2 && req.body.priority <= 2) opts.priority = req.body.priority;
+  if (req.body.sound && typeof req.body.sound === "string") opts.sound = req.body.sound.slice(0, 50);
+  if (req.body.url && typeof req.body.url === "string") opts.url = req.body.url.slice(0, 512);
+  if (req.body.urlTitle && typeof req.body.urlTitle === "string") opts.urlTitle = req.body.urlTitle.slice(0, 100);
+  if (Number.isFinite(req.body.ttl) && req.body.ttl > 0) opts.ttl = req.body.ttl;
+  const result = await notify.send(opts);
+  res.json(result);
 });
 
 // ---------------------------------------------------------------------------
@@ -1929,6 +2160,7 @@ function shutdown() {
   console.log("[shutdown] Cleaning up...");
   if (trending) trending.close();
   if (c4ws) c4ws.disconnect();
+  ring.disconnect();
   process.exit(0);
 }
 process.on("SIGTERM", shutdown);

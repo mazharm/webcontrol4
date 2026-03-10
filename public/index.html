@@ -782,6 +782,7 @@
     <!-- Tab navigation -->
     <div class="tab-bar" id="tab-bar">
       <button class="tab-btn active" data-tab="main"     onclick="switchDashTab('main')">🏠 Dashboard</button>
+      <button class="tab-btn"        data-tab="ring"     onclick="switchDashTab('ring')">🛡️ Ring</button>
       <button class="tab-btn"        data-tab="history"  onclick="switchDashTab('history')">📊 History</button>
       <button class="tab-btn"        data-tab="ai"       onclick="switchDashTab('ai')">🤖 AI Assistant</button>
       <button class="tab-btn"        data-tab="settings" onclick="switchDashTab('settings')">⚙️ Settings</button>
@@ -884,6 +885,100 @@
       </div>
     </div><!-- /dash-tab-ai -->
 
+    <!-- ===== Ring tab ===== -->
+    <div class="dash-tab" id="dash-tab-ring">
+      <div style="padding:24px;max-width:900px;margin:0 auto;">
+
+        <!-- Ring Status / Login -->
+        <div id="ring-status-bar" style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
+          <span id="ring-conn-dot" style="width:10px;height:10px;border-radius:50%;background:var(--muted);display:inline-block;"></span>
+          <span id="ring-conn-text" style="font-size:13px;color:var(--muted);">Checking Ring connection...</span>
+          <button class="btn-sm" id="ring-login-btn" onclick="showRingLogin()" style="margin-left:auto;display:none;">Connect Ring</button>
+        </div>
+
+        <!-- Ring Login Form (hidden by default) -->
+        <div id="ring-login-form" class="settings-card" style="display:none;margin-bottom:20px;">
+          <div class="settings-card-title">Ring Login</div>
+
+          <!-- Step 1: Email & Password -->
+          <div id="ring-login-step1">
+            <div class="form-group">
+              <label>Email</label>
+              <input type="email" id="ring-email" placeholder="ring@example.com" style="width:100%;">
+            </div>
+            <div class="form-group">
+              <label>Password</label>
+              <input type="password" id="ring-password" placeholder="Password" style="width:100%;">
+            </div>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+              <button class="btn" onclick="submitRingEmailLogin()">Sign In</button>
+              <button class="btn-sm" onclick="document.getElementById('ring-login-form').style.display='none'">Cancel</button>
+            </div>
+          </div>
+
+          <!-- Step 2: 2FA Code (hidden until needed) -->
+          <div id="ring-login-step2" style="display:none;">
+            <p id="ring-2fa-prompt" style="font-size:13px;color:var(--muted);margin-bottom:12px;"></p>
+            <div class="form-group">
+              <label>Verification Code</label>
+              <input type="text" id="ring-2fa-code" placeholder="123456" maxlength="10" style="width:100%;">
+            </div>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+              <button class="btn" onclick="submitRing2FA()">Verify</button>
+              <button class="btn-sm" onclick="resetRingLogin()">Back</button>
+            </div>
+          </div>
+
+          <!-- Advanced: Raw token -->
+          <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
+            <details>
+              <summary style="font-size:12px;color:var(--muted);cursor:pointer;">Advanced: Use refresh token</summary>
+              <div class="form-group" style="margin-top:8px;">
+                <input type="password" id="ring-token-input" placeholder="Paste refresh token..." style="width:100%;">
+              </div>
+              <button class="btn-sm" onclick="submitRingTokenLogin()" style="margin-top:4px;">Connect with Token</button>
+            </details>
+          </div>
+
+          <div id="ring-login-msg" style="font-size:13px;margin-top:8px;display:none;"></div>
+        </div>
+
+        <!-- Alarm Control Panel -->
+        <div id="ring-alarm-section" style="display:none;">
+          <div class="section-title">🛡️ Alarm</div>
+          <div class="settings-card" style="margin-bottom:20px;">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+              <span style="font-size:14px;font-weight:600;">Mode:</span>
+              <span id="ring-alarm-mode-badge" style="padding:4px 12px;border-radius:12px;font-size:13px;font-weight:600;background:var(--card);color:var(--muted);">—</span>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn" id="ring-btn-disarm" onclick="setRingAlarm('disarm')">Disarm</button>
+              <button class="btn" id="ring-btn-home"   onclick="setRingAlarm('home')">Arm Home</button>
+              <button class="btn" id="ring-btn-away"   onclick="setRingAlarm('away')">Arm Away</button>
+            </div>
+            <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+              <span style="font-size:13px;font-weight:600;">Siren:</span>
+              <button class="btn-sm" onclick="ringAlarmSiren('on')" style="margin-left:8px;">Sound</button>
+              <button class="btn-sm" onclick="ringAlarmSiren('off')" style="margin-left:4px;">Silence</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sensors Dashboard -->
+        <div id="ring-sensors-section" style="display:none;">
+          <div class="section-title">📡 Sensors</div>
+          <div id="ring-sensors-list" class="device-grid" style="margin-bottom:20px;"></div>
+        </div>
+
+        <!-- Cameras Grid -->
+        <div id="ring-cameras-section" style="display:none;">
+          <div class="section-title">📹 Cameras</div>
+          <div id="ring-cameras-grid" class="device-grid" style="margin-bottom:20px;"></div>
+        </div>
+
+      </div>
+    </div><!-- /dash-tab-ring -->
+
     <!-- ===== Settings tab ===== -->
     <div class="dash-tab" id="dash-tab-settings">
       <div style="padding:24px;max-width:500px;margin:0 auto;">
@@ -904,6 +999,42 @@
           </div>
           <button class="btn" onclick="saveAppSettings()" style="margin-top:8px;">Save Settings</button>
           <div id="settings-msg" style="font-size:13px;margin-top:8px;display:none;"></div>
+        </div>
+
+        <!-- Pushover Notifications -->
+        <div class="settings-card" style="margin-top:20px;">
+          <div class="settings-card-title">🔔 Notifications (Pushover)</div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+            <span id="notify-status-dot" style="width:10px;height:10px;border-radius:50%;background:var(--muted);display:inline-block;"></span>
+            <span id="notify-status-text" style="font-size:13px;color:var(--muted);">Checking...</span>
+          </div>
+          <div class="form-group">
+            <label>Pushover App Token</label>
+            <div class="key-row">
+              <input type="password" id="setting-pushover-app-token" placeholder="azGDORe..." maxlength="100">
+              <button class="btn-sm" onclick="togglePushoverVisibility('setting-pushover-app-token')">Show</button>
+            </div>
+            <div id="pushover-app-token-status" style="font-size:12px;color:var(--muted);margin-top:4px;"></div>
+          </div>
+          <div class="form-group">
+            <label>Pushover User Key</label>
+            <div class="key-row">
+              <input type="password" id="setting-pushover-user-key" placeholder="uQiRzpo..." maxlength="100">
+              <button class="btn-sm" onclick="togglePushoverVisibility('setting-pushover-user-key')">Show</button>
+            </div>
+            <div id="pushover-user-key-status" style="font-size:12px;color:var(--muted);margin-top:4px;"></div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+            <button class="btn" onclick="savePushoverSettings()">Save Pushover Keys</button>
+            <button class="btn-sm" onclick="sendTestNotification()" id="notify-test-btn">Send Test</button>
+          </div>
+          <div id="pushover-save-msg" style="font-size:13px;margin-top:8px;display:none;"></div>
+          <div id="notify-test-msg" style="font-size:13px;margin-top:4px;display:none;"></div>
+
+          <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+            <div style="font-size:13px;font-weight:600;margin-bottom:8px;">Recent Notifications</div>
+            <div id="notify-log" style="font-size:12px;color:var(--muted);max-height:200px;overflow-y:auto;"></div>
+          </div>
         </div>
       </div>
     </div><!-- /dash-tab-settings -->
@@ -2675,8 +2806,302 @@
       document.querySelectorAll(".dash-tab").forEach((t) => {
         t.classList.toggle("active", t.id === `dash-tab-${tab}`);
       });
+      if (tab === "ring")     initRingTab();
       if (tab === "history")  initHistory();
-      if (tab === "settings") loadAppSettings();
+      if (tab === "settings") { loadAppSettings(); loadNotifyStatus(); }
+    }
+
+    // -----------------------------------------------------------------------
+    // Ring integration
+    // -----------------------------------------------------------------------
+
+    let ringPollTimer = null;
+    let ringInitialized = false;
+
+    async function initRingTab() {
+      if (ringInitialized) return;
+      ringInitialized = true;
+      await refreshRingStatus();
+    }
+
+    async function refreshRingStatus() {
+      try {
+        const status = await api("/ring/status");
+        const dot = document.getElementById("ring-conn-dot");
+        const text = document.getElementById("ring-conn-text");
+        const loginBtn = document.getElementById("ring-login-btn");
+
+        if (status.connected) {
+          dot.style.background = "#22c55e";
+          const locNames = status.locations.map((l) => l.name).join(", ");
+          text.textContent = `Connected — ${status.locationCount} location(s)${locNames ? ": " + locNames : ""}`;
+          text.style.color = "var(--text)";
+          loginBtn.style.display = "none";
+          startRingPolling();
+        } else {
+          dot.style.background = status.status === "error" ? "#ef4444" : "var(--muted)";
+          text.textContent = status.status === "error" ? "Ring connection failed" : "Ring not connected";
+          text.style.color = "var(--muted)";
+          loginBtn.style.display = "";
+          stopRingPolling();
+          document.getElementById("ring-alarm-section").style.display = "none";
+          document.getElementById("ring-sensors-section").style.display = "none";
+          document.getElementById("ring-cameras-section").style.display = "none";
+        }
+      } catch {
+        document.getElementById("ring-conn-text").textContent = "Unable to reach server";
+        document.getElementById("ring-login-btn").style.display = "";
+      }
+    }
+
+    function showRingLogin() {
+      resetRingLogin();
+      document.getElementById("ring-login-form").style.display = "";
+    }
+
+    function resetRingLogin() {
+      document.getElementById("ring-login-step1").style.display = "";
+      document.getElementById("ring-login-step2").style.display = "none";
+      const msg = document.getElementById("ring-login-msg");
+      msg.style.display = "none";
+    }
+
+    function showRingMsg(text, color) {
+      const msg = document.getElementById("ring-login-msg");
+      msg.style.display = "";
+      msg.style.color = color;
+      msg.textContent = text;
+    }
+
+    async function submitRingEmailLogin() {
+      const email = document.getElementById("ring-email").value.trim();
+      const password = document.getElementById("ring-password").value;
+      if (!email || !password) { showRingMsg("Email and password required.", "#ef4444"); return; }
+
+      showRingMsg("Signing in...", "var(--muted)");
+      try {
+        const result = await api("/ring/login", { method: "POST", body: { email, password } });
+        if (result.requires2FA) {
+          document.getElementById("ring-login-step1").style.display = "none";
+          document.getElementById("ring-login-step2").style.display = "";
+          document.getElementById("ring-2fa-prompt").textContent = result.prompt || "Enter your verification code";
+          showRingMsg("2FA required.", "var(--muted)");
+        } else if (result.success) {
+          showRingMsg("Connected!", "#22c55e");
+          document.getElementById("ring-login-form").style.display = "none";
+          ringInitialized = false;
+          await initRingTab();
+        } else {
+          showRingMsg(result.error || "Login failed", "#ef4444");
+        }
+      } catch (err) {
+        showRingMsg(err.message, "#ef4444");
+      }
+    }
+
+    async function submitRing2FA() {
+      const code = document.getElementById("ring-2fa-code").value.trim();
+      if (!code) { showRingMsg("Enter the verification code.", "#ef4444"); return; }
+
+      showRingMsg("Verifying...", "var(--muted)");
+      try {
+        const result = await api("/ring/verify", { method: "POST", body: { code } });
+        if (result.requires2FA) {
+          showRingMsg(result.prompt || "Invalid code. Try again.", "#ef4444");
+        } else if (result.success) {
+          showRingMsg("Connected!", "#22c55e");
+          document.getElementById("ring-login-form").style.display = "none";
+          ringInitialized = false;
+          await initRingTab();
+        } else {
+          showRingMsg(result.error || "Verification failed", "#ef4444");
+        }
+      } catch (err) {
+        showRingMsg(err.message, "#ef4444");
+      }
+    }
+
+    async function submitRingTokenLogin() {
+      const token = document.getElementById("ring-token-input").value.trim();
+      if (!token) return;
+      showRingMsg("Connecting...", "var(--muted)");
+      try {
+        const result = await api("/ring/login", { method: "POST", body: { refreshToken: token } });
+        if (result.success) {
+          showRingMsg("Connected!", "#22c55e");
+          document.getElementById("ring-login-form").style.display = "none";
+          ringInitialized = false;
+          await initRingTab();
+        } else {
+          showRingMsg(result.error || "Login failed", "#ef4444");
+        }
+      } catch (err) {
+        showRingMsg(err.message, "#ef4444");
+      }
+    }
+
+    function startRingPolling() {
+      if (ringPollTimer) return;
+      pollRingData();
+      ringPollTimer = setInterval(pollRingData, 5000);
+    }
+
+    function stopRingPolling() {
+      if (ringPollTimer) { clearInterval(ringPollTimer); ringPollTimer = null; }
+    }
+
+    async function pollRingData() {
+      try {
+        // Alarm
+        try {
+          const alarm = await api("/ring/alarm/mode");
+          document.getElementById("ring-alarm-section").style.display = "";
+          renderRingAlarm(alarm);
+        } catch {
+          document.getElementById("ring-alarm-section").style.display = "none";
+        }
+
+        // Sensors
+        try {
+          const sensors = await api("/ring/sensors");
+          if (sensors.length > 0) {
+            document.getElementById("ring-sensors-section").style.display = "";
+            renderRingSensors(sensors);
+          }
+        } catch {
+          document.getElementById("ring-sensors-section").style.display = "none";
+        }
+
+        // Cameras
+        try {
+          const cameras = await api("/ring/cameras");
+          if (cameras.length > 0) {
+            document.getElementById("ring-cameras-section").style.display = "";
+            renderRingCameras(cameras);
+          }
+        } catch {
+          document.getElementById("ring-cameras-section").style.display = "none";
+        }
+      } catch { /* ignore */ }
+    }
+
+    const RING_MODE_LABELS = { all: "Armed Away", some: "Armed Home", none: "Disarmed" };
+    const RING_MODE_COLORS = { all: "#ef4444", some: "#f59e0b", none: "#22c55e" };
+
+    function renderRingAlarm(alarm) {
+      const badge = document.getElementById("ring-alarm-mode-badge");
+      const mode = alarm.mode || "none";
+      badge.textContent = RING_MODE_LABELS[mode] || mode;
+      badge.style.background = RING_MODE_COLORS[mode] || "var(--card)";
+      badge.style.color = "#fff";
+
+      ["disarm", "home", "away"].forEach((m) => {
+        const btn = document.getElementById(`ring-btn-${m}`);
+        const isActive = (m === "disarm" && mode === "none") ||
+                         (m === "home" && mode === "some") ||
+                         (m === "away" && mode === "all");
+        btn.style.opacity = isActive ? "0.5" : "1";
+      });
+    }
+
+    async function setRingAlarm(mode) {
+      try {
+        await api("/ring/alarm/mode", { method: "POST", body: { mode } });
+        await pollRingData();
+      } catch (err) {
+        alert("Failed to set alarm: " + err.message);
+      }
+    }
+
+    async function ringAlarmSiren(action) {
+      if (action === "on" && !confirm("Sound the Ring siren? This is loud and may alert monitoring.")) return;
+      try {
+        await api("/ring/alarm/siren", { method: "POST", body: { action } });
+      } catch (err) {
+        alert("Siren control failed: " + err.message);
+      }
+    }
+
+    const SENSOR_ICONS = {
+      "sensor.contact": "🚪",
+      "sensor.motion": "🚶",
+      "sensor.flood-freeze": "💧",
+      "sensor.freeze": "🥶",
+      "sensor.temperature": "🌡️",
+      "sensor.water": "💧",
+      "sensor.tilt": "🪟",
+      "sensor.glassbreak": "💥",
+    };
+
+    function renderRingSensors(sensors) {
+      const container = document.getElementById("ring-sensors-list");
+      container.innerHTML = sensors.map((s) => {
+        const icon = SENSOR_ICONS[s.type] || "📡";
+        const faulted = s.faulted;
+        const statusText = faulted ? "Open / Triggered" : "OK / Closed";
+        const statusColor = faulted ? "#ef4444" : "#22c55e";
+        const battery = s.batteryLevel != null ? s.batteryLevel : null;
+        const batteryWarn = battery != null && battery < 20;
+        return `<div class="device-card" style="border-left:3px solid ${statusColor};">
+          <div style="font-size:18px;margin-bottom:4px;">${icon}</div>
+          <div style="font-weight:600;font-size:13px;margin-bottom:4px;">${esc(s.name || s.zid)}</div>
+          <div style="font-size:12px;color:${statusColor};font-weight:600;">${statusText}</div>
+          ${battery != null ? `<div style="font-size:11px;color:${batteryWarn ? "#ef4444" : "var(--muted)"};margin-top:4px;">🔋 ${battery}%</div>` : ""}
+        </div>`;
+      }).join("");
+    }
+
+    function renderRingCameras(cameras) {
+      const container = document.getElementById("ring-cameras-grid");
+      container.innerHTML = cameras.map((c) => {
+        const offlineTag = c.isOffline ? `<div style="font-size:11px;color:#ef4444;font-weight:600;">Offline</div>` : "";
+        const lightBtn = c.hasLight ? `<button class="btn-sm" onclick="toggleCamLight(${c.id}, this)" style="margin-top:6px;">💡 Toggle Light</button>` : "";
+        const sirenBtn = c.hasSiren ? `<button class="btn-sm" onclick="toggleCamSiren(${c.id})" style="margin-top:4px;">🔊 Siren</button>` : "";
+        return `<div class="device-card" style="text-align:center;min-width:180px;">
+          <div id="ring-snap-${c.id}" style="width:100%;height:120px;background:var(--bg);border-radius:6px;margin-bottom:8px;display:flex;align-items:center;justify-content:center;overflow:hidden;cursor:pointer;" onclick="refreshSnapshot(${c.id})">
+            <span style="font-size:12px;color:var(--muted);">Click for snapshot</span>
+          </div>
+          <div style="font-weight:600;font-size:13px;">${esc(c.name)}</div>
+          <div style="font-size:11px;color:var(--muted);">${esc(c.model || "")}</div>
+          ${offlineTag}
+          ${lightBtn}
+          ${sirenBtn}
+        </div>`;
+      }).join("");
+    }
+
+    async function refreshSnapshot(cameraId) {
+      const el = document.getElementById(`ring-snap-${cameraId}`);
+      if (!el) return;
+      el.innerHTML = `<span class="spinner"></span>`;
+      try {
+        const url = `/ring/cameras/${cameraId}/snapshot?t=${Date.now()}`;
+        const img = new Image();
+        img.onload = () => { el.innerHTML = ""; el.appendChild(img); };
+        img.onerror = () => { el.innerHTML = `<span style="font-size:12px;color:#ef4444;">Failed</span>`; };
+        img.style.cssText = "width:100%;height:100%;object-fit:cover;border-radius:6px;";
+        img.src = url;
+      } catch {
+        el.innerHTML = `<span style="font-size:12px;color:#ef4444;">Error</span>`;
+      }
+    }
+
+    async function toggleCamLight(cameraId) {
+      try {
+        // Toggle: try on first, if already on this effectively stays on
+        await api(`/ring/cameras/${cameraId}/light`, { method: "POST", body: { on: true } });
+      } catch (err) {
+        alert("Light toggle failed: " + err.message);
+      }
+    }
+
+    async function toggleCamSiren(cameraId) {
+      if (!confirm("Activate camera siren? This is loud.")) return;
+      try {
+        await api(`/ring/cameras/${cameraId}/siren`, { method: "POST", body: { on: true } });
+      } catch (err) {
+        alert("Siren failed: " + err.message);
+      }
     }
 
     // -----------------------------------------------------------------------
@@ -3268,6 +3693,128 @@
         msg.textContent  = "Error: " + err.message;
         msg.style.color  = "var(--red)";
         msg.style.display = "block";
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Notifications (Pushover)
+    // -----------------------------------------------------------------------
+
+    async function loadNotifyStatus() {
+      try {
+        const [status, settings, log] = await Promise.all([
+          api("/notify/status"),
+          api("/api/settings"),
+          api("/notify/log"),
+        ]);
+
+        const dot = document.getElementById("notify-status-dot");
+        const text = document.getElementById("notify-status-text");
+
+        if (status.configured && status.enabled) {
+          dot.style.background = "#22c55e";
+          text.textContent = `Configured & Enabled (device: ${status.device})`;
+          text.style.color = "var(--text)";
+        } else if (status.configured) {
+          dot.style.background = "#f59e0b";
+          text.textContent = "Configured but disabled";
+          text.style.color = "var(--muted)";
+        } else {
+          dot.style.background = "var(--muted)";
+          text.textContent = "Not configured — enter your Pushover keys below";
+          text.style.color = "var(--muted)";
+        }
+
+        const appTokenStatus = document.getElementById("pushover-app-token-status");
+        appTokenStatus.textContent = settings.hasPushoverAppToken ? "✓ App token is configured" : "No app token set";
+        appTokenStatus.style.color = settings.hasPushoverAppToken ? "var(--green)" : "var(--muted)";
+
+        const userKeyStatus = document.getElementById("pushover-user-key-status");
+        userKeyStatus.textContent = settings.hasPushoverUserKey ? "✓ User key is configured" : "No user key set";
+        userKeyStatus.style.color = settings.hasPushoverUserKey ? "var(--green)" : "var(--muted)";
+
+        renderNotifyLog(log);
+      } catch {
+        document.getElementById("notify-status-text").textContent = "Unable to reach server";
+      }
+    }
+
+    function togglePushoverVisibility(inputId) {
+      const input = document.getElementById(inputId);
+      input.type = input.type === "password" ? "text" : "password";
+    }
+
+    async function savePushoverSettings() {
+      const appToken = document.getElementById("setting-pushover-app-token").value.trim();
+      const userKey = document.getElementById("setting-pushover-user-key").value.trim();
+      const msg = document.getElementById("pushover-save-msg");
+
+      if (!appToken && !userKey) {
+        msg.textContent = "Enter at least one field to update.";
+        msg.style.color = "var(--muted)";
+        msg.style.display = "";
+        return;
+      }
+
+      try {
+        const body = {};
+        if (appToken) body.pushoverAppToken = appToken;
+        if (userKey) body.pushoverUserKey = userKey;
+
+        const result = await api("/api/settings", { method: "POST", body });
+        if (result.error) throw new Error(result.error);
+
+        msg.textContent = "Pushover keys saved.";
+        msg.style.color = "var(--green)";
+        msg.style.display = "";
+        document.getElementById("setting-pushover-app-token").value = "";
+        document.getElementById("setting-pushover-user-key").value = "";
+        await loadNotifyStatus();
+        setTimeout(() => { msg.style.display = "none"; }, 3000);
+      } catch (err) {
+        msg.textContent = "Error: " + err.message;
+        msg.style.color = "var(--red)";
+        msg.style.display = "";
+      }
+    }
+
+    function renderNotifyLog(log) {
+      const el = document.getElementById("notify-log");
+      if (!Array.isArray(log) || log.length === 0) {
+        el.innerHTML = `<span style="color:var(--muted);">No notifications yet.</span>`;
+        return;
+      }
+      el.innerHTML = log.map((entry) => {
+        const time = new Date(entry.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const icon = entry.success ? "" : "❌ ";
+        return `<div style="padding:4px 0;border-bottom:1px solid var(--border);">${time} &nbsp;${icon}${esc(entry.title)}: ${esc(entry.message)}</div>`;
+      }).join("");
+    }
+
+    async function sendTestNotification() {
+      const btn = document.getElementById("notify-test-btn");
+      const msg = document.getElementById("notify-test-msg");
+      btn.disabled = true;
+      btn.textContent = "Sending...";
+      msg.style.display = "none";
+      try {
+        const result = await api("/notify/test", { method: "POST", body: {} });
+        msg.style.display = "";
+        if (result.success) {
+          msg.style.color = "#22c55e";
+          msg.textContent = result.skipped ? "Notification skipped (disabled or duplicate)" : "Test notification sent!";
+        } else {
+          msg.style.color = "#ef4444";
+          msg.textContent = (result.errors && result.errors[0]) || "Send failed";
+        }
+        await loadNotifyStatus(); // refresh log
+      } catch (err) {
+        msg.style.display = "";
+        msg.style.color = "#ef4444";
+        msg.textContent = err.message;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Send Test Notification";
       }
     }
 

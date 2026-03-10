@@ -445,6 +445,128 @@ function createMcpServer(config) {
     }
   );
 
+  // -------------------------------------------------------------------------
+  // Notification Tool (1)
+  // -------------------------------------------------------------------------
+
+  server.tool(
+    "send_notification",
+    "Send a push notification to the user's phone via Pushover",
+    {
+      message: z.string().max(1024).describe("Notification body (max 1024 chars)"),
+      title: z.string().max(250).optional().describe("Notification title (max 250 chars)"),
+      priority: z.number().int().min(-2).max(2).optional().describe("-2=lowest, -1=low, 0=normal, 1=high, 2=emergency"),
+      sound: z.string().optional().describe("Sound: siren, spacealarm, incoming, pushover, none"),
+      url: z.string().max(512).optional().describe("Supplementary URL"),
+      url_title: z.string().max(100).optional().describe("URL display title"),
+    },
+    async ({ message, title, priority, sound, url, url_title }) => {
+      const data = await apiCall("/notify/send", {
+        method: "POST",
+        body: { message, title, priority, sound, url, urlTitle: url_title },
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data) }] };
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Ring Tools (9)
+  // -------------------------------------------------------------------------
+
+  server.tool("ring_alarm_status", "Get Ring alarm mode and panel status", {}, async () => {
+    try {
+      const data = await apiCall("/ring/alarm/mode");
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Ring alarm not available: ${err.message}` }], isError: true };
+    }
+  });
+
+  server.tool(
+    "ring_alarm_set_mode",
+    "Arm/disarm Ring alarm. Modes: away, home, disarm",
+    {
+      mode: z.enum(["away", "home", "disarm"]).describe("Alarm mode"),
+      bypass: z.array(z.string()).optional().describe("Optional device ZIDs to bypass when arming"),
+    },
+    async ({ mode, bypass }) => {
+      const data = await apiCall("/ring/alarm/mode", { method: "POST", body: { mode, bypass } });
+      return { content: [{ type: "text", text: JSON.stringify(data) }] };
+    }
+  );
+
+  server.tool(
+    "ring_siren",
+    "Control Ring alarm siren (on/off)",
+    { action: z.enum(["on", "off"]).describe("Siren action") },
+    async ({ action }) => {
+      const data = await apiCall("/ring/alarm/siren", { method: "POST", body: { action } });
+      return { content: [{ type: "text", text: JSON.stringify(data) }] };
+    }
+  );
+
+  server.tool("ring_devices", "List all Ring devices (alarm sensors, keypads, range extenders)", {}, async () => {
+    const data = await apiCall("/ring/devices");
+    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool("ring_sensors", "Get status of Ring sensors (contact, motion, flood/freeze, tilt, glassbreak)", {}, async () => {
+    const data = await apiCall("/ring/sensors");
+    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool("ring_cameras", "List Ring cameras with status", {}, async () => {
+    const data = await apiCall("/ring/cameras");
+    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool(
+    "ring_camera_snapshot",
+    "Get a snapshot from a Ring camera (returns JPEG image)",
+    { camera_id: z.number().describe("Camera ID from ring_cameras") },
+    async ({ camera_id }) => {
+      try {
+        const response = await requestText(`${baseUrl}/ring/cameras/${camera_id}/snapshot`, {
+          headers: authHeader ? (authHeader.startsWith("Cookie:")
+            ? { Cookie: authHeader.replace("Cookie: ", "") }
+            : { Authorization: authHeader }) : {},
+        });
+        if (response.statusCode >= 400) {
+          return { content: [{ type: "text", text: `Snapshot failed: HTTP ${response.statusCode}` }], isError: true };
+        }
+        return { content: [{ type: "image", data: Buffer.from(response.body, "binary").toString("base64"), mimeType: "image/jpeg" }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Snapshot error: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    "ring_camera_light",
+    "Turn Ring camera light on/off",
+    {
+      camera_id: z.number().describe("Camera ID"),
+      on: z.boolean().describe("true = on, false = off"),
+    },
+    async ({ camera_id, on }) => {
+      const data = await apiCall(`/ring/cameras/${camera_id}/light`, { method: "POST", body: { on } });
+      return { content: [{ type: "text", text: JSON.stringify(data) }] };
+    }
+  );
+
+  server.tool(
+    "ring_camera_siren",
+    "Turn Ring camera siren on/off",
+    {
+      camera_id: z.number().describe("Camera ID"),
+      on: z.boolean().describe("true = on, false = off"),
+    },
+    async ({ camera_id, on }) => {
+      const data = await apiCall(`/ring/cameras/${camera_id}/siren`, { method: "POST", body: { on } });
+      return { content: [{ type: "text", text: JSON.stringify(data) }] };
+    }
+  );
+
   return server;
 }
 
