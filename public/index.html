@@ -934,6 +934,64 @@
         <div id="step-value-container" style="display:none;"></div>
         <button class="btn-sm primary" onclick="addStepToRoutine()" style="width:100%;margin-top:4px;">Add Step</button>
       </div>
+      <!-- Conditions section -->
+      <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+        <div style="font-size:13px;color:var(--muted);margin-bottom:8px;">Conditions (auto-trigger)</div>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+            <input type="checkbox" id="conditions-enabled"> Enable conditions
+          </label>
+        </div>
+        <div id="conditions-options" style="display:none;">
+          <div class="step-list" id="condition-list"></div>
+          <div class="add-step-form" style="margin-top:8px;">
+            <div style="font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:500;">Add a Condition</div>
+            <select id="cond-device" onchange="onCondDeviceChange()">
+              <option value="">Select device...</option>
+            </select>
+            <select id="cond-variable" style="display:none;"></select>
+            <select id="cond-operator" style="display:none;">
+              <option value="gt">is greater than</option>
+              <option value="gte">is greater than or equal to</option>
+              <option value="lt">is less than</option>
+              <option value="lte">is less than or equal to</option>
+              <option value="eq">equals</option>
+              <option value="neq">does not equal</option>
+            </select>
+            <input type="text" id="cond-value" placeholder="Value" style="display:none;" maxlength="50">
+            <div id="cond-duration-container" style="display:none;">
+              <label style="font-size:12px;color:var(--muted);">For at least:</label>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <input type="number" id="cond-duration-hours" min="0" max="24" value="0" style="width:60px;"> <span style="font-size:12px;color:var(--muted);">hours</span>
+                <input type="number" id="cond-duration-mins" min="0" max="59" value="0" style="width:60px;"> <span style="font-size:12px;color:var(--muted);">minutes</span>
+              </div>
+            </div>
+            <button class="btn-sm primary" onclick="addConditionToRoutine()" style="width:100%;margin-top:4px;">Add Condition</button>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;margin-top:12px;">
+            <label style="font-size:13px;color:var(--muted);">Logic:</label>
+            <select id="cond-logic" style="width:auto;">
+              <option value="all">ALL conditions must be true</option>
+              <option value="any">ANY condition must be true</option>
+            </select>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;margin-top:8px;">
+            <label style="font-size:13px;color:var(--muted);">Cooldown:</label>
+            <select id="cond-cooldown" style="width:auto;">
+              <option value="300">5 minutes</option>
+              <option value="900">15 minutes</option>
+              <option value="1800">30 minutes</option>
+              <option value="3600" selected>1 hour</option>
+              <option value="7200">2 hours</option>
+              <option value="14400">4 hours</option>
+              <option value="28800">8 hours</option>
+              <option value="43200">12 hours</option>
+              <option value="86400">24 hours</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
       <!-- Schedule section -->
       <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
         <div style="font-size:13px;color:var(--muted);margin-bottom:8px;">Schedule</div>
@@ -1088,6 +1146,15 @@
     // -----------------------------------------------------------------------
     // Login flow
     // -----------------------------------------------------------------------
+
+    // Restore saved credentials from localStorage
+    try {
+      const savedUser = localStorage.getItem("wc4_username");
+      const savedPass = localStorage.getItem("wc4_password");
+      if (savedUser) document.getElementById("c4-username").value = savedUser;
+      if (savedPass) document.getElementById("c4-password").value = savedPass;
+    } catch {}
+
     document.getElementById("login-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const errEl = document.getElementById("login-error");
@@ -1106,6 +1173,12 @@
         });
         if (authRes.error) throw new Error(authRes.error);
         state.accountToken = authRes.accountToken;
+
+        // Save credentials to localStorage on successful login
+        try {
+          localStorage.setItem("wc4_username", username);
+          localStorage.setItem("wc4_password", password);
+        } catch {}
 
         // Get controllers
         const controllers = await api("/api/auth/controllers", {
@@ -2070,11 +2143,16 @@
         const schedHtml = schedText
           ? `<div style="font-size:12px;color:var(--accent);margin-top:2px;">${esc(schedText)}</div>`
           : "";
+        const condCount = (routine.conditions && routine.conditionsEnabled) ? routine.conditions.length : 0;
+        const condHtml = condCount > 0
+          ? `<div style="font-size:12px;color:var(--green);margin-top:2px;">&#x26A1; ${condCount} condition${condCount > 1 ? "s" : ""} (${routine.conditionLogic === "any" ? "any" : "all"})</div>`
+          : "";
         card.innerHTML = `
           <div>
             <div class="routine-name">${esc(routine.name)}</div>
             <div class="routine-steps">${stepsText}</div>
             ${schedHtml}
+            ${condHtml}
           </div>
           <div class="routine-actions">
             <button class="btn-run" data-run-routine data-routine-id>&#x25B6; Run</button>
@@ -2094,11 +2172,14 @@
     function openRoutineModal(routineId) {
       editingRoutineId = routineId || null;
       editingSteps = [];
+      editingConditions = [];
       const nameInput = document.getElementById("routine-name");
       const schedEnabled = document.getElementById("schedule-enabled");
       const schedTime = document.getElementById("schedule-time");
       const schedOptions = document.getElementById("schedule-options");
       const dayBoxes = document.querySelectorAll(".schedule-day");
+      const condEnabled = document.getElementById("conditions-enabled");
+      const condOptions = document.getElementById("conditions-options");
 
       if (routineId) {
         const routine = state.routines.find((r) => r.id === routineId);
@@ -2121,6 +2202,19 @@
           dayBoxes.forEach((cb) => { cb.checked = [1,2,3,4,5].includes(parseInt(cb.value)); });
           schedOptions.style.display = "none";
         }
+
+        // Populate conditions
+        if (routine.conditions && routine.conditions.length > 0) {
+          condEnabled.checked = routine.conditionsEnabled !== false;
+          editingConditions = routine.conditions.map(c => ({ ...c }));
+          document.getElementById("cond-logic").value = routine.conditionLogic || "all";
+          document.getElementById("cond-cooldown").value = String(routine.cooldown || 3600);
+          condOptions.style.display = condEnabled.checked ? "block" : "none";
+          if (condEnabled.checked) populateCondDevices();
+        } else {
+          condEnabled.checked = false;
+          condOptions.style.display = "none";
+        }
       } else {
         document.getElementById("modal-title").textContent = "New Routine";
         nameInput.value = "";
@@ -2128,11 +2222,16 @@
         schedTime.value = "22:00";
         dayBoxes.forEach((cb) => { cb.checked = [1,2,3,4,5].includes(parseInt(cb.value)); });
         schedOptions.style.display = "none";
+        condEnabled.checked = false;
+        condOptions.style.display = "none";
+        document.getElementById("cond-logic").value = "all";
+        document.getElementById("cond-cooldown").value = "3600";
       }
       document.getElementById("step-action").value = "";
       document.getElementById("step-device").style.display = "none";
       document.getElementById("step-value-container").style.display = "none";
       renderModalSteps();
+      renderModalConditions();
       document.getElementById("routine-modal").classList.add("open");
     }
 
@@ -2271,6 +2370,164 @@
       renderModalSteps();
     }
 
+    // -----------------------------------------------------------------------
+    // Conditions UI
+    // -----------------------------------------------------------------------
+    let editingConditions = [];
+
+    const CONDITION_VARIABLES = {
+      light: [
+        { id: "LIGHT_LEVEL", name: "Light Level (0-100)" },
+        { id: "LIGHT_STATE", name: "Light State (on/off)" },
+      ],
+      thermostat: [
+        { id: "TEMPERATURE_F", name: "Current Temperature (F)" },
+        { id: "HEAT_SETPOINT_F", name: "Heat Setpoint (F)" },
+        { id: "COOL_SETPOINT_F", name: "Cool Setpoint (F)" },
+        { id: "HVAC_MODE", name: "HVAC Mode" },
+        { id: "HUMIDITY", name: "Humidity (%)" },
+        { id: "HVAC_STATE", name: "HVAC State" },
+      ],
+    };
+
+    document.getElementById("conditions-enabled").addEventListener("change", (e) => {
+      document.getElementById("conditions-options").style.display = e.target.checked ? "block" : "none";
+      if (e.target.checked) populateCondDevices();
+    });
+
+    function populateCondDevices() {
+      const sel = document.getElementById("cond-device");
+      sel.innerHTML = '<option value="">Select device...</option>';
+      for (const l of state.lights) {
+        sel.innerHTML += `<option value="light:${l.id}">${esc(l.name || "Light " + l.id)}</option>`;
+      }
+      for (const t of state.thermostats) {
+        sel.innerHTML += `<option value="thermostat:${t.id}">${esc(t.name || "Thermostat " + t.id)}</option>`;
+      }
+    }
+
+    function onCondDeviceChange() {
+      const val = document.getElementById("cond-device").value;
+      const varSel = document.getElementById("cond-variable");
+      const opSel = document.getElementById("cond-operator");
+      const valInput = document.getElementById("cond-value");
+      const durContainer = document.getElementById("cond-duration-container");
+
+      if (!val) {
+        varSel.style.display = "none";
+        opSel.style.display = "none";
+        valInput.style.display = "none";
+        durContainer.style.display = "none";
+        return;
+      }
+
+      const [deviceType] = val.split(":");
+      const vars = CONDITION_VARIABLES[deviceType] || [];
+      varSel.innerHTML = '';
+      for (const v of vars) {
+        varSel.innerHTML += `<option value="${v.id}">${esc(v.name)}</option>`;
+      }
+      varSel.style.display = "block";
+      opSel.style.display = "block";
+      valInput.style.display = "block";
+      durContainer.style.display = "block";
+
+      // Set sensible default value based on variable
+      const firstVar = vars[0]?.id || "";
+      if (firstVar === "LIGHT_STATE") valInput.value = "1";
+      else if (firstVar === "LIGHT_LEVEL") valInput.value = "0";
+      else if (firstVar === "TEMPERATURE_F") valInput.value = "73";
+      else valInput.value = "";
+    }
+
+    function addConditionToRoutine() {
+      const deviceVal = document.getElementById("cond-device").value;
+      const variable = document.getElementById("cond-variable").value;
+      const operator = document.getElementById("cond-operator").value;
+      const value = document.getElementById("cond-value").value.trim();
+      const hours = parseInt(document.getElementById("cond-duration-hours").value) || 0;
+      const mins = parseInt(document.getElementById("cond-duration-mins").value) || 0;
+
+      if (!deviceVal || !variable || !operator) {
+        alert("Please select a device, variable, and operator.");
+        return;
+      }
+      if (value === "") {
+        alert("Please enter a value.");
+        return;
+      }
+
+      const [deviceType, deviceIdStr] = deviceVal.split(":");
+      const deviceId = parseInt(deviceIdStr, 10);
+      const devices = deviceType === "light" ? state.lights : state.thermostats;
+      const device = devices.find(d => d.id === deviceId);
+      const duration = hours * 3600 + mins * 60;
+
+      editingConditions.push({
+        deviceId,
+        deviceName: device ? (device.name || `Device ${deviceId}`) : `Device ${deviceId}`,
+        variable,
+        operator,
+        value: isNaN(Number(value)) ? value : Number(value),
+        duration,
+      });
+      renderModalConditions();
+
+      // Reset
+      document.getElementById("cond-device").value = "";
+      document.getElementById("cond-variable").style.display = "none";
+      document.getElementById("cond-operator").style.display = "none";
+      document.getElementById("cond-value").style.display = "none";
+      document.getElementById("cond-duration-container").style.display = "none";
+    }
+
+    function removeCondition(idx) {
+      editingConditions.splice(idx, 1);
+      renderModalConditions();
+    }
+
+    function renderModalConditions() {
+      const list = document.getElementById("condition-list");
+      if (editingConditions.length === 0) {
+        list.innerHTML = '<div style="font-size:13px;color:var(--muted);padding:4px 0;">No conditions yet.</div>';
+        return;
+      }
+      list.innerHTML = "";
+      editingConditions.forEach((cond, idx) => {
+        const div = document.createElement("div");
+        div.className = "step-item";
+        div.innerHTML = `<span>${esc(describeCondition(cond))}</span><button onclick="removeCondition(${idx})" title="Remove condition">&times;</button>`;
+        list.appendChild(div);
+      });
+    }
+
+    const OP_LABELS = { eq: "=", neq: "\u2260", gt: ">", gte: "\u2265", lt: "<", lte: "\u2264" };
+
+    function describeCondition(cond) {
+      const op = OP_LABELS[cond.operator] || cond.operator;
+      let desc = `${cond.deviceName}: ${cond.variable} ${op} ${cond.value}`;
+      if (cond.duration > 0) {
+        const h = Math.floor(cond.duration / 3600);
+        const m = Math.floor((cond.duration % 3600) / 60);
+        const parts = [];
+        if (h > 0) parts.push(`${h}h`);
+        if (m > 0) parts.push(`${m}m`);
+        desc += ` for ${parts.join(" ")}`;
+      }
+      return desc;
+    }
+
+    function getConditionsFromModal() {
+      const enabled = document.getElementById("conditions-enabled").checked;
+      if (!enabled || editingConditions.length === 0) return null;
+      return {
+        conditions: editingConditions.map(c => ({ ...c })),
+        conditionLogic: document.getElementById("cond-logic").value,
+        conditionsEnabled: true,
+        cooldown: parseInt(document.getElementById("cond-cooldown").value, 10) || 3600,
+      };
+    }
+
     function getScheduleFromModal() {
       const enabled = document.getElementById("schedule-enabled").checked;
       if (!enabled) return null;
@@ -2283,6 +2540,7 @@
       const name = document.getElementById("routine-name").value.trim();
       if (!name) { alert("Please enter a routine name."); return; }
       const schedule = getScheduleFromModal();
+      const condData = getConditionsFromModal();
       let routine;
       if (editingRoutineId) {
         routine = state.routines.find((r) => r.id === editingRoutineId);
@@ -2290,6 +2548,18 @@
           routine.name = name;
           routine.steps = editingSteps;
           routine.schedule = schedule;
+          // Update conditions
+          if (condData) {
+            routine.conditions = condData.conditions;
+            routine.conditionLogic = condData.conditionLogic;
+            routine.conditionsEnabled = condData.conditionsEnabled;
+            routine.cooldown = condData.cooldown;
+          } else {
+            delete routine.conditions;
+            delete routine.conditionLogic;
+            delete routine.conditionsEnabled;
+            delete routine.cooldown;
+          }
         }
       } else {
         routine = {
@@ -2298,6 +2568,12 @@
           steps: editingSteps,
           schedule,
         };
+        if (condData) {
+          routine.conditions = condData.conditions;
+          routine.conditionLogic = condData.conditionLogic;
+          routine.conditionsEnabled = condData.conditionsEnabled;
+          routine.cooldown = condData.cooldown;
+        }
         state.routines.push(routine);
       }
       try {
@@ -2660,9 +2936,11 @@
     // -----------------------------------------------------------------------
     let aiMode           = "control";
     let pendingAiActions = [];
+    let aiChatHistory    = [];
 
     function setAiMode(mode) {
       aiMode = mode;
+      aiChatHistory = [];
       document.getElementById("ai-mode-control").classList.toggle("active", mode === "control");
       document.getElementById("ai-mode-analyze").classList.toggle("active", mode === "analyze");
       document.getElementById("ai-input").placeholder = mode === "control"
@@ -2735,6 +3013,28 @@
       return summary;
     }
 
+    async function enrichContextWithDurations(context) {
+      const now = Date.now();
+      for (const d of context.devices) {
+        if (d.type !== "light" || !d.on) continue;
+        try {
+          const history = await api(`/api/history?type=light&id=${encodeURIComponent(d.id)}`);
+          if (!Array.isArray(history) || history.length === 0) continue;
+          history.sort((a, b) => a.ts - b.ts);
+          // Walk backwards to find when the light was last turned on continuously
+          let onSince = history[history.length - 1].ts;
+          for (let i = history.length - 1; i >= 0; i--) {
+            if (history[i].on) {
+              onSince = history[i].ts;
+            } else {
+              break;
+            }
+          }
+          d.onForHours = Math.round((now - onSince) / 3600000 * 10) / 10;
+        } catch { /* non-fatal */ }
+      }
+    }
+
     function addAiMessage(role, text) {
       const el  = document.getElementById("ai-messages");
       const div = document.createElement("div");
@@ -2793,23 +3093,26 @@
       sendBtn.textContent = "Thinking…";
 
       addAiMessage("user", message);
+      aiChatHistory.push({ role: "user", content: message });
       input.value = "";
 
       try {
         const context = buildAiContext();
+        await enrichContextWithDurations(context);
         if (aiMode === "analyze") {
           context.historySummary = await buildHistorySummaryForAi();
         }
 
         const result = await api("/api/llm/chat", {
           method: "POST",
-          body: { message, context, mode: aiMode },
+          body: { messages: aiChatHistory, context, mode: aiMode },
         });
 
         if (result.error) {
           addAiMessage("error", result.error);
         } else {
           addAiMessage("assistant", result.message || "Done.");
+          aiChatHistory.push({ role: "assistant", content: result.message || "Done." });
           if (Array.isArray(result.actions) && result.actions.length > 0) {
             pendingAiActions = result.actions;
             showAiActionPreview(result.actions);

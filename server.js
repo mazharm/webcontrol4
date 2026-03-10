@@ -60,6 +60,17 @@ function persistSettings() {
 const ROUTINES_FILE = path.join(DATA_DIR, "routines.json");
 let routinesStore = [];
 
+// Condition engine constants (declared here so routines loading can validate)
+const VALID_CONDITION_OPERATORS = ["eq", "neq", "gt", "gte", "lt", "lte"];
+const VALID_CONDITION_VARIABLES = [
+  "LIGHT_LEVEL", "LIGHT_STATE",
+  "TEMPERATURE_F", "HEAT_SETPOINT_F", "COOL_SETPOINT_F",
+  "HVAC_MODE", "HUMIDITY", "HVAC_STATE", "FAN_MODE",
+];
+const MAX_CONDITIONS = 10;
+const MAX_CONDITION_DURATION = 86400; // 24 hours
+const DEFAULT_COOLDOWN = 3600; // 1 hour
+
 try {
   if (fs.existsSync(ROUTINES_FILE)) {
     const raw = JSON.parse(fs.readFileSync(ROUTINES_FILE, "utf8"));
@@ -70,7 +81,11 @@ try {
         r && typeof r.id === "string" && /^[a-zA-Z0-9_-]+$/.test(r.id) &&
         typeof r.name === "string" && r.name.length <= 200 &&
         Array.isArray(r.steps) && r.steps.length <= 100 &&
-        r.steps.every(s => s && typeof s === "object" && validStepTypes.includes(s.type) && Number.isFinite(s.deviceId))
+        r.steps.every(s => s && typeof s === "object" && validStepTypes.includes(s.type) && Number.isFinite(s.deviceId)) &&
+        // Validate conditions if present
+        (!r.conditions || (Array.isArray(r.conditions) && r.conditions.length <= MAX_CONDITIONS &&
+          r.conditions.every(c => c && typeof c === "object" && Number.isFinite(c.deviceId) &&
+            VALID_CONDITION_VARIABLES.includes(c.variable) && VALID_CONDITION_OPERATORS.includes(c.operator))))
       ).slice(0, 200);
     }
   }
@@ -114,8 +129,103 @@ function startScheduler() {
         console.error(`[Scheduler] Routine "${routine.name}" failed:`, err.message);
       });
     }
+
+    // Also evaluate condition-based routines on the scheduler tick
+    evaluateConditionRoutines();
   }, 15_000); // check every 15 seconds for responsive scheduling
   schedulerInterval.unref();
+}
+
+// ---------------------------------------------------------------------------
+// Condition-based routine engine
+// ---------------------------------------------------------------------------
+// Tracks when each condition first became true.  When all conditions in a
+// routine have been satisfied for their required duration, the routine fires.
+// A per-routine cooldown prevents rapid re-triggering.
+
+// conditionMetSince: Map<routineId, Map<conditionIndex, timestamp>>
+const conditionMetSince = new Map();
+// lastTriggered: Map<routineId, timestamp>
+const lastTriggered = new Map();
+
+function evaluateCondition(cond, deviceState) {
+  if (!deviceState || !deviceState.variables) return false;
+  const actual = deviceState.variables[cond.variable];
+  if (actual === undefined) return false;
+
+  const a = Number(actual);
+  const b = Number(cond.value);
+  const aNum = Number.isFinite(a);
+  const bNum = Number.isFinite(b);
+
+  switch (cond.operator) {
+    case "eq":  return aNum && bNum ? a === b : String(actual) === String(cond.value);
+    case "neq": return aNum && bNum ? a !== b : String(actual) !== String(cond.value);
+    case "gt":  return aNum && bNum && a > b;
+    case "gte": return aNum && bNum && a >= b;
+    case "lt":  return aNum && bNum && a < b;
+    case "lte": return aNum && bNum && a <= b;
+    default:    return false;
+  }
+}
+
+function evaluateConditionRoutines() {
+  if (!stateMachine) return;
+  const now = Date.now();
+
+  for (const routine of routinesStore) {
+    if (!Array.isArray(routine.conditions) || routine.conditions.length === 0) continue;
+    if (!routine.conditionsEnabled) continue;
+
+    const cooldown = (Number.isFinite(routine.cooldown) ? routine.cooldown : DEFAULT_COOLDOWN) * 1000;
+    const lastRun = lastTriggered.get(routine.id) || 0;
+    if (now - lastRun < cooldown) continue;
+
+    const logic = routine.conditionLogic === "any" ? "any" : "all";
+
+    if (!conditionMetSince.has(routine.id)) {
+      conditionMetSince.set(routine.id, new Map());
+    }
+    const metMap = conditionMetSince.get(routine.id);
+
+    let allMet = true;
+    let anyMet = false;
+
+    for (let i = 0; i < routine.conditions.length; i++) {
+      const cond = routine.conditions[i];
+      const deviceState = stateMachine.getDeviceState(cond.deviceId);
+      const met = evaluateCondition(cond, deviceState);
+
+      if (met) {
+        if (!metMap.has(i)) metMap.set(i, now);
+        const duration = (cond.duration || 0) * 1000;
+        const elapsed = now - metMap.get(i);
+        if (elapsed >= duration) {
+          anyMet = true;
+        } else {
+          allMet = false;
+        }
+      } else {
+        metMap.delete(i);
+        allMet = false;
+      }
+    }
+
+    const shouldFire = logic === "all" ? allMet : anyMet;
+    if (shouldFire) {
+      console.log(`[Conditions] Firing routine "${routine.name}" — conditions met`);
+      lastTriggered.set(routine.id, now);
+      metMap.clear(); // reset so duration tracking restarts after cooldown
+      executeRoutineSteps(routine).catch((err) => {
+        console.error(`[Conditions] Routine "${routine.name}" failed:`, err.message);
+      });
+    }
+  }
+}
+
+// Also evaluate on every state change for responsive triggering
+function onStateChangeForConditions() {
+  evaluateConditionRoutines();
 }
 
 async function executeRoutineSteps(routine) {
@@ -1096,6 +1206,39 @@ app.post("/api/routines", (req, res) => {
       return res.status(400).json({ error: "schedule.days must be array of 0-6 (Sun-Sat)" });
     }
   }
+  // Validate optional conditions
+  if (routine.conditions && Array.isArray(routine.conditions) && routine.conditions.length > 0) {
+    if (routine.conditions.length > MAX_CONDITIONS) {
+      return res.status(400).json({ error: `maximum of ${MAX_CONDITIONS} conditions allowed` });
+    }
+    for (const cond of routine.conditions) {
+      if (!cond || typeof cond !== "object") {
+        return res.status(400).json({ error: "each condition must be an object" });
+      }
+      if (!Number.isFinite(cond.deviceId)) {
+        return res.status(400).json({ error: "each condition must have a numeric deviceId" });
+      }
+      if (!VALID_CONDITION_VARIABLES.includes(cond.variable)) {
+        return res.status(400).json({ error: `invalid condition variable: ${cond.variable}` });
+      }
+      if (!VALID_CONDITION_OPERATORS.includes(cond.operator)) {
+        return res.status(400).json({ error: `invalid condition operator: ${cond.operator}` });
+      }
+      if (cond.value === undefined || cond.value === null) {
+        return res.status(400).json({ error: "each condition must have a value" });
+      }
+      const dur = Number(cond.duration);
+      if (cond.duration !== undefined && (!Number.isFinite(dur) || dur < 0 || dur > MAX_CONDITION_DURATION)) {
+        return res.status(400).json({ error: `condition duration must be 0-${MAX_CONDITION_DURATION} seconds` });
+      }
+    }
+    if (routine.cooldown !== undefined) {
+      const cd = Number(routine.cooldown);
+      if (!Number.isFinite(cd) || cd < 60 || cd > MAX_CONDITION_DURATION) {
+        return res.status(400).json({ error: "cooldown must be 60-86400 seconds" });
+      }
+    }
+  }
   // Build clean routine object from validated fields only (prevent mass assignment)
   const cleanSteps = routine.steps.map(s => {
     const clean = { type: s.type, deviceId: s.deviceId };
@@ -1114,6 +1257,23 @@ app.post("/api/routines", (req, res) => {
       days: routine.schedule.days,
     };
   }
+  // Persist conditions
+  if (routine.conditions && Array.isArray(routine.conditions) && routine.conditions.length > 0) {
+    cleanRoutine.conditions = routine.conditions.map(c => ({
+      deviceId: c.deviceId,
+      deviceName: (typeof c.deviceName === "string") ? c.deviceName.slice(0, 200) : undefined,
+      variable: c.variable,
+      operator: c.operator,
+      value: c.value,
+      duration: Number(c.duration) || 0,
+    }));
+    cleanRoutine.conditionLogic = routine.conditionLogic === "any" ? "any" : "all";
+    cleanRoutine.conditionsEnabled = routine.conditionsEnabled !== false;
+    cleanRoutine.cooldown = Number.isFinite(Number(routine.cooldown)) ? Number(routine.cooldown) : DEFAULT_COOLDOWN;
+    // Reset condition tracking when routine is saved/updated
+    conditionMetSince.delete(routine.id);
+    lastTriggered.delete(routine.id);
+  }
 
   const idx = routinesStore.findIndex((r) => r.id === cleanRoutine.id);
   if (idx !== -1) {
@@ -1131,6 +1291,8 @@ app.post("/api/routines", (req, res) => {
 app.delete("/api/routines/:id", (req, res) => {
   const { id } = req.params;
   routinesStore = routinesStore.filter((r) => r.id !== id);
+  conditionMetSince.delete(id);
+  lastTriggered.delete(id);
   persistRoutines();
   res.json({ ok: true });
 });
@@ -1179,14 +1341,18 @@ function buildSystemPrompt(context, mode) {
       '- { "type": "cool_setpoint",  "deviceId": <number>, "value": <temp_in_F> }\n' +
       '- { "type": "run_routine",    "routineId": "<id>" }\n' +
       '- { "type": "create_routine", "name": "<name>", "steps": [<step objects as above>] }\n\n' +
-      "For modify_routine requests, use create_routine with the same name to replace it.";
+      "For modify_routine requests, use create_routine with the same name to replace it.\n\n" +
+      "Lights that are ON include an 'onForHours' duration showing how long they have been on continuously. " +
+      "Use this to handle time-based requests like 'turn off lights on for more than N hours'.";
   }
 
   if (devices.length > 0) {
     prompt += "\n\nAvailable devices:";
     for (const d of devices) {
       if (d.type === "light") {
-        prompt += `\n- Light "${sanitizeForPrompt(d.name)}" (id:${d.id}, floor:"${sanitizeForPrompt(d.floor)}", room:"${sanitizeForPrompt(d.room)}", ${d.on ? `ON at ${d.level}%` : "OFF"})`;
+        let lightStatus = d.on ? `ON at ${d.level}%` : "OFF";
+        if (d.on && Number.isFinite(d.onForHours) && d.onForHours >= 0) lightStatus += `, on for ${d.onForHours}h`;
+        prompt += `\n- Light "${sanitizeForPrompt(d.name)}" (id:${d.id}, floor:"${sanitizeForPrompt(d.floor)}", room:"${sanitizeForPrompt(d.room)}", ${lightStatus})`;
       } else if (d.type === "thermostat") {
         prompt += `\n- Thermostat "${sanitizeForPrompt(d.name)}" (id:${d.id}, floor:"${sanitizeForPrompt(d.floor)}", temp:${d.tempF ?? "?"}°F, heat:${d.heatF ?? "?"}°F, cool:${d.coolF ?? "?"}°F, mode:${d.hvacMode ?? "?"})`;
       }
@@ -1216,12 +1382,33 @@ app.post("/api/llm/chat", async (req, res) => {
     });
   }
 
-  const { message, context, mode } = req.body;
-  if (!message || typeof message !== "string") {
-    return res.status(400).json({ error: "message required" });
-  }
-  if (message.length > 10000) {
-    return res.status(400).json({ error: "message too long (max 10000 characters)" });
+  const { message, messages: rawMessages, context, mode } = req.body;
+
+  // Support both single message (legacy) and full conversation history
+  let chatMessages;
+  if (Array.isArray(rawMessages) && rawMessages.length > 0) {
+    // Validate and sanitize conversation history
+    chatMessages = [];
+    for (const m of rawMessages) {
+      if (!m || typeof m !== "object") continue;
+      if (m.role !== "user" && m.role !== "assistant") continue;
+      if (typeof m.content !== "string" || m.content.length === 0) continue;
+      chatMessages.push({ role: m.role, content: String(m.content).slice(0, 10000) });
+    }
+    if (chatMessages.length === 0 || chatMessages[chatMessages.length - 1].role !== "user") {
+      return res.status(400).json({ error: "messages must end with a user message" });
+    }
+    // Limit conversation length to prevent abuse
+    if (chatMessages.length > 50) {
+      chatMessages = chatMessages.slice(-50);
+    }
+  } else if (message && typeof message === "string") {
+    if (message.length > 10000) {
+      return res.status(400).json({ error: "message too long (max 10000 characters)" });
+    }
+    chatMessages = [{ role: "user", content: String(message) }];
+  } else {
+    return res.status(400).json({ error: "message or messages required" });
   }
 
   const systemPrompt = buildSystemPrompt(context, mode);
@@ -1231,7 +1418,7 @@ app.post("/api/llm/chat", async (req, res) => {
       model: appSettings.anthropicModel,
       max_tokens: 2048,
       system: systemPrompt,
-      messages: [{ role: "user", content: String(message) }],
+      messages: chatMessages,
     });
 
     const responseStr = await request("https://api.anthropic.com/v1/messages", {
@@ -1354,6 +1541,7 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
     }
 
     broadcastSSE("stateChange", change);
+    onStateChangeForConditions();
   });
 
   // 4. WebSocket (skip for mock)
