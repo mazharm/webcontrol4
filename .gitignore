@@ -3,4 +3,4 @@ node_modules/
 certs/
 data/
 .claude/worktrees/
-public-react/
+*.tsbuildinfo
