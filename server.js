@@ -1373,12 +1373,12 @@ function buildSystemPrompt(context, mode) {
       "Reference actual device names and observed patterns.";
   } else {
     prompt =
-      "You are a smart home control assistant for a Control4 system. " +
+      "You are a smart home control assistant for a Control4 and Ring integrated system. " +
       "The user gives you natural language commands to control their home.\n\n" +
       "ALWAYS respond with a JSON object and nothing else. The JSON must have:\n" +
       '- "message": A friendly natural language confirmation of what you are doing\n' +
       '- "actions": An array of device commands to execute (can be empty)\n\n' +
-      "Action types:\n" +
+      "Control4 action types:\n" +
       '- { "type": "light_level",    "deviceId": <number>, "level": <0-100> }\n' +
       '- { "type": "light_toggle",   "deviceId": <number>, "on": <boolean> }\n' +
       '- { "type": "hvac_mode",      "deviceId": <number>, "mode": "Off"|"Heat"|"Cool"|"Auto" }\n' +
@@ -1386,9 +1386,18 @@ function buildSystemPrompt(context, mode) {
       '- { "type": "cool_setpoint",  "deviceId": <number>, "value": <temp_in_F> }\n' +
       '- { "type": "run_routine",    "routineId": "<id>" }\n' +
       '- { "type": "create_routine", "name": "<name>", "steps": [<step objects as above>] }\n\n' +
+      "Ring action types:\n" +
+      '- { "type": "ring_alarm_mode", "mode": "away"|"home"|"disarm" }\n' +
+      '- { "type": "ring_siren",      "action": "on"|"off" }\n' +
+      '- { "type": "ring_camera_light", "cameraId": <number>, "on": <boolean> }\n' +
+      '- { "type": "ring_camera_siren", "cameraId": <number>, "on": <boolean> }\n\n' +
+      "Notification action type:\n" +
+      '- { "type": "send_notification", "message": "<text>", "title": "<title>", "priority": <-2 to 2> }\n\n' +
       "For modify_routine requests, use create_routine with the same name to replace it.\n\n" +
       "Lights that are ON include an 'onForHours' duration showing how long they have been on continuously. " +
-      "Use this to handle time-based requests like 'turn off lights on for more than N hours'.";
+      "Use this to handle time-based requests like 'turn off lights on for more than N hours'.\n\n" +
+      "You can combine Control4 and Ring actions in a single response for cross-system scenarios " +
+      "(e.g., arm Ring alarm + turn off all lights + set thermostat to setback).";
   }
 
   if (devices.length > 0) {
@@ -1400,6 +1409,30 @@ function buildSystemPrompt(context, mode) {
         prompt += `\n- Light "${sanitizeForPrompt(d.name)}" (id:${d.id}, floor:"${sanitizeForPrompt(d.floor)}", room:"${sanitizeForPrompt(d.room)}", ${lightStatus})`;
       } else if (d.type === "thermostat") {
         prompt += `\n- Thermostat "${sanitizeForPrompt(d.name)}" (id:${d.id}, floor:"${sanitizeForPrompt(d.floor)}", temp:${d.tempF ?? "?"}°F, heat:${d.heatF ?? "?"}°F, cool:${d.coolF ?? "?"}°F, mode:${d.hvacMode ?? "?"})`;
+      }
+    }
+  }
+
+  // Ring devices
+  const ringCtx = context?.ring || {};
+  if (ringCtx.alarm || ringCtx.cameras || ringCtx.sensors) {
+    prompt += "\n\nRing devices:";
+    if (ringCtx.alarm) {
+      const modeLabels = { all: "Armed Away", some: "Armed Home", none: "Disarmed" };
+      prompt += `\n- Ring Alarm: ${modeLabels[ringCtx.alarm.mode] || ringCtx.alarm.mode}`;
+    }
+    if (Array.isArray(ringCtx.sensors)) {
+      for (const s of ringCtx.sensors) {
+        const status = s.faulted ? "OPEN/TRIGGERED" : "OK/Closed";
+        const battery = s.batteryLevel != null ? `, battery:${s.batteryLevel}%` : "";
+        prompt += `\n- Sensor "${sanitizeForPrompt(s.name)}" (type:${s.type}, ${status}${battery})`;
+      }
+    }
+    if (Array.isArray(ringCtx.cameras)) {
+      for (const c of ringCtx.cameras) {
+        const features = [c.hasLight ? "light" : null, c.hasSiren ? "siren" : null].filter(Boolean).join(",");
+        const status = c.isOffline ? "OFFLINE" : "online";
+        prompt += `\n- Camera "${sanitizeForPrompt(c.name)}" (id:${c.id}, model:"${sanitizeForPrompt(c.model)}", ${status}${features ? ", has:" + features : ""})`;
       }
     }
   }
@@ -1496,7 +1529,12 @@ app.post("/api/llm/chat", async (req, res) => {
 
     // Validate actions from LLM output to prevent prompt injection attacks
     if (Array.isArray(parsed.actions)) {
-      const validActionTypes = ["light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint", "run_routine", "create_routine"];
+      const validActionTypes = [
+        "light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint",
+        "run_routine", "create_routine",
+        "ring_alarm_mode", "ring_siren", "ring_camera_light", "ring_camera_siren",
+        "send_notification",
+      ];
       parsed.actions = parsed.actions.filter(a => {
         if (!a || typeof a !== "object") return false;
         if (!validActionTypes.includes(a.type)) return false;
@@ -1507,6 +1545,12 @@ app.post("/api/llm/chat", async (req, res) => {
         if (a.type === "cool_setpoint" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.value) || a.value < 32 || a.value > 120)) return false;
         if (a.type === "run_routine" && (typeof a.routineId !== "string" || a.routineId.length > 100 || !/^[a-zA-Z0-9_-]+$/.test(a.routineId))) return false;
         if (a.type === "create_routine" && (!a.name || typeof a.name !== "string" || a.name.length > 200 || !Array.isArray(a.steps) || a.steps.length > 100)) return false;
+        // Ring actions
+        if (a.type === "ring_alarm_mode" && (!a.mode || !["away", "home", "disarm"].includes(a.mode))) return false;
+        if (a.type === "ring_siren" && (!a.action || !["on", "off"].includes(a.action))) return false;
+        if (a.type === "ring_camera_light" && (!Number.isFinite(a.cameraId) || typeof a.on !== "boolean")) return false;
+        if (a.type === "ring_camera_siren" && (!Number.isFinite(a.cameraId) || typeof a.on !== "boolean")) return false;
+        if (a.type === "send_notification" && (!a.message || typeof a.message !== "string" || a.message.length > 1024)) return false;
         return true;
       });
     } else {

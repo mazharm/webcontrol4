@@ -200,13 +200,24 @@ function getLocation(locationIndex = 0) {
   return locations[locationIndex];
 }
 
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)
+    ),
+  ]);
+}
+
+const HUB_TIMEOUT = 15_000; // 15s timeout for alarm hub operations
+
 // ---------------------------------------------------------------------------
 // Alarm control
 // ---------------------------------------------------------------------------
 
 async function getAlarmMode(locationIndex = 0) {
   const loc = getLocation(locationIndex);
-  const devices = await loc.getDevices();
+  const devices = await withTimeout(loc.getDevices(), HUB_TIMEOUT, "getDevices");
   const panel = devices.find((d) => d.data.deviceType === RingDeviceType.SecurityPanel);
   if (!panel) throw new Error("No security panel found");
   return {
@@ -250,7 +261,7 @@ async function controlSiren(action, locationIndex = 0) {
 
 async function getDevices(locationIndex = 0) {
   const loc = getLocation(locationIndex);
-  const devices = await loc.getDevices();
+  const devices = await withTimeout(loc.getDevices(), HUB_TIMEOUT, "getDevices");
   return devices.map((d) => ({
     zid: d.data.zid,
     name: d.data.name,

@@ -262,6 +262,12 @@
       gap: 16px;
       margin-bottom: 40px;
     }
+    .device-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+    }
 
     /* Light cards */
     .light-card {
@@ -2817,6 +2823,7 @@
 
     let ringPollTimer = null;
     let ringInitialized = false;
+    let ringPolling = false;
 
     async function initRingTab() {
       if (ringInitialized) return;
@@ -2951,38 +2958,35 @@
     }
 
     async function pollRingData() {
+      if (ringPolling) return; // prevent overlapping polls
+      ringPolling = true;
       try {
+        // Fetch cameras, alarm, sensors in parallel — each independent
+        const [camerasResult, alarmResult, sensorsResult] = await Promise.allSettled([
+          api("/ring/cameras"),
+          api("/ring/alarm/mode"),
+          api("/ring/sensors"),
+        ]);
+
+        // Cameras (fastest — no hub websocket needed)
+        if (camerasResult.status === "fulfilled" && Array.isArray(camerasResult.value) && camerasResult.value.length > 0) {
+          document.getElementById("ring-cameras-section").style.display = "";
+          renderRingCameras(camerasResult.value);
+        }
+
         // Alarm
-        try {
-          const alarm = await api("/ring/alarm/mode");
+        if (alarmResult.status === "fulfilled" && alarmResult.value && alarmResult.value.mode) {
           document.getElementById("ring-alarm-section").style.display = "";
-          renderRingAlarm(alarm);
-        } catch {
-          document.getElementById("ring-alarm-section").style.display = "none";
+          renderRingAlarm(alarmResult.value);
         }
 
         // Sensors
-        try {
-          const sensors = await api("/ring/sensors");
-          if (sensors.length > 0) {
-            document.getElementById("ring-sensors-section").style.display = "";
-            renderRingSensors(sensors);
-          }
-        } catch {
-          document.getElementById("ring-sensors-section").style.display = "none";
-        }
-
-        // Cameras
-        try {
-          const cameras = await api("/ring/cameras");
-          if (cameras.length > 0) {
-            document.getElementById("ring-cameras-section").style.display = "";
-            renderRingCameras(cameras);
-          }
-        } catch {
-          document.getElementById("ring-cameras-section").style.display = "none";
+        if (sensorsResult.status === "fulfilled" && Array.isArray(sensorsResult.value) && sensorsResult.value.length > 0) {
+          document.getElementById("ring-sensors-section").style.display = "";
+          renderRingSensors(sensorsResult.value);
         }
       } catch { /* ignore */ }
+      finally { ringPolling = false; }
     }
 
     const RING_MODE_LABELS = { all: "Armed Away", some: "Armed Home", none: "Disarmed" };
@@ -3373,7 +3377,7 @@
         : "e.g. Analyze my lighting patterns and suggest routines, or How can I save energy?";
     }
 
-    function buildAiContext() {
+    async function buildAiContext() {
       const floorRenames = getFloorRenames();
       const devices = [];
 
@@ -3404,8 +3408,31 @@
         });
       }
 
+      // Ring devices (best-effort, non-blocking)
+      const ringContext = {};
+      try {
+        const ringStatus = await api("/ring/status");
+        if (ringStatus.connected) {
+          const [camerasRes, alarmRes, sensorsRes] = await Promise.allSettled([
+            api("/ring/cameras"),
+            api("/ring/alarm/mode"),
+            api("/ring/sensors"),
+          ]);
+          if (camerasRes.status === "fulfilled" && Array.isArray(camerasRes.value)) {
+            ringContext.cameras = camerasRes.value;
+          }
+          if (alarmRes.status === "fulfilled" && alarmRes.value && alarmRes.value.mode) {
+            ringContext.alarm = alarmRes.value;
+          }
+          if (sensorsRes.status === "fulfilled" && Array.isArray(sensorsRes.value)) {
+            ringContext.sensors = sensorsRes.value;
+          }
+        }
+      } catch { /* Ring not available */ }
+
       return {
         devices,
+        ring: ringContext,
         routines: state.routines.map((r) => ({ id: r.id, name: r.name })),
       };
     }
@@ -3487,6 +3514,12 @@
           return `Run routine: ${r ? r.name : action.routineId}`;
         }
         case "create_routine": return `Create routine "${action.name}" (${(action.steps || []).length} steps)`;
+        // Ring actions
+        case "ring_alarm_mode":   return `Ring Alarm: Set to ${action.mode}`;
+        case "ring_siren":        return `Ring Siren: ${action.action === "on" ? "Sound" : "Silence"}`;
+        case "ring_camera_light": return `Ring Camera ${action.cameraId}: Light ${action.on ? "on" : "off"}`;
+        case "ring_camera_siren": return `Ring Camera ${action.cameraId}: Siren ${action.on ? "on" : "off"}`;
+        case "send_notification": return `Notify: ${action.message}`;
         default:               return JSON.stringify(action);
       }
     }
@@ -3522,7 +3555,7 @@
       input.value = "";
 
       try {
-        const context = buildAiContext();
+        const context = await buildAiContext();
         await enrichContextWithDurations(context);
         if (aiMode === "analyze") {
           context.historySummary = await buildHistorySummaryForAi();
@@ -3580,6 +3613,16 @@
             }
             renderRoutines();
             addAiMessage("assistant", `✓ Created routine "${routine.name}"`);
+          } else if (action.type === "ring_alarm_mode") {
+            await api("/ring/alarm/mode", { method: "POST", body: { mode: action.mode } });
+          } else if (action.type === "ring_siren") {
+            await api("/ring/alarm/siren", { method: "POST", body: { action: action.action } });
+          } else if (action.type === "ring_camera_light") {
+            await api(`/ring/cameras/${action.cameraId}/light`, { method: "POST", body: { on: action.on } });
+          } else if (action.type === "ring_camera_siren") {
+            await api(`/ring/cameras/${action.cameraId}/siren`, { method: "POST", body: { on: action.on } });
+          } else if (action.type === "send_notification") {
+            await api("/notify/send", { method: "POST", body: { message: action.message, title: action.title, priority: action.priority } });
           } else {
             await executeStep(action);
             await new Promise((r) => setTimeout(r, 200));
