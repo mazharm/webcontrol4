@@ -1390,14 +1390,17 @@ function buildSystemPrompt(context, mode) {
       '- { "type": "ring_alarm_mode", "mode": "away"|"home"|"disarm" }\n' +
       '- { "type": "ring_siren",      "action": "on"|"off" }\n' +
       '- { "type": "ring_camera_light", "cameraId": <number>, "on": <boolean> }\n' +
-      '- { "type": "ring_camera_siren", "cameraId": <number>, "on": <boolean> }\n\n' +
+      '- { "type": "ring_camera_siren", "cameraId": <number>, "on": <boolean> }\n' +
+      '- { "type": "ring_camera_snapshot", "cameraId": <number> }  // Fetch latest snapshot image\n\n' +
       "Notification action type:\n" +
       '- { "type": "send_notification", "message": "<text>", "title": "<title>", "priority": <-2 to 2> }\n\n' +
       "For modify_routine requests, use create_routine with the same name to replace it.\n\n" +
       "Lights that are ON include an 'onForHours' duration showing how long they have been on continuously. " +
       "Use this to handle time-based requests like 'turn off lights on for more than N hours'.\n\n" +
       "You can combine Control4 and Ring actions in a single response for cross-system scenarios " +
-      "(e.g., arm Ring alarm + turn off all lights + set thermostat to setback).";
+      "(e.g., arm Ring alarm + turn off all lights + set thermostat to setback).\n\n" +
+      "For snapshot requests, emit one ring_camera_snapshot action per camera. " +
+      "Only include online cameras (skip OFFLINE ones). The UI will fetch and display the images.";
   }
 
   if (devices.length > 0) {
@@ -1532,7 +1535,7 @@ app.post("/api/llm/chat", async (req, res) => {
       const validActionTypes = [
         "light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint",
         "run_routine", "create_routine",
-        "ring_alarm_mode", "ring_siren", "ring_camera_light", "ring_camera_siren",
+        "ring_alarm_mode", "ring_siren", "ring_camera_light", "ring_camera_siren", "ring_camera_snapshot",
         "send_notification",
       ];
       parsed.actions = parsed.actions.filter(a => {
@@ -1550,6 +1553,7 @@ app.post("/api/llm/chat", async (req, res) => {
         if (a.type === "ring_siren" && (!a.action || !["on", "off"].includes(a.action))) return false;
         if (a.type === "ring_camera_light" && (!Number.isFinite(a.cameraId) || typeof a.on !== "boolean")) return false;
         if (a.type === "ring_camera_siren" && (!Number.isFinite(a.cameraId) || typeof a.on !== "boolean")) return false;
+        if (a.type === "ring_camera_snapshot" && !Number.isFinite(a.cameraId)) return false;
         if (a.type === "send_notification" && (!a.message || typeof a.message !== "string" || a.message.length > 1024)) return false;
         return true;
       });

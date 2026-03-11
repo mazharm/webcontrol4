@@ -3420,6 +3420,7 @@
           ]);
           if (camerasRes.status === "fulfilled" && Array.isArray(camerasRes.value)) {
             ringContext.cameras = camerasRes.value;
+            state._ringCameras = camerasRes.value; // cache for snapshot name lookups
           }
           if (alarmRes.status === "fulfilled" && alarmRes.value && alarmRes.value.mode) {
             ringContext.alarm = alarmRes.value;
@@ -3487,11 +3488,15 @@
       }
     }
 
-    function addAiMessage(role, text) {
+    function addAiMessage(role, text, { html } = {}) {
       const el  = document.getElementById("ai-messages");
       const div = document.createElement("div");
       div.className = `ai-message ai-${role}`;
-      div.innerHTML = `<div class="ai-msg-content">${esc(text)}</div>`;
+      if (html) {
+        div.innerHTML = `<div class="ai-msg-content">${text}</div>`;
+      } else {
+        div.innerHTML = `<div class="ai-msg-content">${esc(text)}</div>`;
+      }
       el.appendChild(div);
       el.scrollTop = el.scrollHeight;
     }
@@ -3519,6 +3524,7 @@
         case "ring_siren":        return `Ring Siren: ${action.action === "on" ? "Sound" : "Silence"}`;
         case "ring_camera_light": return `Ring Camera ${action.cameraId}: Light ${action.on ? "on" : "off"}`;
         case "ring_camera_siren": return `Ring Camera ${action.cameraId}: Siren ${action.on ? "on" : "off"}`;
+        case "ring_camera_snapshot": return `Ring Camera ${action.cameraId}: Fetch snapshot`;
         case "send_notification": return `Notify: ${action.message}`;
         default:               return JSON.stringify(action);
       }
@@ -3573,7 +3579,13 @@
           aiChatHistory.push({ role: "assistant", content: result.message || "Done." });
           if (Array.isArray(result.actions) && result.actions.length > 0) {
             pendingAiActions = result.actions;
-            showAiActionPreview(result.actions);
+            // Auto-execute if all actions are read-only (snapshots)
+            const allReadOnly = result.actions.every(a => a.type === "ring_camera_snapshot");
+            if (allReadOnly) {
+              await executeAiActions();
+            } else {
+              showAiActionPreview(result.actions);
+            }
           }
         }
       } catch (err) {
@@ -3590,6 +3602,7 @@
       if (btn) { btn.disabled = true; btn.textContent = "Executing…"; }
 
       try {
+        const snapshotActions = [];
         for (const action of pendingAiActions) {
           if (action.type === "run_routine") {
             await executeRoutine(action.routineId);
@@ -3621,6 +3634,9 @@
             await api(`/ring/cameras/${action.cameraId}/light`, { method: "POST", body: { on: action.on } });
           } else if (action.type === "ring_camera_siren") {
             await api(`/ring/cameras/${action.cameraId}/siren`, { method: "POST", body: { on: action.on } });
+          } else if (action.type === "ring_camera_snapshot") {
+            snapshotActions.push(action);
+            continue; // handle all snapshots together after the loop
           } else if (action.type === "send_notification") {
             await api("/notify/send", { method: "POST", body: { message: action.message, title: action.title, priority: action.priority } });
           } else {
@@ -3628,6 +3644,36 @@
             await new Promise((r) => setTimeout(r, 200));
           }
         }
+        // Fetch all snapshots in parallel and display as images
+        if (snapshotActions.length > 0) {
+          addAiMessage("assistant", `Fetching ${snapshotActions.length} snapshot(s)…`);
+          const results = await Promise.allSettled(
+            snapshotActions.map(async (a) => {
+              const resp = await fetch(`/ring/cameras/${a.cameraId}/snapshot?t=${Date.now()}`);
+              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+              const blob = await resp.blob();
+              const url = URL.createObjectURL(blob);
+              // Find camera name from context
+              const cam = (state._ringCameras || []).find(c => c.id === a.cameraId);
+              const name = cam ? cam.name : `Camera ${a.cameraId}`;
+              return { name, url, cameraId: a.cameraId };
+            })
+          );
+          let html = '<div style="display:flex;flex-wrap:wrap;gap:12px;">';
+          for (const r of results) {
+            if (r.status === "fulfilled") {
+              const { name, url } = r.value;
+              html += `<div style="text-align:center;max-width:320px;">` +
+                `<img src="${url}" style="width:100%;border-radius:8px;margin-bottom:4px;" alt="${esc(name)}" />` +
+                `<div style="font-size:12px;font-weight:600;">${esc(name)}</div></div>`;
+            } else {
+              html += `<div style="color:#ef4444;font-size:12px;">Snapshot failed: ${esc(r.reason?.message || "unknown error")}</div>`;
+            }
+          }
+          html += '</div>';
+          addAiMessage("assistant", html, { html: true });
+        }
+
         renderLights();
         renderThermostats();
         addAiMessage("assistant", "✓ All actions completed.");
