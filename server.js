@@ -364,12 +364,14 @@ const ANTHROPIC_MODELS = [
 // Configuration (from .env or environment)
 // ---------------------------------------------------------------------------
 
-const PORT = parseInt(process.env.PORT, 10) || 3000;
-const HTTPS_ENABLED = process.env.HTTPS_ENABLED === "true";
 const HTTPS_PORT = parseInt(process.env.HTTPS_PORT, 10) || 3443;
+const PORT = parseInt(process.env.PORT, 10) || HTTPS_PORT;
+const HTTPS_ENABLED = process.env.HTTPS_ENABLED === "true";
 const TLS_CERT_FILE = process.env.TLS_CERT_FILE || "";
 const TLS_KEY_FILE = process.env.TLS_KEY_FILE || "";
-const HTTP_REDIRECT = process.env.HTTP_REDIRECT !== "false"; // default true
+const LOCAL_APP_ORIGIN = HTTPS_ENABLED
+  ? `https://localhost:${HTTPS_PORT}`
+  : `http://localhost:${PORT}`;
 
 const app = express();
 
@@ -1749,7 +1751,7 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
   // 2. State machine — always re-create on new connection
   stateMachine = new StateMachine({
     apiFn: async (apiPath) => {
-      const url = `http://localhost:${PORT}/api/director/${apiPath}`;
+      const url = `${LOCAL_APP_ORIGIN}/api/director/${apiPath}`;
       const resp = await requestText(url, {
         headers: {
           "X-Director-IP": controllerIp,
@@ -2121,11 +2123,9 @@ function startServer() {
     if (!certPath || !keyPath) {
       const generated = ensureSelfSignedCert();
       if (!generated) {
-        // Fallback to plain HTTP
-        app.listen(PORT, () => {
-          console.log(`WebControl4 running at http://localhost:${PORT} (HTTPS failed, using HTTP)`);
-        });
-        return;
+        throw new Error(
+          "HTTPS is enabled but no TLS certificate is available. Set TLS_CERT_FILE/TLS_KEY_FILE or install openssl."
+        );
       }
       certPath = generated.cert;
       keyPath = generated.key;
@@ -2139,29 +2139,8 @@ function startServer() {
     https.createServer(tlsOptions, app).listen(HTTPS_PORT, () => {
       console.log(`WebControl4 running at https://localhost:${HTTPS_PORT}`);
     });
-
-    // Optional HTTP -> HTTPS redirect
-    if (HTTP_REDIRECT) {
-      const redirectApp = express();
-      redirectApp.use((req, res) => {
-        let host = (req.headers.host || "").replace(/:\d+$/, "");
-        // Validate host against hostname/IP pattern to prevent header injection
-        if (!/^[a-zA-Z0-9._-]+$/.test(host)) {
-          host = "localhost";
-        }
-        // Validate the path to prevent open-redirect attacks
-        let safePath = req.url;
-        if (!safePath.startsWith("/") || safePath.startsWith("//")) {
-          safePath = "/";
-        }
-        res.redirect(301, `https://${host}:${HTTPS_PORT}${safePath}`);
-      });
-      redirectApp.listen(PORT, () => {
-        console.log(`HTTP :${PORT} redirecting to HTTPS :${HTTPS_PORT}`);
-      });
-    }
   } else {
-    // Plain HTTP (original behavior)
+    // Plain HTTP mode when HTTPS is explicitly disabled
     app.listen(PORT, () => {
       console.log(`WebControl4 running at http://localhost:${PORT}`);
     });

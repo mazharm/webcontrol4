@@ -8,7 +8,7 @@ WebControl4 is a web-based control panel for your Control4 smart home system. Th
 
 ### Connecting to Your Control4 System
 
-1. Open WebControl4 in your browser (e.g., `http://localhost:3000`)
+1. Open WebControl4 in your browser (e.g., `http://localhost:3443`)
 2. **Sign in** with your Control4 account email and password
 3. The app discovers controllers on your network automatically
 4. If multiple controllers are found, select the one you want to control

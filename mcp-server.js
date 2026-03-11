@@ -10,7 +10,7 @@ const { requestText } = require("./http-client");
  * Creates a configured MCP server with all 18 smart-home tools.
  *
  * @param {object} config
- * @param {string} config.baseUrl        – Express server origin, e.g. "http://localhost:3000"
+ * @param {string} config.baseUrl        – Express server origin, e.g. "https://localhost:3443"
  * @param {string} config.controllerIp   – Director IP (or "mock")
  * @param {string} config.directorToken  – Director bearer token
  * @param {string} [config.authHeader]   – Optional auth header ("Bearer xxx" or "Cookie: wc4_session=xxx")

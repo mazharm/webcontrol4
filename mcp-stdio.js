@@ -17,10 +17,13 @@ const { createMcpServer } = require("./mcp-server.js");
 const { requestJson } = require("./http-client");
 const oauth = require("./oauth");
 
+const APP_PORT = process.env.HTTPS_ENABLED === "true"
+  ? (process.env.HTTPS_PORT || 3443)
+  : (process.env.PORT || process.env.HTTPS_PORT || 3443);
 const BASE_URL = process.env.MCP_BASE_URL || (
   process.env.HTTPS_ENABLED === "true"
-    ? `https://localhost:${process.env.HTTPS_PORT || 3443}`
-    : `http://localhost:${process.env.PORT || 3000}`
+    ? `https://localhost:${APP_PORT}`
+    : `http://localhost:${APP_PORT}`
 );
 const CONTROLLER_IP = process.env.MCP_CONTROLLER_IP || "mock";
 

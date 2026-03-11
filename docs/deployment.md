@@ -28,7 +28,7 @@ npm install
 npm start
 ```
 
-Open `http://localhost:3000` and click **Try Demo Mode**. No Control4 hardware required.
+Open `http://localhost:3443` and click **Try Demo Mode**. No Control4 hardware required.
 
 ---
 
@@ -43,7 +43,7 @@ cp .env.example .env
 ### Server Port
 
 ```env
-PORT=3000
+PORT=3443
 ```
 
 ### HTTPS
@@ -61,12 +61,9 @@ HTTPS_PORT=3443
 |--------|-----------|
 | Auto self-signed | Leave `TLS_CERT_FILE` and `TLS_KEY_FILE` empty. Requires `openssl` installed. |
 | Your own certs | Set `TLS_CERT_FILE=/path/to/fullchain.pem` and `TLS_KEY_FILE=/path/to/privkey.pem` |
+| DuckDNS + Let's Encrypt | Set `PUBLIC_HOSTNAME`, `DUCKDNS_DOMAIN`, `DUCKDNS_TOKEN`, `ACME_EMAIL`, then run `npm run cert:issue` |
 
-When HTTPS is enabled, HTTP on the original port redirects to HTTPS by default. Disable with:
-
-```env
-HTTP_REDIRECT=false
-```
+When HTTPS is enabled, WebControl4 listens only on the HTTPS port.
 
 ### Google OAuth
 
@@ -75,7 +72,7 @@ Require Google sign-in for web access and MCP clients:
 1. Go to [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials)
 2. Create an **OAuth 2.0 Client ID** (Web application)
 3. Add authorized redirect URIs:
-   - `http://localhost:3000/auth/google/callback` (dev)
+   - `https://localhost:3443/auth/google/callback` (dev)
    - `https://your-domain:3443/auth/google/callback` (production)
 4. Configure in `.env`:
 
@@ -134,7 +131,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --production
 COPY . .
-EXPOSE 3000 3443
+EXPOSE 3443
 CMD ["node", "server.js"]
 ```
 
@@ -166,7 +163,7 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
       "command": "node",
       "args": ["/path/to/webcontrol4/mcp-stdio.js"],
       "env": {
-        "MCP_BASE_URL": "http://localhost:3000",
+        "MCP_BASE_URL": "https://localhost:3443",
         "MCP_CONTROLLER_IP": "192.168.1.100",
         "MCP_DIRECTOR_TOKEN": "your-token"
       }

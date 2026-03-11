@@ -15,7 +15,7 @@ graph TB
     end
 
     subgraph WebControl4 Server
-        EXPRESS[Express Server<br/>:3000 / :3443]
+        EXPRESS[Express Server<br/>:3443]
         OAUTH[OAuth Module<br/>oauth.js]
         SCHED[Routine Scheduler]
         HIST[In-Memory History]

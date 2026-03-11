@@ -2,14 +2,14 @@
 // ---------------------------------------------------------------------------
 // MCP Server – Streamable HTTP transport (for ChatGPT / Claude.ai)
 // ---------------------------------------------------------------------------
-// Runs its own Express server on port 3001.  The main Express server must
-// also be running (default http://localhost:3000).
+// Runs its own Express server on port 3001. The main Express server must
+// also be running (default https://localhost:3443).
 //
 // Usage:   node mcp-http.js
 // Env:     MCP_HTTP_PORT      (default: 3001)
 //          MCP_CONTROLLER_IP  (default: "mock")
 //          MCP_DIRECTOR_TOKEN (auto-auths in demo/mock mode if empty)
-//          MCP_BASE_URL       (default: "http://localhost:3000")
+//          MCP_BASE_URL       (default: "https://localhost:3443")
 //          GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET (for OAuth)
 
 require("dotenv").config();
@@ -21,10 +21,13 @@ const { requestJson } = require("./http-client");
 const oauth = require("./oauth");
 
 const MCP_PORT = parseInt(process.env.MCP_HTTP_PORT, 10) || 3001;
+const APP_PORT = process.env.HTTPS_ENABLED === "true"
+  ? (process.env.HTTPS_PORT || 3443)
+  : (process.env.PORT || process.env.HTTPS_PORT || 3443);
 const BASE_URL = process.env.MCP_BASE_URL || (
   process.env.HTTPS_ENABLED === "true"
-    ? `https://localhost:${process.env.HTTPS_PORT || 3443}`
-    : `http://localhost:${process.env.PORT || 3000}`
+    ? `https://localhost:${APP_PORT}`
+    : `http://localhost:${APP_PORT}`
 );
 const CONTROLLER_IP = process.env.MCP_CONTROLLER_IP || "mock";
 const PKCE_S256_RE = /^[A-Za-z0-9\-_]{43,128}$/;

@@ -31,7 +31,7 @@ npm install
 npm start
 ```
 
-Open http://localhost:3000 in your browser.
+Open http://localhost:3443 in your browser.
 
 ## How It Works
 
@@ -40,7 +40,7 @@ The server proxies requests between the browser and your local Control4 Director
 ### Architecture
 
 ```
-Browser  <-->  Express server (:3000)  <-->  Control4 Director (https://<IP>)
+Browser  <-->  Express server (:3443)  <-->  Control4 Director (https://<IP>)
                      |
                      +--> Control4 Cloud API (authentication only)
 ```
@@ -58,13 +58,13 @@ The app uses these Director endpoints:
 
 ## Configuration
 
-Copy `.env.example` to `.env` and edit as needed. All settings are optional — without a `.env` file, the server behaves exactly as before (plain HTTP on port 3000, no auth).
+Copy `.env.example` to `.env` and edit as needed. All settings are optional — without a `.env` file, the server serves plain HTTP on port 3443 with no auth.
 
 ```bash
 cp .env.example .env
 ```
 
-Set the port with the `PORT` environment variable (default: 3000):
+Set the port with the `PORT` environment variable when running without HTTPS (default: 3443):
 
 ```bash
 PORT=8080 npm start
@@ -85,7 +85,7 @@ AUTH_PASSWORD=your-secret-password
 
 ### HTTPS
 
-Set `HTTPS_ENABLED=true` in `.env`. The server will listen on port 3443 (configurable via `HTTPS_PORT`).
+Set `HTTPS_ENABLED=true` in `.env`. The server will listen on port 3443 (configurable via `HTTPS_PORT`) and will not open a separate HTTP port.
 
 ```env
 HTTPS_ENABLED=true
@@ -101,7 +101,10 @@ HTTPS_ENABLED=true
    TLS_KEY_FILE=/path/to/privkey.pem
    ```
 
-When HTTPS is enabled, HTTP on the original port redirects to HTTPS by default. Disable this with `HTTP_REDIRECT=false`.
+3. **DuckDNS + Let's Encrypt** — set `PUBLIC_HOSTNAME`, `DUCKDNS_DOMAIN`, `DUCKDNS_TOKEN`, and `ACME_EMAIL`, point `TLS_CERT_FILE` / `TLS_KEY_FILE` at your desired output files, then run:
+   ```bash
+   npm run cert:issue
+   ```
 
 ### Port Forwarding
 
