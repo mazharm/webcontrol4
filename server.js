@@ -394,7 +394,17 @@ app.use((_req, res, next) => {
 });
 
 app.use(express.json({ limit: "1mb" }));
-app.use(express.static(path.join(__dirname, "public")));
+
+// Serve React build from public-react/ (new UI), fall back to public/ (legacy)
+const reactDir = path.join(__dirname, "public-react");
+const legacyDir = path.join(__dirname, "public");
+const hasReactBuild = require("fs").existsSync(path.join(reactDir, "index.html"));
+if (hasReactBuild) {
+  app.use("/legacy", express.static(legacyDir));
+  app.use(express.static(reactDir));
+} else {
+  app.use(express.static(legacyDir));
+}
 
 // ---------------------------------------------------------------------------
 // Authentication – Google OAuth (when GOOGLE_CLIENT_ID is configured)
@@ -1139,6 +1149,7 @@ app.get("/api/settings", (_req, res) => {
     hasAnthropicKey: !!appSettings.anthropicKey,
     hasPushoverAppToken: !!appSettings.pushoverAppToken || !!process.env.PUSHOVER_APP_TOKEN,
     hasPushoverUserKey: !!appSettings.pushoverUserKey || !!process.env.PUSHOVER_USER_KEY,
+    deviceMappings: appSettings.deviceMappings || {},
   });
 });
 
@@ -1174,7 +1185,18 @@ app.post("/api/settings", (req, res) => {
     }
     appSettings.pushoverUserKey = keyStr;
   }
-
+  if (req.body.deviceMappings !== undefined) {
+    const dm = req.body.deviceMappings;
+    if (typeof dm === "object" && dm !== null && !Array.isArray(dm)) {
+      const clean = {};
+      for (const [k, v] of Object.entries(dm)) {
+        if (typeof k === "string" && typeof v === "number" && Number.isFinite(v)) {
+          clean[k] = v;
+        }
+      }
+      appSettings.deviceMappings = clean;
+    }
+  }
   persistSettings();
   applyPushoverEnv();
   res.json({ ok: true });
@@ -2122,7 +2144,11 @@ app.get("/api/health", (_req, res) => {
 // ---------------------------------------------------------------------------
 
 app.get("/{*path}", (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
+  if (hasReactBuild) {
+    res.sendFile(path.join(reactDir, "index.html"));
+  } else {
+    res.sendFile(path.join(legacyDir, "index.html"));
+  }
 });
 
 // ---------------------------------------------------------------------------
