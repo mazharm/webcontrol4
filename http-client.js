@@ -60,14 +60,16 @@ function requestText(url, options = {}, redirectCount = 0) {
     }
 
     const client = parsed.protocol === "https:" ? https : http;
+    const reqOptions = {
+      method: options.method || "GET",
+      headers,
+      timeout: options.timeout || 30000,
+      rejectUnauthorized: parsed.protocol === "https:" ? !isPrivateOrLocalHost(parsed.hostname) : undefined,
+    };
+    if (options.agent !== undefined) reqOptions.agent = options.agent;
     const req = client.request(
       parsed,
-      {
-        method: options.method || "GET",
-        headers,
-        timeout: options.timeout || 30000,
-        rejectUnauthorized: parsed.protocol === "https:" ? !isPrivateOrLocalHost(parsed.hostname) : undefined,
-      },
+      reqOptions,
       (res) => {
         if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
           const redirectUrl = new URL(res.headers.location, parsed);

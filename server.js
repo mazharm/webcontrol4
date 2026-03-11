@@ -523,6 +523,11 @@ const C4_CONTROLLER_AUTH_URL =
 const C4_ACCOUNTS_URL = "https://apis.control4.com/account/v3/rest/accounts";
 const APPLICATION_KEY = process.env.C4_APPLICATION_KEY || "78f6791373d61bea49fdb9fb8897f1f3af193f11";
 
+// Dedicated agent for C4 cloud API calls — keepAlive disabled because the C4
+// API sends "Connection: close" and reusing sockets causes "socket hang up"
+// errors on Node 19+ where the default agent enables keepAlive.
+const c4Agent = new https.Agent({ keepAlive: false });
+
 // ---------------------------------------------------------------------------
 // Mock controller state (for demo mode when ip=mock)
 // ---------------------------------------------------------------------------
@@ -827,6 +832,7 @@ app.post("/api/auth/login", async (req, res) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body,
+      agent: c4Agent,
     });
     const json = JSON.parse(data);
     const token = json?.authToken?.token;
@@ -854,6 +860,7 @@ app.post("/api/auth/controllers", async (req, res) => {
   try {
     const data = await request(C4_ACCOUNTS_URL, {
       headers: { Authorization: `Bearer ${accountToken}` },
+      agent: c4Agent,
     });
     const json = JSON.parse(data);
     res.json(json.account || json);
@@ -892,6 +899,7 @@ app.post("/api/auth/director-token", async (req, res) => {
         Authorization: `Bearer ${accountToken}`,
       },
       body,
+      agent: c4Agent,
     });
     const json = JSON.parse(data);
     const token = json?.authToken?.token;
@@ -1878,6 +1886,7 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${accountToken}` },
         body,
+        agent: c4Agent,
       });
       const json = JSON.parse(data);
       return { token: json.authToken.token, validSeconds: json.authToken.validSeconds };
