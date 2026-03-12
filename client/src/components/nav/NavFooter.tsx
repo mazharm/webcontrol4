@@ -15,10 +15,11 @@ const useStyles = makeStyles({
     display: "flex",
     alignItems: "center",
     gap: "8px",
-    padding: "6px 8px",
+    padding: "10px 8px",
     cursor: "pointer",
     fontSize: tokens.fontSizeBase300,
     borderRadius: tokens.borderRadiusMedium,
+    minHeight: "44px",
     ":hover": {
       backgroundColor: tokens.colorNeutralBackground3,
     },

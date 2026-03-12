@@ -62,22 +62,33 @@ const useStyles = makeStyles({
     overflowY: "auto",
     overflowX: "hidden",
   },
+  mobileRoot: {
+    width: "100%",
+    display: "flex",
+    flexDirection: "column",
+    flex: 1,
+    minHeight: 0,
+    overflow: "hidden",
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
 });
 
 interface NavPanelProps {
   onNavigate: () => void;
   overlay?: boolean;
+  mobile?: boolean;
   showHeader?: boolean;
   onToggleChat?: () => void;
   showChatButton?: boolean;
 }
 
-export function NavPanel({ 
-  onNavigate, 
-  overlay, 
-  showHeader, 
-  onToggleChat, 
-  showChatButton 
+export function NavPanel({
+  onNavigate,
+  overlay,
+  mobile,
+  showHeader,
+  onToggleChat,
+  showChatButton
 }: NavPanelProps) {
   const styles = useStyles();
   const { mode, toggle } = useTheme();
@@ -89,8 +100,12 @@ export function NavPanel({
     ? styles.connecting
     : styles.disconnected;
 
+  const rootClass = mobile
+    ? styles.mobileRoot
+    : `${styles.root} ${overlay ? styles.overlay : ""}`;
+
   return (
-    <nav className={`${styles.root} ${overlay ? styles.overlay : ""}`}>
+    <nav className={rootClass}>
       {showHeader && (
         <div className={styles.header}>
           <span className={styles.logo}>WebControl4</span>

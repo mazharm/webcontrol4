@@ -113,17 +113,17 @@ export function ThermostatCard({ device }: ThermostatCardProps) {
       <div className={styles.row}>
         <span className={styles.label}>Heat</span>
         <div className={styles.setpoint}>
-          <Button size="small" appearance="subtle" onClick={() => adjustSetpoint("heatSetpointF", -1)}>-</Button>
+          <Button size="medium" appearance="subtle" onClick={() => adjustSetpoint("heatSetpointF", -1)}>-</Button>
           <span className={styles.setpointValue}>{Math.round(ts.heatSetpointF)}</span>
-          <Button size="small" appearance="subtle" onClick={() => adjustSetpoint("heatSetpointF", 1)}>+</Button>
+          <Button size="medium" appearance="subtle" onClick={() => adjustSetpoint("heatSetpointF", 1)}>+</Button>
         </div>
       </div>
       <div className={styles.row}>
         <span className={styles.label}>Cool</span>
         <div className={styles.setpoint}>
-          <Button size="small" appearance="subtle" onClick={() => adjustSetpoint("coolSetpointF", -1)}>-</Button>
+          <Button size="medium" appearance="subtle" onClick={() => adjustSetpoint("coolSetpointF", -1)}>-</Button>
           <span className={styles.setpointValue}>{Math.round(ts.coolSetpointF)}</span>
-          <Button size="small" appearance="subtle" onClick={() => adjustSetpoint("coolSetpointF", 1)}>+</Button>
+          <Button size="medium" appearance="subtle" onClick={() => adjustSetpoint("coolSetpointF", 1)}>+</Button>
         </div>
       </div>
       <div className={styles.modeRow}>

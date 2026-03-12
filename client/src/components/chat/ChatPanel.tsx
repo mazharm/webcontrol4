@@ -30,6 +30,18 @@ const useStyles = makeStyles({
     bottom: 0,
     zIndex: 100,
   },
+  mobileRoot: {
+    width: "100%",
+    minWidth: 0,
+    display: "flex",
+    flexDirection: "column",
+    flex: 1,
+    borderLeft: "none",
+    backgroundColor: tokens.colorNeutralBackground2,
+    height: "100%",
+    minHeight: 0,
+    overflow: "hidden",
+  },
   header: {
     display: "flex",
     alignItems: "center",
@@ -46,9 +58,10 @@ const useStyles = makeStyles({
 
 interface ChatPanelProps {
   overlay?: boolean;
+  mobile?: boolean;
 }
 
-export function ChatPanel({ overlay }: ChatPanelProps) {
+export function ChatPanel({ overlay, mobile }: ChatPanelProps) {
   const styles = useStyles();
   const { state, dispatch } = useChat();
   const { devices } = useDevices();
@@ -133,8 +146,12 @@ export function ChatPanel({ overlay }: ChatPanelProps) {
     }
   }, [buildLlmContext, dispatch]);
 
+  const rootClass = mobile
+    ? styles.mobileRoot
+    : `${styles.root} ${overlay ? styles.overlay : ""}`;
+
   return (
-    <div className={`${styles.root} ${overlay ? styles.overlay : ""}`}>
+    <div className={rootClass}>
       <div className={styles.header}>
         <Text className={styles.title}>Assistant</Text>
         <Button

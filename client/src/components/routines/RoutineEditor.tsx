@@ -20,12 +20,23 @@ import {
 import { Add24Regular, Delete24Regular } from "@fluentui/react-icons";
 import type { Routine, RoutineStep } from "../../types/devices";
 import { useDevicesByType } from "../../hooks/useDevices";
+import { useIsMobile } from "../../hooks/useIsMobile";
 import { saveRoutine } from "../../api/routines";
 
 const useStyles = makeStyles({
   surface: {
     width: "fit-content",
     maxWidth: "800px",
+    display: "flex",
+    flexDirection: "column",
+  },
+  surfaceMobile: {
+    width: "100vw",
+    maxWidth: "100vw",
+    height: "100dvh",
+    maxHeight: "100dvh",
+    borderRadius: 0,
+    margin: 0,
     display: "flex",
     flexDirection: "column",
   },
@@ -187,6 +198,7 @@ function getStepSummary(step: RoutineStep): string {
 
 export function RoutineEditor({ routine, open, onClose, onSaved }: RoutineEditorProps) {
   const styles = useStyles();
+  const { isMobile } = useIsMobile();
   const lights = useDevicesByType("light");
   const thermostats = useDevicesByType("thermostat");
 
@@ -305,7 +317,7 @@ export function RoutineEditor({ routine, open, onClose, onSaved }: RoutineEditor
 
   return (
     <Dialog open={open} onOpenChange={(_, data) => { if (!data.open) onClose(); }}>
-      <DialogSurface className={styles.surface}>
+      <DialogSurface className={isMobile ? styles.surfaceMobile : styles.surface}>
         <DialogTitle>{routine ? "Edit Routine" : "New Routine"}</DialogTitle>
         <DialogBody style={{ display: "flex", flexDirection: "column", overflow: "hidden", marginBottom: "16px" }}>
           <div className={styles.body}>

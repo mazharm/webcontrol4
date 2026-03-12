@@ -59,13 +59,13 @@ export function SecurityCard({ device }: { device: UnifiedDevice }) {
         </Badge>
       </div>
       <div className={styles.modeRow}>
-        <Button size="small" appearance={ss.mode === "disarmed" ? "primary" : "outline"} onClick={() => onSetMode("disarm")}>
+        <Button size="medium" appearance={ss.mode === "disarmed" ? "primary" : "outline"} onClick={() => onSetMode("disarm")}>
           Disarm
         </Button>
-        <Button size="small" appearance={ss.mode === "home" ? "primary" : "outline"} onClick={() => onSetMode("home")}>
+        <Button size="medium" appearance={ss.mode === "home" ? "primary" : "outline"} onClick={() => onSetMode("home")}>
           Home
         </Button>
-        <Button size="small" appearance={ss.mode === "away" ? "primary" : "outline"} onClick={() => onSetMode("away")}>
+        <Button size="medium" appearance={ss.mode === "away" ? "primary" : "outline"} onClick={() => onSetMode("away")}>
           Away
         </Button>
       </div>

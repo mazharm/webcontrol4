@@ -6,6 +6,11 @@ body,
   overflow: hidden;
 }
 
+/* Prevent 300ms tap delay */
+html {
+  touch-action: manipulation;
+}
+
 body {
   overscroll-behavior: none;
 }
@@ -16,16 +21,32 @@ body {
   box-sizing: border-box;
 }
 
+/* Prevent text selection on interactive elements during touch */
+button, [role="button"], [role="tab"], [role="switch"] {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Prevent iOS zoom on input focus (requires 16px min font size) */
+input, textarea, select {
+  font-size: max(16px, 1em);
+}
+
+/* Smooth momentum scrolling */
+.scrollable {
+  -webkit-overflow-scrolling: touch;
+}
+
 /* ── Fluent UI Dropdown / Listbox popup overrides ──────────────────────
    The popup is rendered in a Portal so Griffel makeStyles can't reach it.
    Force minimum option height and popup width so items are always readable. */
 
 .fui-Listbox,
 [role="listbox"] {
-  min-width: 600px !important;
+  min-width: min(600px, 92vw) !important;
   width: max-content !important;
   max-width: min(96vw, 1000px) !important;
-  max-height: 60vh !important;
+  max-height: 50vh !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
   padding-right: 8px !important;

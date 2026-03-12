@@ -26,6 +26,7 @@ import { AllCamerasView } from "./components/views/AllCamerasView";
 import { HistoryView } from "./components/history/HistoryView";
 import { RoutinesView } from "./components/routines/RoutinesView";
 import { SettingsView } from "./components/settings/SettingsView";
+import { MoreView } from "./components/views/MoreView";
 
 const useStyles = makeStyles({
   loadingState: {
@@ -191,6 +192,7 @@ function ConnectedApp() {
           <Route path="/history" element={<HistoryView />} />
           <Route path="/routines" element={<RoutinesView />} />
           <Route path="/settings" element={<SettingsView />} />
+          <Route path="/more" element={<MoreView />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       )}

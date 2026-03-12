@@ -3,6 +3,9 @@ import { makeStyles, tokens } from "@fluentui/react-components";
 import { Header } from "./Header";
 import { NavPanel } from "./NavPanel";
 import { ChatPanel } from "../chat/ChatPanel";
+import { MobileHeader } from "./MobileHeader";
+import { BottomTabBar } from "./BottomTabBar";
+import { MobileDrawer } from "./MobileDrawer";
 
 const useStyles = makeStyles({
   root: {
@@ -34,6 +37,26 @@ const useStyles = makeStyles({
     backgroundColor: "rgba(0,0,0,0.4)",
     zIndex: 99,
   },
+  // Mobile layout styles
+  mobileRoot: {
+    display: "flex",
+    flexDirection: "column",
+    height: "100dvh",
+    maxHeight: "100dvh",
+    overflow: "hidden",
+    backgroundColor: tokens.colorNeutralBackground1,
+    color: tokens.colorNeutralForeground1,
+    paddingTop: "env(safe-area-inset-top)",
+    paddingBottom: "env(safe-area-inset-bottom)",
+  },
+  mobileContent: {
+    flex: 1,
+    minHeight: 0,
+    overflowY: "auto",
+    overflowX: "hidden",
+    padding: "12px",
+    WebkitOverflowScrolling: "touch",
+  },
 });
 
 interface AppShellProps {
@@ -54,6 +77,7 @@ export function AppShell({ children }: AppShellProps) {
 
   const isWide = width >= 1280;
   const isMedium = width >= 960 && width < 1280;
+  const isMobileOrCompact = width < 960;
 
   const toggleNav = useCallback(() => setNavOpen((o) => !o), []);
   const toggleChat = useCallback(() => setChatOpen((o) => !o), []);
@@ -65,6 +89,37 @@ export function AppShell({ children }: AppShellProps) {
   const showNavButton = !showNavInline;
   const showChatButton = !showChatInline;
 
+  // Mobile layout
+  if (isMobileOrCompact) {
+    return (
+      <div className={styles.mobileRoot}>
+        <MobileHeader />
+        <main className={styles.mobileContent}>
+          {children}
+        </main>
+        <BottomTabBar
+          onOpenRooms={() => setNavOpen(true)}
+          onOpenChat={() => setChatOpen(true)}
+        />
+
+        {/* Nav as fullscreen drawer from left */}
+        {navOpen && (
+          <MobileDrawer position="left" onClose={closeNav}>
+            <NavPanel onNavigate={closeNav} mobile />
+          </MobileDrawer>
+        )}
+
+        {/* Chat as fullscreen sheet from bottom */}
+        {chatOpen && (
+          <MobileDrawer position="bottom" onClose={closeChat}>
+            <ChatPanel mobile />
+          </MobileDrawer>
+        )}
+      </div>
+    );
+  }
+
+  // Desktop / tablet layout
   return (
     <div className={styles.root}>
       {!showNavInline && (
