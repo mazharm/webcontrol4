@@ -67,15 +67,24 @@ export function AppShell({ children }: AppShellProps) {
 
   return (
     <div className={styles.root}>
-      <Header
-        onToggleNav={toggleNav}
-        onToggleChat={toggleChat}
-        showNavButton={showNavButton}
-        showChatButton={showChatButton}
-      />
+      {!showNavInline && (
+        <Header
+          onToggleNav={toggleNav}
+          onToggleChat={toggleChat}
+          showNavButton={showNavButton}
+          showChatButton={showChatButton}
+        />
+      )}
       <div className={styles.body}>
         {/* Nav panel */}
-        {showNavInline && <NavPanel onNavigate={() => {}} />}
+        {showNavInline && (
+          <NavPanel
+            onNavigate={() => {}}
+            showHeader
+            onToggleChat={toggleChat}
+            showChatButton={showChatButton}
+          />
+        )}
         {!showNavInline && navOpen && (
           <>
             <div className={styles.overlay} onClick={closeNav} />
