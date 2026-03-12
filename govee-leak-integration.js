@@ -23,9 +23,11 @@ function initGoveeLeak(app, broadcast, config) {
     log,
     onDevicesReady(sensors) {
       log.info(`[govee] ${sensors.length} leak sensor(s) ready`);
+      broadcast("govee:status", { connected: true, sensorCount: sensors.length });
     },
     onTokenExpired() {
       log.warn("[govee] Token expired — user must re-authenticate via Settings");
+      broadcast("govee:status", { connected: false, needsReauth: true });
       if (config.onTokenExpired) config.onTokenExpired();
     },
     onLeakEvent(event) {

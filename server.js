@@ -2238,6 +2238,7 @@ app.post("/api/govee/leak/login", async (req, res) => {
       },
     });
 
+    broadcastSSE("govee:status", { connected: true, email: auth.email });
     res.json({ ok: true, email: auth.email });
   } catch (err) {
     console.error("[govee] Login failed:", err.message);
@@ -2251,6 +2252,7 @@ app.post("/api/govee/leak/disconnect", (_req, res) => {
     goveeInstance.stop();
     goveeInstance = null;
   }
+  broadcastSSE("govee:status", { connected: false });
   appSettings.goveeEmail = "";
   appSettings.goveeToken = "";
   appSettings.goveeTokenTimestamp = 0;
