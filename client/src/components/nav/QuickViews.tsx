@@ -7,10 +7,12 @@ import {
   Temperature24Regular,
   ShieldLock24Regular,
   Video24Regular,
+  Drop24Regular,
   ChevronDown20Regular,
   ChevronRight20Regular,
 } from "@fluentui/react-icons";
 import { useDevicesByType } from "../../hooks/useDevices";
+import { useGoveeSensors } from "../../hooks/useGoveeSensors";
 import type { LightState, CameraState } from "../../types/devices";
 
 const useStyles = makeStyles({
@@ -65,8 +67,20 @@ export function QuickViews({ onNavigate }: QuickViewsProps) {
   const security = useDevicesByType("security");
   const cameras = useDevicesByType("camera");
 
+  const { sensors: goveeSensors, anyLeak } = useGoveeSensors();
+
   const lightsOn = lights.filter((d) => (d.state as LightState).on).length;
   const camerasOnline = cameras.filter((d) => (d.state as CameraState).online).length;
+
+  const STALE_MS = 24 * 60 * 60 * 1000;
+  const hasStaleOrUnknown = goveeSensors.some((s) => {
+    if (s.leakDetected) return false;
+    if (!s.lastTime) return true;
+    const ts = s.lastTime > 1e12 ? s.lastTime : s.lastTime * 1000;
+    return Date.now() - ts > STALE_MS;
+  });
+  const leakBadgeColor: "danger" | "warning" | "brand" = anyLeak ? "danger" : hasStaleOrUnknown ? "warning" : "brand";
+  const leakBadgeText = anyLeak ? "!" : hasStaleOrUnknown ? "?" : goveeSensors.length;
 
   const nav = (path: string) => {
     navigate(path);
@@ -79,6 +93,9 @@ export function QuickViews({ onNavigate }: QuickViewsProps) {
     { path: "/climate", label: "All Climate", icon: <Temperature24Regular />, badge: thermostats.length || null },
     { path: "/security", label: "All Security", icon: <ShieldLock24Regular />, badge: security.length || null },
     { path: "/cameras", label: "All Cameras", icon: <Video24Regular />, badge: camerasOnline || null },
+    ...(goveeSensors.length > 0
+      ? [{ path: "/water-leak", label: "Water Leak", icon: <Drop24Regular />, badge: leakBadgeText, badgeColor: leakBadgeColor }]
+      : []),
   ];
 
   return (
@@ -104,7 +121,7 @@ export function QuickViews({ onNavigate }: QuickViewsProps) {
           {item.icon}
           <span className={styles.label}>{item.label}</span>
           {item.badge != null && (
-            <Badge appearance="filled" color="brand" size="small">
+            <Badge appearance="filled" color={(item as { badgeColor?: string }).badgeColor as "brand" | "danger" || "brand"} size="small">
               {item.badge}
             </Badge>
           )}

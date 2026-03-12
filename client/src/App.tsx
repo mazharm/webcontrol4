@@ -27,6 +27,7 @@ import { HistoryView } from "./components/history/HistoryView";
 import { RoutinesView } from "./components/routines/RoutinesView";
 import { SettingsView } from "./components/settings/SettingsView";
 import { MoreView } from "./components/views/MoreView";
+import { WaterLeakView } from "./components/views/WaterLeakView";
 
 const useStyles = makeStyles({
   loadingState: {
@@ -189,6 +190,7 @@ function ConnectedApp() {
           <Route path="/climate" element={<AllClimateView />} />
           <Route path="/security" element={<AllSecurityView />} />
           <Route path="/cameras" element={<AllCamerasView />} />
+          <Route path="/water-leak" element={<WaterLeakView />} />
           <Route path="/history" element={<HistoryView />} />
           <Route path="/routines" element={<RoutinesView />} />
           <Route path="/settings" element={<SettingsView />} />

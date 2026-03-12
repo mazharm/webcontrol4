@@ -15,7 +15,7 @@ import {
 } from "@fluentui/react-components";
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../contexts/ThemeContext";
-import { getSettings, saveSettings } from "../../api/settings";
+import { getSettings, saveSettings, goveeLogin, goveeDisconnect } from "../../api/settings";
 import { getModels } from "../../api/llm";
 import { getRingStatus, ringLogin, ringVerify } from "../../api/ring";
 import type { SettingsResponse, RingStatusResponse } from "../../types/api";
@@ -76,6 +76,10 @@ export function SettingsView() {
   const [selectedModel, setSelectedModel] = useState("");
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [goveeEmail, setGoveeEmail] = useState("");
+  const [goveePassword, setGoveePassword] = useState("");
+  const [goveeSaving, setGoveeSaving] = useState(false);
+  const [goveeError, setGoveeError] = useState<string | null>(null);
   const [ringEmail, setRingEmail] = useState("");
   const [ringPassword, setRingPassword] = useState("");
   const [ringRefreshToken, setRingRefreshToken] = useState("");
@@ -120,6 +124,36 @@ export function SettingsView() {
     } catch { /* ignore */ }
     setSaving(false);
   }, [apiKey, selectedModel]);
+
+  const handleGoveeLogin = useCallback(async () => {
+    setGoveeSaving(true);
+    setGoveeError(null);
+    try {
+      await goveeLogin(goveeEmail, goveePassword);
+      setGoveePassword("");
+      // Refresh settings to get updated connection status
+      const updated = await getSettings();
+      setSettings(updated);
+    } catch (err) {
+      setGoveeError(err instanceof Error ? err.message : "Govee login failed");
+    }
+    setGoveeSaving(false);
+  }, [goveeEmail, goveePassword]);
+
+  const handleGoveeDisconnect = useCallback(async () => {
+    setGoveeSaving(true);
+    setGoveeError(null);
+    try {
+      await goveeDisconnect();
+      setGoveeEmail("");
+      setGoveePassword("");
+      const updated = await getSettings();
+      setSettings(updated);
+    } catch (err) {
+      setGoveeError(err instanceof Error ? err.message : "Failed to disconnect Govee");
+    }
+    setGoveeSaving(false);
+  }, []);
 
   const handleRingLogin = useCallback(async () => {
     setRingBusy(true);
@@ -292,6 +326,72 @@ export function SettingsView() {
                 </Button>
               </>
             )}
+          </div>
+        )}
+      </Card>
+
+      {/* Govee Leak Sensors */}
+      <Card className={styles.card}>
+        <div className={styles.cardTitle}>Govee Leak Sensors</div>
+        <div className={styles.status}>
+          <span>Status:</span>
+          <Badge appearance="filled" color={settings?.goveeConnected ? "success" : "warning"}>
+            {settings?.goveeConnected
+              ? `Connected (${settings.goveeSensorCount} sensor${settings.goveeSensorCount === 1 ? "" : "s"})`
+              : "Not connected"}
+          </Badge>
+        </div>
+        {settings?.goveeEmail && (
+          <Text className={styles.help}>Account: {settings.goveeEmail}</Text>
+        )}
+        {goveeError && (
+          <MessageBar intent="error">
+            <MessageBarBody>{goveeError}</MessageBarBody>
+          </MessageBar>
+        )}
+        {settings?.goveeNeedsReauth && (
+          <MessageBar intent="warning">
+            <MessageBarBody>Session expired — please sign in again.</MessageBarBody>
+          </MessageBar>
+        )}
+        {settings?.goveeConnected && !settings.goveeNeedsReauth ? (
+          <Button
+            appearance="outline"
+            onClick={handleGoveeDisconnect}
+            disabled={goveeSaving}
+            style={{ marginTop: "8px" }}
+          >
+            {goveeSaving ? "Disconnecting..." : "Disconnect"}
+          </Button>
+        ) : (
+          <div className={styles.column}>
+            <div className={styles.field}>
+              <label className={styles.label}>Govee Email</label>
+              <Input
+                value={goveeEmail}
+                onChange={(_, d) => setGoveeEmail(d.value)}
+                placeholder="name@example.com"
+              />
+            </div>
+            <div className={styles.field}>
+              <label className={styles.label}>Govee Password</label>
+              <Input
+                type="password"
+                value={goveePassword}
+                onChange={(_, d) => setGoveePassword(d.value)}
+                placeholder="Password"
+              />
+            </div>
+            <Text className={styles.help}>
+              Sign in with your Govee account to monitor water leak sensors (H5054, H5058).
+            </Text>
+            <Button
+              appearance="primary"
+              onClick={handleGoveeLogin}
+              disabled={goveeSaving || !goveeEmail || !goveePassword}
+            >
+              {goveeSaving ? "Connecting..." : "Connect Govee"}
+            </Button>
           </div>
         )}
       </Card>

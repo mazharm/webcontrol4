@@ -4,6 +4,7 @@ import {
   Temperature24Regular,
   ShieldLock24Regular,
   Video24Regular,
+  Drop24Regular,
   ChartMultiple24Regular,
   Flash24Regular,
   Settings24Regular,
@@ -54,6 +55,7 @@ export function MoreView() {
     { path: "/climate", label: "All Climate", icon: <Temperature24Regular /> },
     { path: "/security", label: "All Security", icon: <ShieldLock24Regular /> },
     { path: "/cameras", label: "All Cameras", icon: <Video24Regular /> },
+    { path: "/water-leak", label: "Water Leak", icon: <Drop24Regular /> },
   ];
 
   const utilityViews = [

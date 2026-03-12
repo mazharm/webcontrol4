@@ -195,8 +195,36 @@ export interface FloorHistorySeries {
   points: HistoryPoint[];
 }
 
+export interface GoveeLoginResponse {
+  ok: boolean;
+  email: string;
+}
+
+export interface GoveeSensor {
+  id: string;
+  name: string;
+  sku: string;
+  leakDetected: boolean;
+  battery: number | null;
+  online: boolean | null;
+  gwOnline: boolean | null;
+  lastTime: number | null;
+}
+
+export interface GoveeLeakStatus {
+  sensorCount: number;
+  anyLeak: boolean;
+  needsReauth: boolean;
+  sensors: GoveeSensor[];
+}
+
 export interface SettingsResponse {
   hasAnthropicKey: boolean;
   anthropicModel: string;
   deviceMappings?: Record<string, number>;
+  goveeEmail?: string;
+  goveeConnected?: boolean;
+  goveeSensorCount?: number;
+  goveeNeedsReauth?: boolean;
+  goveeSensorRooms?: Record<string, string>;
 }

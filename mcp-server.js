@@ -6,6 +6,7 @@ const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
 const { z } = require("zod");
 const { requestText } = require("./http-client");
 
+
 /**
  * Creates a configured MCP server with all 18 smart-home tools.
  *
@@ -565,6 +566,61 @@ function createMcpServer(config) {
     async ({ camera_id, on }) => {
       const data = await apiCall(`/ring/cameras/${camera_id}/siren`, { method: "POST", body: { on } });
       return { content: [{ type: "text", text: JSON.stringify(data) }] };
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Govee Leak Tools (3) — only registered if env vars are set
+  // -------------------------------------------------------------------------
+
+  // Govee leak tools — proxy through Express API
+  server.tool(
+    "govee_leak_status",
+    "Get current status of all Govee water leak sensors",
+    {},
+    async () => {
+      try {
+        const data = await apiCall("/api/govee/leak/status");
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Govee not available: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    "govee_leak_poll",
+    "Force immediate poll of all Govee leak sensors and return updated state",
+    {},
+    async () => {
+      try {
+        const data = await apiCall("/api/govee/leak/poll", { method: "POST" });
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Govee poll failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    "govee_leak_sensor_detail",
+    "Get status for a specific Govee leak sensor by name or device ID",
+    { query: z.string().describe("Partial sensor name or exact device ID") },
+    async ({ query }) => {
+      try {
+        const status = await apiCall("/api/govee/leak/status");
+        const q = query.toLowerCase();
+        const match = (status.sensors || []).find(
+          (s) => s.id.toLowerCase() === q || s.name.toLowerCase().includes(q)
+        );
+        if (!match) {
+          const names = (status.sensors || []).map((s) => s.name).join(", ");
+          return { content: [{ type: "text", text: `No sensor matching "${query}". Available: ${names || "none"}` }] };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(match, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Govee not available: ${err.message}` }], isError: true };
+      }
     }
   );
 

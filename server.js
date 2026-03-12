@@ -14,6 +14,8 @@ const ring = require("./ring-client");
 const notify = require("./notify");
 const { C4WebSocket } = require("./c4-websocket");
 const { StateMachine } = require("./state-machine");
+const { initGoveeLeak, registerGoveeRoutes } = require("./govee-leak-integration");
+const GoveeLeak = require("./govee-leak");
 let TrendingEngine = null;
 let trendingUnavailableReason = null;
 
@@ -50,6 +52,11 @@ let appSettings = {
   anthropicModel: "claude-haiku-4-5-20251001",
   pushoverAppToken: "",
   pushoverUserKey: "",
+  goveeEmail: "",
+  goveeToken: "",
+  goveeTokenTimestamp: 0,
+  goveePollInterval: 60,
+  goveeSensorRooms: {},
 };
 
 try {
@@ -1159,6 +1166,11 @@ app.get("/api/settings", (_req, res) => {
     hasPushoverAppToken: !!appSettings.pushoverAppToken || !!process.env.PUSHOVER_APP_TOKEN,
     hasPushoverUserKey: !!appSettings.pushoverUserKey || !!process.env.PUSHOVER_USER_KEY,
     deviceMappings: appSettings.deviceMappings || {},
+    goveeEmail: appSettings.goveeEmail || "",
+    goveeConnected: !!goveeInstance && !!appSettings.goveeToken && !goveeInstance.needsReauth,
+    goveeSensorCount: goveeInstance ? goveeInstance.devices.size : 0,
+    goveeNeedsReauth: goveeInstance ? goveeInstance.needsReauth : false,
+    goveeSensorRooms: appSettings.goveeSensorRooms || {},
   });
 });
 
@@ -2188,6 +2200,95 @@ app.get("/api/health", (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Govee Leak Sensor Integration (optional — requires GOVEE_EMAIL + GOVEE_PASSWORD)
+// ---------------------------------------------------------------------------
+
+let goveeInstance = null;
+
+// Register Govee REST routes once (they use a getter to access the current instance)
+registerGoveeRoutes(app, () => goveeInstance);
+
+// Govee login endpoint — authenticates, stores token (never password), starts polling
+app.post("/api/govee/leak/login", async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+  try {
+    console.log("[govee] Login attempt for:", String(email).trim());
+    const auth = await GoveeLeak.login(String(email).trim(), String(password));
+    console.log("[govee] Login succeeded");
+    // Persist token only — password is discarded
+    appSettings.goveeEmail = auth.email;
+    appSettings.goveeToken = auth.token;
+    appSettings.goveeTokenTimestamp = auth.tokenTimestamp;
+    persistSettings();
+
+    // (Re-)start Govee polling with the new token
+    if (goveeInstance) goveeInstance.stop();
+    goveeInstance = initGoveeLeak(app, broadcastSSE, {
+      goveeEmail: auth.email,
+      goveeToken: auth.token,
+      goveeTokenTimestamp: auth.tokenTimestamp,
+      goveePollInterval: appSettings.goveePollInterval || 60,
+      log: console,
+      onTokenExpired() {
+        console.warn("[govee] Token expired — clearing stored token");
+        appSettings.goveeToken = "";
+        appSettings.goveeTokenTimestamp = 0;
+        persistSettings();
+      },
+    });
+
+    res.json({ ok: true, email: auth.email });
+  } catch (err) {
+    console.error("[govee] Login failed:", err.message);
+    res.status(401).json({ error: err.message });
+  }
+});
+
+// Govee disconnect endpoint — stops polling, clears stored credentials
+app.post("/api/govee/leak/disconnect", (_req, res) => {
+  if (goveeInstance) {
+    goveeInstance.stop();
+    goveeInstance = null;
+  }
+  appSettings.goveeEmail = "";
+  appSettings.goveeToken = "";
+  appSettings.goveeTokenTimestamp = 0;
+  persistSettings();
+  res.json({ ok: true });
+});
+
+// Govee sensor room assignments
+app.post("/api/govee/leak/rooms", (req, res) => {
+  const { rooms } = req.body;
+  if (!rooms || typeof rooms !== "object") return res.status(400).json({ error: "rooms object required" });
+  appSettings.goveeSensorRooms = rooms;
+  persistSettings();
+  res.json({ ok: true });
+});
+
+// Restore Govee from persisted token on startup (or from env vars via initial login)
+{
+  const goveeEmail = appSettings.goveeEmail;
+  const goveeToken = appSettings.goveeToken;
+  if (goveeEmail && goveeToken) {
+    goveeInstance = initGoveeLeak(app, broadcastSSE, {
+      goveeEmail,
+      goveeToken,
+      goveeTokenTimestamp: appSettings.goveeTokenTimestamp || 0,
+      goveePollInterval: appSettings.goveePollInterval || 60,
+      log: console,
+      onTokenExpired() {
+        console.warn("[govee] Token expired — clearing stored token");
+        appSettings.goveeToken = "";
+        appSettings.goveeTokenTimestamp = 0;
+        persistSettings();
+      },
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SPA fallback
 // ---------------------------------------------------------------------------
 
@@ -2274,6 +2375,7 @@ startScheduler();
 
 function shutdown() {
   console.log("[shutdown] Cleaning up...");
+  if (goveeInstance) goveeInstance.stop();
   if (trending) trending.close();
   if (c4ws) c4ws.disconnect();
   ring.disconnect();
