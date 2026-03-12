@@ -128,7 +128,7 @@ export interface Routine {
 }
 
 export interface RoutineStep {
-  type: "light_level" | "light_toggle" | "hvac_mode" | "heat_setpoint" | "cool_setpoint";
+  type: "light_level" | "light_power" | "light_toggle" | "hvac_mode" | "heat_setpoint" | "cool_setpoint";
   deviceId: number;
   deviceName: string;
   level?: number;

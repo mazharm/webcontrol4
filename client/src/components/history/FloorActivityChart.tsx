@@ -1,12 +1,11 @@
 import { useEffect, useRef } from "react";
-import { Chart, BarController, BarElement, LinearScale, CategoryScale, Tooltip, Legend } from "chart.js";
+import { Chart, LineController, LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Legend } from "chart.js";
+import type { FloorHistorySeries } from "../../types/api";
 
-Chart.register(BarController, BarElement, LinearScale, CategoryScale, Tooltip, Legend);
-
-import type { HistoryPoint } from "../../types/api";
+Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Legend);
 
 interface FloorActivityChartProps {
-  data: HistoryPoint[];
+  data: FloorHistorySeries[];
 }
 
 export function FloorActivityChart({ data }: FloorActivityChartProps) {
@@ -17,16 +16,31 @@ export function FloorActivityChart({ data }: FloorActivityChartProps) {
     if (!canvasRef.current) return;
     chartRef.current?.destroy();
 
-    const labels = data.map((p) => new Date(p.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+    const palette = ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#06b6d4", "#84cc16"];
+    const timestamps = Array.from(
+      new Set(data.flatMap((series) => series.points.map((point) => point.ts))),
+    ).sort((a, b) => a - b);
+    const labels = timestamps.map((ts) =>
+      new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    );
+
     chartRef.current = new Chart(canvasRef.current, {
-      type: "bar",
+      type: "line",
       data: {
         labels,
-        datasets: [{
-          label: "Lights On",
-          data: data.map((p) => p.onCount ?? 0),
-          backgroundColor: "rgba(59,130,246,0.6)",
-        }],
+        datasets: data.map((series, index) => {
+          const pointsByTimestamp = new Map(series.points.map((point) => [point.ts, point.onCount ?? 0]));
+          const color = palette[index % palette.length];
+          return {
+            label: series.floor,
+            data: timestamps.map((ts) => pointsByTimestamp.get(ts) ?? null),
+            borderColor: color,
+            backgroundColor: `${color}33`,
+            tension: 0.3,
+            spanGaps: true,
+            pointRadius: 2,
+          };
+        }),
       },
       options: {
         responsive: true,

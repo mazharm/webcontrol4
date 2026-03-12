@@ -5,7 +5,6 @@ import {
   Card,
   Text,
   Button,
-  Input,
   Spinner,
   MessageBar,
   MessageBarBody,
@@ -68,135 +67,99 @@ const useStyles = makeStyles({
     padding: "16px",
     color: tokens.colorNeutralForeground3,
   },
-  divider: {
-    textAlign: "center",
-    margin: "16px 0",
-    color: tokens.colorNeutralForeground3,
-    fontSize: tokens.fontSizeBase200,
-  },
-  directRow: {
-    display: "flex",
-    gap: "8px",
-    marginBottom: "8px",
-  },
 });
 
 function normalize(s: string): string {
   return s.replace(/[_\-"]/g, "").toLowerCase();
 }
 
+function isMockController(ctrl: Controller & { localIP?: string }) {
+  return ctrl.commonName === "mock-controller" || ctrl.address === "mock" || ctrl.localIP === "mock";
+}
+
+const MOCK_CONTROLLER: Controller & { localIP?: string } = {
+  commonName: "mock-controller",
+  name: "Mock Controller",
+  address: "mock",
+  localIP: "mock",
+};
+
 export function ControllerPicker() {
   const styles = useStyles();
   const { state: auth, dispatch } = useAuth();
-  const [controllers, setControllers] = useState<(Controller & { localIP?: string })[]>(
-    auth.controllers.map((c) => ({ ...c, localIP: c.address || undefined }))
-  );
+  const [controllers, setControllers] = useState<(Controller & { localIP?: string })[]>([]);
   const [selectedCN, setSelectedCN] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [discovering, setDiscovering] = useState(true);
-  const [directIp, setDirectIp] = useState("");
-  const [directToken, setDirectToken] = useState("");
-
-  // Run SDDP discovery and match IPs to controllers, then auto-connect if single
-  useEffect(() => {
-    (async () => {
-      const ctrls = auth.controllers.map((c) => ({ ...c, localIP: c.address || undefined }));
-
-      try {
-        const devices = await discoverControllers();
-        if (devices.length > 0) {
-          for (const c of ctrls) {
-            const cn = normalize(c.commonName || "");
-            const match = devices.find((d) => {
-              const host = normalize(d.host || "");
-              return host && cn && (cn.includes(host) || host.includes(cn));
-            });
-            if (match) c.localIP = match.ip;
-          }
-        }
-      } catch {
-        // discovery failed, non-fatal
-      }
-
-      setControllers(ctrls);
-      setDiscovering(false);
-
-      // Auto-connect if single controller
-      if (ctrls.length === 1) {
-        selectController(ctrls[0]);
-      }
-    })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const selectController = useCallback(async (ctrl: Controller & { localIP?: string }) => {
     setLoading(true);
     dispatch({ type: "SET_ERROR", payload: null });
     try {
+      if (!auth.accountToken) throw new Error("Missing account token");
+
       const result = await getDirectorToken(auth.accountToken!, ctrl.commonName);
       const token = result.directorToken;
+      const ip = isMockController(ctrl) ? "mock" : (ctrl.localIP || ctrl.address || "");
+      if (!ip) throw new Error("No discovered controller IP available");
 
-      // Determine IP: use discovered localIP, or "mock" for demo, or prompt
-      let ip = ctrl.localIP || "";
-
-      // Demo/mock mode: mock-controller gets IP "mock"
-      if (ctrl.commonName === "mock-controller" || ctrl.address === "mock") {
-        ip = "mock";
-      }
-
-      if (!ip) {
-        // No IP discovered — prompt user
-        const entered = window.prompt(
-          "Controller not found on network. Enter its local IP address:"
-        );
-        if (!entered) {
-          setLoading(false);
-          return;
-        }
-        const trimmed = entered.trim();
-        if (trimmed !== "mock" && !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(trimmed)) {
-          dispatch({ type: "SET_ERROR", payload: "Please enter a valid IPv4 address." });
-          setLoading(false);
-          return;
-        }
-        ip = trimmed;
-      }
-
+      await connectRealtime({
+        ip,
+        token,
+        accountToken: auth.accountToken,
+        controllerCommonName: ctrl.commonName,
+      });
       dispatch({ type: "SET_DIRECTOR", payload: { ip, token } });
-
-      // Initialize realtime connection
-      try {
-        await connectRealtime({ ip, token });
-      } catch {
-        // non-fatal
-      }
     } catch (err) {
       dispatch({ type: "SET_ERROR", payload: err instanceof Error ? err.message : "Connection failed" });
+    } finally {
       setLoading(false);
     }
   }, [auth.accountToken, dispatch]);
+
+  // Run SDDP discovery and match IPs to controllers, then auto-connect if single.
+  // If nothing usable is discovered, fall back to the mock controller instead of
+  // prompting for manual connection details.
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const ctrls = auth.controllers.map((c) => ({ ...c, localIP: c.address || undefined }));
+      const devices = await discoverControllers();
+
+      if (devices.length > 0) {
+        for (const c of ctrls) {
+          const cn = normalize(c.commonName || "");
+          const match = devices.find((d) => {
+            const host = normalize(d.host || "");
+            return host && cn && (cn.includes(host) || host.includes(cn));
+          });
+          if (match) c.localIP = match.ip;
+        }
+      }
+
+      const usableControllers = ctrls.filter((c) => isMockController(c) || !!c.localIP);
+      const finalControllers = usableControllers.length > 0 ? usableControllers : [MOCK_CONTROLLER];
+
+      if (cancelled) return;
+      setControllers(finalControllers);
+      setDiscovering(false);
+      setSelectedCN(finalControllers.length > 1 ? finalControllers[0].commonName : "");
+
+      if (finalControllers.length === 1) {
+        void selectController(finalControllers[0]);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [auth.controllers, selectController]);
 
   const handleConnect = useCallback(() => {
     const ctrl = controllers.find((c) => c.commonName === selectedCN);
     if (ctrl) selectController(ctrl);
   }, [selectedCN, controllers, selectController]);
-
-  const handleDirectConnect = useCallback(async () => {
-    const ip = directIp.trim();
-    const token = directToken.trim();
-    if (!ip || !token) return;
-    if (ip !== "mock" && !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) {
-      dispatch({ type: "SET_ERROR", payload: "Please enter a valid IPv4 address." });
-      return;
-    }
-    setLoading(true);
-    dispatch({ type: "SET_DIRECTOR", payload: { ip, token } });
-    try {
-      await connectRealtime({ ip, token });
-    } catch {
-      // non-fatal
-    }
-  }, [directIp, directToken, dispatch]);
 
   return (
     <div className={styles.root}>
@@ -239,30 +202,6 @@ export function ControllerPicker() {
             <Spinner size="small" label="Connecting..." />
           </div>
         )}
-
-        <div className={styles.divider}>or connect directly</div>
-        <div className={styles.directRow}>
-          <Input
-            placeholder="IP or 'mock'"
-            value={directIp}
-            onChange={(_, d) => setDirectIp(d.value)}
-            style={{ flex: 1 }}
-          />
-          <Input
-            placeholder="Bearer token"
-            value={directToken}
-            onChange={(_, d) => setDirectToken(d.value)}
-            style={{ flex: 1 }}
-          />
-        </div>
-        <Button
-          appearance="outline"
-          onClick={handleDirectConnect}
-          disabled={loading || !directIp.trim() || !directToken.trim()}
-          style={{ width: "100%" }}
-        >
-          Direct Connect
-        </Button>
 
         <Button
           appearance="subtle"

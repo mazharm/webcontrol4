@@ -282,6 +282,7 @@ function createMcpServer(config) {
               await directorPost(`api/v1/items/${step.deviceId}/commands`, "SET_LEVEL", { LEVEL: step.level });
               results.push(`Set light ${step.deviceId} to ${step.level}%`);
               break;
+            case "light_power":
             case "light_toggle": {
               const lvl = step.on ? 100 : 0;
               await directorPost(`api/v1/items/${step.deviceId}/commands`, "SET_LEVEL", { LEVEL: lvl });
@@ -324,11 +325,11 @@ function createMcpServer(config) {
       name: z.string().describe("Routine name"),
       steps: z.array(
         z.object({
-          type: z.enum(["light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"]).describe("Step type"),
+          type: z.enum(["light_level", "light_power", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"]).describe("Step type"),
           deviceId: z.number().int().nonnegative().describe("Device ID"),
           deviceName: z.string().optional().describe("Device name for display"),
           level: z.number().optional().describe("Brightness level (for light_level)"),
-          on: z.boolean().optional().describe("On/off (for light_toggle)"),
+          on: z.boolean().optional().describe("On/off (for light_power)"),
           mode: z.string().optional().describe("HVAC mode (for hvac_mode)"),
           value: z.number().optional().describe("Temperature value (for setpoints)"),
         })

@@ -70,7 +70,7 @@ export function RoutineCard({ routine, onEdit, onDeleted }: RoutineCardProps) {
       try {
         if (step.type === "light_level") {
           await sendCommand(opts, step.deviceId, "SET_LEVEL", { LEVEL: step.level ?? 0 });
-        } else if (step.type === "light_toggle") {
+        } else if (step.type === "light_power" || step.type === "light_toggle") {
           await sendCommand(opts, step.deviceId, "SET_LEVEL", { LEVEL: step.on ? 100 : 0 });
         } else if (step.type === "hvac_mode") {
           await sendCommand(opts, step.deviceId, "SET_MODE_HVAC", { MODE: step.mode ?? "Off" });
@@ -97,10 +97,10 @@ export function RoutineCard({ routine, onEdit, onDeleted }: RoutineCardProps) {
         <Text className={styles.name}>{routine.name}</Text>
         <Badge appearance="outline" size="small">{routine.steps.length} steps</Badge>
       </div>
-      <div className={styles.steps}>
-        {routine.steps.slice(0, 3).map((s, i) => (
-          <div key={i}>{s.deviceName}: {s.type.replace("_", " ")}</div>
-        ))}
+        <div className={styles.steps}>
+          {routine.steps.slice(0, 3).map((s, i) => (
+          <div key={i}>{s.deviceName}: {s.type === "light_power" || s.type === "light_toggle" ? "light power" : s.type.replace("_", " ")}</div>
+          ))}
         {routine.steps.length > 3 && <div>...and {routine.steps.length - 3} more</div>}
       </div>
       {routine.schedule?.enabled && (

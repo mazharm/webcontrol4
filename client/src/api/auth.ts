@@ -45,14 +45,23 @@ export async function getAuthStatus(): Promise<AuthStatusResponse> {
   return res.json();
 }
 
-export async function discoverControllers(): Promise<Array<{ host: string; ip: string }>> {
+export async function discoverControllers(timeoutMs = 5000): Promise<Array<{ host: string; ip: string }>> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch("/api/discover");
+    const res = await fetch("/api/discover", { signal: controller.signal });
     if (!res.ok) return [];
     const data = await res.json();
-    return Array.isArray(data) ? data : [];
+    return Array.isArray(data)
+      ? data.map((entry: Record<string, string>) => ({
+          host: entry["host-name"] || entry.host || "",
+          ip: entry.ip || "",
+        }))
+      : [];
   } catch {
     return [];
+  } finally {
+    window.clearTimeout(timeout);
   }
 }
 

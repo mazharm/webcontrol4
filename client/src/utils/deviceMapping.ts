@@ -145,7 +145,7 @@ export function mapC4Security(itemId: number, name: string, room: string, roomId
 export function mapRingCamera(cam: RingCamera, roomMapping?: number): UnifiedDevice {
   const state: CameraState = {
     type: "camera",
-    online: true,
+    online: !cam.isOffline,
     hasLight: cam.hasLight ?? false,
     lightOn: false,
     hasSiren: cam.hasSiren ?? false,
@@ -156,7 +156,7 @@ export function mapRingCamera(cam: RingCamera, roomMapping?: number): UnifiedDev
     id: `ring:${cam.id}`,
     source: "ring",
     type: "camera",
-    name: cam.description || cam.device_name,
+    name: cam.name || `Camera ${cam.id}`,
     roomId: roomMapping ?? null,
     roomName: roomMapping ? "" : "Outdoor",
     floorName: roomMapping ? "" : "",
@@ -167,7 +167,8 @@ export function mapRingCamera(cam: RingCamera, roomMapping?: number): UnifiedDev
 }
 
 export function mapRingSensor(sensor: RingSensor, roomMapping?: number): UnifiedDevice {
-  const kind = sensor.deviceType?.toLowerCase().includes("motion") ? "motion" : "contact";
+  const sensorType = sensor.type?.toLowerCase() || "";
+  const kind = sensorType.includes("motion") ? "motion" : "contact";
   const state: SensorState = {
     type: "sensor",
     sensorKind: kind as SensorState["sensorKind"],
@@ -176,7 +177,7 @@ export function mapRingSensor(sensor: RingSensor, roomMapping?: number): Unified
     batteryLevel: sensor.batteryLevel,
   };
   return {
-    id: `ring:${sensor.id}`,
+    id: `ring:${sensor.zid}`,
     source: "ring",
     type: "sensor",
     name: sensor.name,

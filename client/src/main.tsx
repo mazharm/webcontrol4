@@ -6,6 +6,7 @@ import { AuthProvider } from "./contexts/AuthContext";
 import { DeviceProvider } from "./contexts/DeviceContext";
 import { ChatProvider } from "./contexts/ChatContext";
 import { App } from "./App";
+import "./index.css";
 
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("Root element not found");

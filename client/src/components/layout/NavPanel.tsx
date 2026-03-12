@@ -9,9 +9,11 @@ const useStyles = makeStyles({
     minWidth: "260px",
     display: "flex",
     flexDirection: "column",
+    flexShrink: 0,
     borderRight: `1px solid ${tokens.colorNeutralStroke1}`,
     backgroundColor: tokens.colorNeutralBackground2,
     height: "100%",
+    minHeight: 0,
     overflow: "hidden",
   },
   overlay: {
@@ -23,6 +25,7 @@ const useStyles = makeStyles({
   },
   scrollable: {
     flex: 1,
+    minHeight: 0,
     overflowY: "auto",
     overflowX: "hidden",
   },

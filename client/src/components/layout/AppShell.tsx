@@ -1,4 +1,4 @@
-import { useState, useCallback, type ReactNode } from "react";
+import { useState, useCallback, useEffect, type ReactNode } from "react";
 import { makeStyles, tokens } from "@fluentui/react-components";
 import { Header } from "./Header";
 import { NavPanel } from "./NavPanel";
@@ -8,18 +8,24 @@ const useStyles = makeStyles({
   root: {
     display: "flex",
     flexDirection: "column",
-    height: "100vh",
+    height: "100dvh",
+    maxHeight: "100dvh",
+    overflow: "hidden",
     backgroundColor: tokens.colorNeutralBackground1,
     color: tokens.colorNeutralForeground1,
   },
   body: {
     display: "flex",
     flex: 1,
+    minHeight: 0,
     overflow: "hidden",
   },
   content: {
     flex: 1,
-    overflow: "auto",
+    minWidth: 0,
+    minHeight: 0,
+    overflowY: "auto",
+    overflowX: "hidden",
     padding: "16px",
   },
   overlay: {
@@ -38,14 +44,13 @@ export function AppShell({ children }: AppShellProps) {
   const styles = useStyles();
   const [navOpen, setNavOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
-  const [width, setWidth] = useState(window.innerWidth);
+  const [width, setWidth] = useState(() => window.innerWidth);
 
-  // Track window width for responsive
-  useState(() => {
+  useEffect(() => {
     const handler = () => setWidth(window.innerWidth);
     window.addEventListener("resize", handler);
     return () => window.removeEventListener("resize", handler);
-  });
+  }, []);
 
   const isWide = width >= 1280;
   const isMedium = width >= 960 && width < 1280;

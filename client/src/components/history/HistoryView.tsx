@@ -15,7 +15,7 @@ import { getHistory } from "../../api/history";
 import { LightHistoryChart } from "./LightHistoryChart";
 import { TempHistoryChart } from "./TempHistoryChart";
 import { FloorActivityChart } from "./FloorActivityChart";
-import type { HistoryPoint } from "../../types/api";
+import type { FloorHistorySeries, HistoryPoint } from "../../types/api";
 
 const useStyles = makeStyles({
   root: { maxWidth: "1000px" },
@@ -46,6 +46,7 @@ export function HistoryView() {
   const [tab, setTab] = useState<HistoryTab>("lights");
   const [selectedId, setSelectedId] = useState<string>("");
   const [data, setData] = useState<HistoryPoint[]>([]);
+  const [floorData, setFloorData] = useState<FloorHistorySeries[]>([]);
   const [loading, setLoading] = useState(false);
 
   const lights = useDevicesByType("light");
@@ -58,23 +59,39 @@ export function HistoryView() {
       setSelectedId(lights[0].id.replace("control4:", ""));
     } else if (tab === "temperature" && thermostats.length > 0 && !selectedId) {
       setSelectedId(thermostats[0].id.replace("control4:", ""));
-    } else if (tab === "floor" && floors.length > 0 && !selectedId) {
-      setSelectedId(floors[0].name);
     }
   }, [tab, lights, thermostats, floors, selectedId]);
 
   const fetchData = useCallback(async () => {
-    if (!selectedId) return;
     setLoading(true);
     try {
-      const type = tab === "lights" ? "light" : tab === "temperature" ? "thermo" : "floor";
-      const result = await getHistory(type, selectedId);
-      setData(result);
+      if (tab === "floor") {
+        const result = await Promise.all(
+          floors.map(async (floor) => ({
+            floor: floor.name,
+            points: await getHistory("floor", floor.name),
+          })),
+        );
+        setFloorData(result);
+        setData([]);
+      } else {
+        if (!selectedId) {
+          setData([]);
+          setFloorData([]);
+          return;
+        }
+        const type = tab === "lights" ? "light" : "thermo";
+        const result = await getHistory(type, selectedId);
+        setData(result);
+        setFloorData([]);
+      }
     } catch {
       setData([]);
+      setFloorData([]);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
-  }, [tab, selectedId]);
+  }, [floors, selectedId, tab]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -82,13 +99,16 @@ export function HistoryView() {
     setTab(data.value as HistoryTab);
     setSelectedId("");
     setData([]);
+    setFloorData([]);
   };
 
   const deviceOptions = tab === "lights"
     ? lights.map((d) => ({ id: d.id.replace("control4:", ""), name: d.name }))
     : tab === "temperature"
     ? thermostats.map((d) => ({ id: d.id.replace("control4:", ""), name: d.name }))
-    : floors.map((f) => ({ id: f.name, name: f.name }));
+    : [];
+
+  const hasFloorData = floorData.some((series) => series.points.length > 0);
 
   return (
     <div className={styles.root}>
@@ -98,29 +118,35 @@ export function HistoryView() {
         <Tab value="temperature">Temperature</Tab>
         <Tab value="floor">Floor Activity</Tab>
       </TabList>
-      <div className={styles.controls}>
-        <Dropdown
-          value={deviceOptions.find((o) => o.id === selectedId)?.name || "Select..."}
-          selectedOptions={selectedId ? [selectedId] : []}
-          onOptionSelect={(_, d) => d.optionValue && setSelectedId(d.optionValue)}
-          style={{ minWidth: "200px" }}
-        >
-          {deviceOptions.map((opt) => (
-            <Option key={opt.id} value={opt.id}>{opt.name}</Option>
-          ))}
-        </Dropdown>
-      </div>
+      {tab !== "floor" && (
+        <div className={styles.controls}>
+          <Dropdown
+            value={deviceOptions.find((o) => o.id === selectedId)?.name || "Select..."}
+            selectedOptions={selectedId ? [selectedId] : []}
+            onOptionSelect={(_, d) => d.optionValue && setSelectedId(d.optionValue)}
+            style={{ minWidth: "200px" }}
+          >
+            {deviceOptions.map((opt) => (
+              <Option key={opt.id} value={opt.id}>{opt.name}</Option>
+            ))}
+          </Dropdown>
+        </div>
+      )}
       <div className={styles.chart}>
         {loading ? (
           <Spinner label="Loading history..." />
+        ) : tab === "floor" ? (
+          hasFloorData ? (
+            <FloorActivityChart data={floorData} />
+          ) : (
+            <div className={styles.empty}>No history data available</div>
+          )
         ) : data.length === 0 ? (
           <div className={styles.empty}>No history data available</div>
         ) : tab === "lights" ? (
           <LightHistoryChart data={data} />
-        ) : tab === "temperature" ? (
-          <TempHistoryChart data={data} />
         ) : (
-          <FloorActivityChart data={data} />
+          <TempHistoryChart data={data} />
         )}
       </div>
     </div>

@@ -99,7 +99,7 @@ try {
     const raw = JSON.parse(fs.readFileSync(ROUTINES_FILE, "utf8"));
     // Validate loaded routines to prevent persisted malicious data
     if (Array.isArray(raw)) {
-      const validStepTypes = ["light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"];
+      const validStepTypes = ["light_level", "light_power", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"];
       routinesStore = raw.filter(r =>
         r && typeof r.id === "string" && /^[a-zA-Z0-9_-]+$/.test(r.id) &&
         typeof r.name === "string" && r.name.length <= 200 &&
@@ -260,6 +260,7 @@ async function executeRoutineSteps(routine) {
         case "light_level":
           await executeScheduledCommand(step.deviceId, "SET_LEVEL", { LEVEL: step.level });
           break;
+        case "light_power":
         case "light_toggle":
           await executeScheduledCommand(step.deviceId, "SET_LEVEL", { LEVEL: step.on ? 100 : 0 });
           break;
@@ -1245,7 +1246,7 @@ app.post("/api/routines", (req, res) => {
     return res.status(400).json({ error: `routine may have at most ${ROUTINE_STEPS_MAX} steps` });
   }
   // Validate individual step structure
-  const validStepTypes = ["light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"];
+  const validStepTypes = ["light_level", "light_power", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"];
   for (const step of routine.steps) {
     if (!step || typeof step !== "object") {
       return res.status(400).json({ error: "each step must be an object" });
@@ -1259,8 +1260,8 @@ app.post("/api/routines", (req, res) => {
     if (step.type === "light_level" && (!Number.isFinite(step.level) || step.level < 0 || step.level > 100)) {
       return res.status(400).json({ error: "light_level step requires level 0-100" });
     }
-    if (step.type === "light_toggle" && typeof step.on !== "boolean") {
-      return res.status(400).json({ error: "light_toggle step requires boolean 'on'" });
+    if ((step.type === "light_power" || step.type === "light_toggle") && typeof step.on !== "boolean") {
+      return res.status(400).json({ error: "light_power step requires boolean 'on'" });
     }
     if (step.type === "hvac_mode" && !["Off", "Heat", "Cool", "Auto"].includes(step.mode)) {
       return res.status(400).json({ error: "hvac_mode step requires mode: Off, Heat, Cool, or Auto" });
@@ -1316,10 +1317,11 @@ app.post("/api/routines", (req, res) => {
   }
   // Build clean routine object from validated fields only (prevent mass assignment)
   const cleanSteps = routine.steps.map(s => {
-    const clean = { type: s.type, deviceId: s.deviceId };
+    const cleanType = s.type === "light_toggle" ? "light_power" : s.type;
+    const clean = { type: cleanType, deviceId: s.deviceId };
     if (s.deviceName && typeof s.deviceName === "string") clean.deviceName = s.deviceName.slice(0, 200);
     if (s.type === "light_level") clean.level = s.level;
-    if (s.type === "light_toggle") clean.on = s.on;
+    if (s.type === "light_power" || s.type === "light_toggle") clean.on = s.on;
     if (s.type === "hvac_mode") clean.mode = s.mode;
     if (s.type === "heat_setpoint" || s.type === "cool_setpoint") clean.value = s.value;
     return clean;
@@ -1410,7 +1412,7 @@ function buildSystemPrompt(context, mode) {
       '- "actions": An array of device commands to execute (can be empty)\n\n' +
       "Control4 action types:\n" +
       '- { "type": "light_level",    "deviceId": <number>, "level": <0-100> }\n' +
-      '- { "type": "light_toggle",   "deviceId": <number>, "on": <boolean> }\n' +
+      '- { "type": "light_power",    "deviceId": <number>, "on": <boolean> }\n' +
       '- { "type": "hvac_mode",      "deviceId": <number>, "mode": "Off"|"Heat"|"Cool"|"Auto" }\n' +
       '- { "type": "heat_setpoint",  "deviceId": <number>, "value": <temp_in_F> }\n' +
       '- { "type": "cool_setpoint",  "deviceId": <number>, "value": <temp_in_F> }\n' +
@@ -1563,7 +1565,7 @@ app.post("/api/llm/chat", async (req, res) => {
     // Validate actions from LLM output to prevent prompt injection attacks
     if (Array.isArray(parsed.actions)) {
       const validActionTypes = [
-        "light_level", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint",
+        "light_level", "light_power", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint",
         "run_routine", "create_routine",
         "ring_alarm_mode", "ring_siren", "ring_camera_light", "ring_camera_siren", "ring_camera_snapshot",
         "send_notification",
@@ -1572,7 +1574,7 @@ app.post("/api/llm/chat", async (req, res) => {
         if (!a || typeof a !== "object") return false;
         if (!validActionTypes.includes(a.type)) return false;
         if (a.type === "light_level" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.level) || a.level < 0 || a.level > 100)) return false;
-        if (a.type === "light_toggle" && (!Number.isFinite(a.deviceId) || typeof a.on !== "boolean")) return false;
+        if ((a.type === "light_power" || a.type === "light_toggle") && (!Number.isFinite(a.deviceId) || typeof a.on !== "boolean")) return false;
         if (a.type === "hvac_mode" && (!Number.isFinite(a.deviceId) || !["Off", "Heat", "Cool", "Auto"].includes(a.mode))) return false;
         if (a.type === "heat_setpoint" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.value) || a.value < 32 || a.value > 120)) return false;
         if (a.type === "cool_setpoint" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.value) || a.value < 32 || a.value > 120)) return false;
@@ -1819,11 +1821,22 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
 
   // 1. Trending engine (idempotent — keep existing if already running)
   if (TrendingEngine && !trending) {
-    trending = new TrendingEngine({
-      dbPath: path.join(DATA_DIR, "trending.db"),
-      logger: (...args) => console.log("[trending]", ...args),
-    });
-    trending.init();
+    try {
+      trending = new TrendingEngine({
+        dbPath: path.join(DATA_DIR, "trending.db"),
+        logger: (...args) => console.log("[trending]", ...args),
+      });
+      trending.init();
+      trendingUnavailableReason = null;
+    } catch (err) {
+      trending = null;
+      if (/better-sqlite3/.test(err?.message || "")) {
+        trendingUnavailableReason = err.message;
+        console.warn("Trending disabled:", err.message);
+      } else {
+        throw err;
+      }
+    }
   }
 
   // 2. State machine — always re-create on new connection
@@ -1865,7 +1878,8 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
       prevMode = homeState.mode;
     }
 
-    broadcastSSE("stateChange", change);
+    broadcastSSE("state", change);
+    broadcastSSE("homeState", homeState);
     onStateChangeForConditions();
   });
 
@@ -1982,17 +1996,47 @@ function startMockEventEmitter() {
 }
 
 function broadcastSSE(eventType, data) {
-  const payload = JSON.stringify({
-    type: eventType,
-    itemId: data.itemId,
-    varName: data.varName,
-    value: data.value,
-    oldValue: data.oldValue,
-    timestamp: data.timestamp,
-  });
+  const payload = JSON.stringify({ type: eventType, ...data });
   for (const client of sseClients) {
-    try { client.write(`data: ${payload}\n\n`); } catch { sseClients.delete(client); }
+    try { client.write(`event: ${eventType}\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
   }
+}
+
+function getStateSnapshot() {
+  if (!stateMachine) return null;
+
+  const devices = Object.fromEntries(
+    [...stateMachine.getAllDeviceStates().entries()].map(([itemId, device]) => [
+      String(itemId),
+      {
+        itemId: device.itemId,
+        name: device.name,
+        type: device.type,
+        room: device.room,
+        roomId: device.roomId,
+        floor: device.floor,
+        variables: { ...device.variables },
+        lastChanged: device.lastChanged,
+      },
+    ])
+  );
+
+  const homeState = stateMachine.getHomeState();
+  const alerts = (homeState.alerts || []).map((alert) => ({
+    ...alert,
+    itemId: alert.deviceId,
+    itemName: stateMachine.getDeviceState(alert.deviceId)?.name || "",
+  }));
+
+  return {
+    devices,
+    homeState,
+    alerts,
+    home: homeState,
+    summary: stateMachine.getStateSummary(),
+    deviceCount: stateMachine.getAllDeviceStates().size,
+    roomCount: stateMachine.getAllRoomStates().size,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2064,12 +2108,7 @@ if (sseHeartbeat.unref) sseHeartbeat.unref();
 
 app.get("/api/state", (_req, res) => {
   if (!stateMachine) return res.status(503).json({ error: "State not initialized" });
-  res.json({
-    home: stateMachine.getHomeState(),
-    summary: stateMachine.getStateSummary(),
-    deviceCount: stateMachine.getAllDeviceStates().size,
-    roomCount: stateMachine.getAllRoomStates().size,
-  });
+  res.json(getStateSnapshot());
 });
 
 // NB: /api/state/room/:roomId must come before /api/state/:itemId

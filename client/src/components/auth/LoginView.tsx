@@ -13,6 +13,9 @@ import {
 import { useAuth } from "../../contexts/AuthContext";
 import { login, getControllers, getAuthStatus, googleAuthUrl } from "../../api/auth";
 
+const USERNAME_STORAGE_KEY = "webcontrol4:login:username";
+const PASSWORD_STORAGE_KEY = "webcontrol4:login:password";
+
 const useStyles = makeStyles({
   root: {
     display: "flex",
@@ -52,10 +55,30 @@ const useStyles = makeStyles({
 export function LoginView() {
   const styles = useStyles();
   const { state: auth, dispatch } = useAuth();
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
+  const [username, setUsername] = useState(() =>
+    typeof window === "undefined" ? "" : (window.localStorage.getItem(USERNAME_STORAGE_KEY) || "")
+  );
+  const [password, setPassword] = useState(() =>
+    typeof window === "undefined" ? "" : (window.localStorage.getItem(PASSWORD_STORAGE_KEY) || "")
+  );
   const [loading, setLoading] = useState(false);
   const [hasGoogle, setHasGoogle] = useState(false);
+
+  useEffect(() => {
+    if (username) {
+      window.localStorage.setItem(USERNAME_STORAGE_KEY, username);
+    } else {
+      window.localStorage.removeItem(USERNAME_STORAGE_KEY);
+    }
+  }, [username]);
+
+  useEffect(() => {
+    if (password) {
+      window.localStorage.setItem(PASSWORD_STORAGE_KEY, password);
+    } else {
+      window.localStorage.removeItem(PASSWORD_STORAGE_KEY);
+    }
+  }, [password]);
 
   // Check if Google auth is available and check initial auth status
   useEffect(() => {
@@ -83,18 +106,7 @@ export function LoginView() {
       const result = await login(username, password);
       dispatch({ type: "SET_ACCOUNT_TOKEN", payload: result.accountToken });
       const controllers = await getControllers(result.accountToken);
-      if (controllers.controllers.length === 1) {
-        // Auto-select single controller
-        const ctrl = controllers.controllers[0];
-        dispatch({
-          type: "SET_CONTROLLERS",
-          payload: controllers.controllers,
-        });
-        // Navigate to controller picker even for single; it handles auto-connect
-        dispatch({ type: "SET_CONTROLLERS", payload: controllers.controllers });
-      } else {
-        dispatch({ type: "SET_CONTROLLERS", payload: controllers.controllers });
-      }
+      dispatch({ type: "SET_CONTROLLERS", payload: controllers.controllers });
     } catch (err) {
       dispatch({ type: "SET_ERROR", payload: err instanceof Error ? err.message : "Login failed" });
     }
@@ -124,6 +136,7 @@ export function LoginView() {
             value={username}
             onChange={(_, d) => setUsername(d.value)}
             placeholder="user@example.com"
+            autoComplete="username"
             style={{ width: "100%" }}
             onKeyDown={(e) => { if (e.key === "Enter") handleLogin(); }}
           />
@@ -135,6 +148,7 @@ export function LoginView() {
             value={password}
             onChange={(_, d) => setPassword(d.value)}
             placeholder="Password"
+            autoComplete="current-password"
             style={{ width: "100%" }}
             onKeyDown={(e) => { if (e.key === "Enter") handleLogin(); }}
           />

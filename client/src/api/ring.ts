@@ -1,29 +1,39 @@
-import type { RingCamera, RingSensor } from "../types/api";
+import type { RingCamera, RingSensor, RingStatusResponse } from "../types/api";
 
-export async function getRingStatus(): Promise<{ connected: boolean; email?: string }> {
+export async function getRingStatus(): Promise<RingStatusResponse> {
   const res = await fetch("/ring/status");
   if (!res.ok) throw new Error("Failed to get Ring status");
   return res.json();
 }
 
-export async function ringLogin(email: string, password: string): Promise<{ success: boolean; needs2FA?: boolean }> {
+export async function ringLogin({
+  email,
+  password,
+  refreshToken,
+}: {
+  email?: string;
+  password?: string;
+  refreshToken?: string;
+}): Promise<{ success: boolean; requires2FA?: boolean; prompt?: string; error?: string; locationCount?: number }> {
   const res = await fetch("/ring/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, refreshToken }),
   });
-  if (!res.ok) throw new Error("Ring login failed");
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Ring login failed");
+  return data;
 }
 
-export async function ringVerify(code: string): Promise<{ success: boolean }> {
+export async function ringVerify(code: string): Promise<{ success: boolean; requires2FA?: boolean; prompt?: string; error?: string; locationCount?: number }> {
   const res = await fetch("/ring/verify", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ code }),
   });
-  if (!res.ok) throw new Error("Ring verification failed");
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Ring verification failed");
+  return data;
 }
 
 export async function getAlarmMode(): Promise<{ mode: string }> {

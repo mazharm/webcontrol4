@@ -51,22 +51,36 @@ export interface C4SceneItem {
 }
 
 export interface RingCamera {
-  id: string;
-  description: string;
-  device_name: string;
-  health: { firmware: string; wifi_name: string };
-  features: { motions_enabled: boolean; show_recordings: boolean };
+  id: number;
+  name: string;
+  model: string;
   hasLight: boolean;
   hasSiren: boolean;
+  hasBattery?: boolean;
+  isOffline: boolean;
 }
 
 export interface RingSensor {
-  id: string;
+  zid: string;
   name: string;
-  deviceType: string;
+  type: string;
+  roomId?: number;
   faulted: boolean;
   tamperStatus: string;
   batteryLevel?: number;
+  batteryStatus?: string;
+  mode?: string;
+}
+
+export interface RingStatusResponse {
+  connected: boolean;
+  status: "disconnected" | "connecting" | "connected" | "error" | string;
+  locationCount: number;
+  locations: Array<{
+    id: string;
+    name: string;
+    hasHubs: boolean;
+  }>;
 }
 
 export interface StateSnapshot {
@@ -78,12 +92,29 @@ export interface StateSnapshot {
     roomId: number;
     floor: string;
     variables: Record<string, string>;
-    lastChanged: number;
+    lastChanged: number | null;
   }>;
+  home?: {
+    mode: string;
+    confidence: string;
+    signals: string[];
+    alerts?: Array<{
+      type: string;
+      message: string;
+      deviceId: number;
+      timestamp: number;
+    }>;
+  };
   homeState: {
     mode: string;
     confidence: string;
     signals: string[];
+    alerts?: Array<{
+      type: string;
+      message: string;
+      deviceId: number;
+      timestamp: number;
+    }>;
   };
   alerts: Array<{
     type: string;
@@ -92,11 +123,14 @@ export interface StateSnapshot {
     itemName: string;
     timestamp: number;
   }>;
+  summary?: string;
+  deviceCount?: number;
+  roomCount?: number;
 }
 
 export interface LLMChatRequest {
   message: string;
-  context?: string;
+  context?: LLMControlContext;
   mode?: "control" | "analyze";
 }
 
@@ -107,9 +141,42 @@ export interface LLMChatResponse {
 
 export interface LLMAction {
   type: string;
-  deviceId: number;
-  deviceName: string;
+  deviceId?: number;
+  deviceName?: string;
+  routineId?: string;
+  name?: string;
+  steps?: Array<Record<string, unknown>>;
+  schedule?: {
+    enabled?: boolean;
+    time?: string;
+    days?: number[];
+  };
   [key: string]: unknown;
+}
+
+export interface LLMContextDevice {
+  id: number;
+  type: "light" | "thermostat";
+  name: string;
+  floor: string;
+  room: string;
+  on?: boolean;
+  level?: number;
+  tempF?: number;
+  heatF?: number;
+  coolF?: number;
+  hvacMode?: string;
+}
+
+export interface LLMContextRoutine {
+  id: string;
+  name: string;
+}
+
+export interface LLMControlContext {
+  devices?: LLMContextDevice[];
+  routines?: LLMContextRoutine[];
+  historySummary?: string;
 }
 
 export interface HistoryPoint {
@@ -121,6 +188,11 @@ export interface HistoryPoint {
   coolF?: number;
   hvacMode?: string;
   onCount?: number;
+}
+
+export interface FloorHistorySeries {
+  floor: string;
+  points: HistoryPoint[];
 }
 
 export interface SettingsResponse {

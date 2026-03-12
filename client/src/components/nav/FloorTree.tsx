@@ -47,11 +47,11 @@ export function FloorTree({ onNavigate }: FloorTreeProps) {
     <div className={styles.root}>
       <div className={styles.sectionLabel}>Spaces</div>
       {floors.map((floor) => (
-        <FloorNodeComponent key={floor.name} floor={floor} onNavigate={onNavigate} />
+        <FloorNodeComponent key={floor.name} floor={{ ...floor, isExpanded: false }} onNavigate={onNavigate} />
       ))}
       {outdoorRooms.size > 0 && (
         <FloorNodeComponent
-          floor={{ name: "Outdoor", rooms: Array.from(outdoorRooms.values()), isExpanded: true }}
+          floor={{ name: "Outdoor", rooms: Array.from(outdoorRooms.values()), isExpanded: false }}
           onNavigate={onNavigate}
         />
       )}

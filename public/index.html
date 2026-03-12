@@ -1062,7 +1062,7 @@
         <select id="step-action" onchange="onStepActionChange()">
           <option value="">Select action…</option>
           <option value="light_level">Set Light Level</option>
-          <option value="light_toggle">Toggle Light On / Off</option>
+          <option value="light_power">Set Light On / Off</option>
           <option value="hvac_mode">Set HVAC Mode</option>
           <option value="heat_setpoint">Set Heat Setpoint</option>
           <option value="cool_setpoint">Set Cool Setpoint</option>
@@ -1280,6 +1280,18 @@
       });
     }
 
+    async function waitForStateReady(timeoutMs = 5000, pollMs = 250) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const snapshot = await api("/api/state");
+        if (snapshot.error) throw new Error(snapshot.error);
+        const deviceCount = snapshot.deviceCount || Object.keys(snapshot.devices || {}).length;
+        if (deviceCount > 0) return snapshot;
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+      }
+      throw new Error("Controller connected but device state did not populate");
+    }
+
     // -----------------------------------------------------------------------
     // Login flow
     // -----------------------------------------------------------------------
@@ -1425,7 +1437,7 @@
 
         // Initialize server-side real-time engine
         try {
-          await api("/api/realtime/connect", {
+          const realtimeRes = await api("/api/realtime/connect", {
             method: "POST",
             body: {
               controllerIp: state.controllerIP,
@@ -1434,14 +1446,16 @@
               controllerCommonName: state.controllerCommonName,
             },
           });
+          if (realtimeRes.error) throw new Error(realtimeRes.error);
+          await waitForStateReady();
         } catch (err) {
-          console.warn("Real-time init failed (non-fatal):", err.message);
+          throw err;
         }
 
         enterDashboard();
       } catch (err) {
-        console.error("Director token error:", err);
-        alert("Failed to get director token. Please check your credentials and try again.");
+        console.error("Controller connection error:", err);
+        alert(err.message || "Failed to connect to the selected controller.");
       }
     }
 
@@ -1462,15 +1476,18 @@
 
       // Initialize server-side real-time engine
       try {
-        await api("/api/realtime/connect", {
+        const realtimeRes = await api("/api/realtime/connect", {
           method: "POST",
           body: {
             controllerIp: state.controllerIP,
             directorToken: state.directorToken,
           },
         });
+        if (realtimeRes.error) throw new Error(realtimeRes.error);
+        await waitForStateReady();
       } catch (err) {
-        console.warn("Real-time init failed (non-fatal):", err.message);
+        alert(err.message || "Failed to initialize real-time state.");
+        return;
       }
 
       enterDashboard();
@@ -2399,6 +2416,7 @@
     function describeStep(step) {
       switch (step.type) {
         case "light_level":   return `${step.deviceName}: Set level to ${step.level}%`;
+        case "light_power":
         case "light_toggle":  return `${step.deviceName}: Turn ${step.on ? "on" : "off"}`;
         case "hvac_mode":     return `${step.deviceName}: Set HVAC mode to ${step.mode}`;
         case "heat_setpoint": return `${step.deviceName}: Heat setpoint \u2192 ${step.value}\u00B0`;
@@ -2419,7 +2437,7 @@
 
       if (!action) return;
 
-      const isLight = action === "light_level" || action === "light_toggle";
+      const isLight = action === "light_level" || action === "light_power" || action === "light_toggle";
       const devices = isLight ? state.lights : state.thermostats;
 
       if (devices.length === 0) {
@@ -2443,7 +2461,7 @@
             <span id="step-level-label" style="font-size:13px;color:var(--muted);min-width:36px;">100%</span>
           </div>`;
         valueContainer.style.display = "block";
-      } else if (action === "light_toggle") {
+      } else if (action === "light_power" || action === "light_toggle") {
         valueContainer.innerHTML = `
           <select id="step-toggle-val">
             <option value="on">Turn On</option>
@@ -2473,7 +2491,7 @@
         return;
       }
       const deviceId = deviceIdRaw;
-      const isLight = action === "light_level" || action === "light_toggle";
+      const isLight = action === "light_level" || action === "light_power" || action === "light_toggle";
       const devices = isLight ? state.lights : state.thermostats;
       const device = devices.find((d) => d.id === deviceId);
       if (!device) return;
@@ -2482,7 +2500,7 @@
       if (action === "light_level") {
         const raw = parseInt(document.getElementById("step-level").value, 10);
         step.level = isNaN(raw) ? 0 : Math.min(100, Math.max(0, raw));
-      } else if (action === "light_toggle") {
+      } else if (action === "light_power" || action === "light_toggle") {
         step.on = document.getElementById("step-toggle-val").value === "on";
       } else if (action === "hvac_mode") {
         step.mode = document.getElementById("step-hvac-mode").value;
@@ -2767,6 +2785,7 @@
           if (light) { light.level = step.level; light.on = step.level > 0; }
           break;
         }
+        case "light_power":
         case "light_toggle": {
           const level = step.on ? 100 : 0;
           await directorPost(`api/v1/items/${step.deviceId}/commands`, "SET_LEVEL", { LEVEL: level });
@@ -3510,6 +3529,7 @@
 
       switch (action.type) {
         case "light_level":    return `${name}: Set level to ${action.level}%`;
+        case "light_power":
         case "light_toggle":   return `${name}: Turn ${action.on ? "on" : "off"}`;
         case "hvac_mode":      return `${name}: Set HVAC to ${action.mode}`;
         case "heat_setpoint":  return `${name}: Heat setpoint → ${action.value}°F`;
