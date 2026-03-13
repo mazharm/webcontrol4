@@ -1,11 +1,36 @@
 import type { UnifiedDevice, LightState, ThermostatState, LockState, SensorState, CameraState, SecurityState, MediaState, Scene } from "../types/devices";
 import type { C4LightItem, C4ThermostatItem, C4Variable, C4SceneItem, RingCamera, RingSensor, StateSnapshot } from "../types/api";
 
+function synthesizeRoomId(roomName: string, floorName: string): number | null {
+  const room = roomName.trim();
+  const floor = floorName.trim();
+  if (!room && !floor) return null;
+
+  const key = `${floor}\u0000${room}`;
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash * 31) + key.charCodeAt(i)) | 0;
+  }
+  if (hash === 0) hash = 1;
+  return -Math.abs(hash);
+}
+
+function normalizeRoomId(roomId: number | null | undefined, roomName: string, floorName: string): number | null {
+  if (Number.isFinite(roomId) && Number(roomId) > 0) return Number(roomId);
+  return synthesizeRoomId(roomName, floorName);
+}
+
+function isLightOnValue(value: unknown): boolean {
+  return value === 1 || value === "1" || value === true || value === "true" || value === "on" || value === "On";
+}
+
 export function mapC4Light(item: C4LightItem, vars: Record<string, string>): UnifiedDevice {
-  const level = parseInt(vars["LIGHT_LEVEL"] || "0", 10);
+  const level = parseInt(String(vars["LIGHT_LEVEL"] ?? "0"), 10) || 0;
+  const roomName = item.roomName || "Unknown";
+  const floorName = item.floorName || "Unknown";
   const state: LightState = {
     type: "light",
-    on: level > 0 || vars["LIGHT_STATE"] === "1",
+    on: level > 0 || isLightOnValue(vars["LIGHT_STATE"]),
     level,
   };
   return {
@@ -13,9 +38,9 @@ export function mapC4Light(item: C4LightItem, vars: Record<string, string>): Uni
     source: "control4",
     type: "light",
     name: item.name,
-    roomId: item.roomParentId,
-    roomName: item.roomName || "Unknown",
-    floorName: item.floorName || "Unknown",
+    roomId: normalizeRoomId(item.roomParentId, roomName, floorName),
+    roomName,
+    floorName,
     zoneName: null,
     state,
     lastUpdated: Date.now(),
@@ -23,6 +48,8 @@ export function mapC4Light(item: C4LightItem, vars: Record<string, string>): Uni
 }
 
 export function mapC4Thermostat(item: C4ThermostatItem, vars: Record<string, string>): UnifiedDevice {
+  const roomName = item.roomName || "Unknown";
+  const floorName = item.floorName || "Unknown";
   const state: ThermostatState = {
     type: "thermostat",
     currentTempF: parseFloat(vars["TEMPERATURE_F"] || "0"),
@@ -38,9 +65,9 @@ export function mapC4Thermostat(item: C4ThermostatItem, vars: Record<string, str
     source: "control4",
     type: "thermostat",
     name: item.name,
-    roomId: item.roomParentId,
-    roomName: item.roomName || "Unknown",
-    floorName: item.floorName || "Unknown",
+    roomId: normalizeRoomId(item.roomParentId, roomName, floorName),
+    roomName,
+    floorName,
     zoneName: null,
     state,
     lastUpdated: Date.now(),
@@ -48,6 +75,8 @@ export function mapC4Thermostat(item: C4ThermostatItem, vars: Record<string, str
 }
 
 export function mapC4Lock(itemId: number, name: string, room: string, roomId: number, floor: string, vars: Record<string, string>): UnifiedDevice {
+  const roomName = room || "Unknown";
+  const floorName = floor || "Unknown";
   const state: LockState = {
     type: "lock",
     locked: vars["LOCK_STATE"] === "locked" || vars["LOCK_STATE"] === "1",
@@ -59,9 +88,9 @@ export function mapC4Lock(itemId: number, name: string, room: string, roomId: nu
     source: "control4",
     type: "lock",
     name,
-    roomId,
-    roomName: room,
-    floorName: floor,
+    roomId: normalizeRoomId(roomId, roomName, floorName),
+    roomName,
+    floorName,
     zoneName: null,
     state,
     lastUpdated: Date.now(),
@@ -69,6 +98,8 @@ export function mapC4Lock(itemId: number, name: string, room: string, roomId: nu
 }
 
 export function mapC4Sensor(itemId: number, name: string, room: string, roomId: number, floor: string, vars: Record<string, string>): UnifiedDevice {
+  const roomName = room || "Unknown";
+  const floorName = floor || "Unknown";
   const hasMotion = "MOTION_STATE" in vars || "MOTION_DETECTED" in vars;
   const hasContact = "CONTACT_STATE" in vars;
   const sensorKind = hasMotion ? "motion" : hasContact ? "contact" : "contact";
@@ -87,9 +118,9 @@ export function mapC4Sensor(itemId: number, name: string, room: string, roomId: 
     source: "control4",
     type: "sensor",
     name,
-    roomId,
-    roomName: room,
-    floorName: floor,
+    roomId: normalizeRoomId(roomId, roomName, floorName),
+    roomName,
+    floorName,
     zoneName: null,
     state,
     lastUpdated: Date.now(),
@@ -97,6 +128,8 @@ export function mapC4Sensor(itemId: number, name: string, room: string, roomId: 
 }
 
 export function mapC4Media(itemId: number, name: string, room: string, roomId: number, floor: string, vars: Record<string, string>): UnifiedDevice {
+  const roomName = room || "Unknown";
+  const floorName = floor || "Unknown";
   const state: MediaState = {
     type: "media",
     powerOn: vars["POWER_STATE"] === "1" || vars["POWER_STATE"] === "On",
@@ -108,9 +141,9 @@ export function mapC4Media(itemId: number, name: string, room: string, roomId: n
     source: "control4",
     type: "media",
     name,
-    roomId,
-    roomName: room,
-    floorName: floor,
+    roomId: normalizeRoomId(roomId, roomName, floorName),
+    roomName,
+    floorName,
     zoneName: null,
     state,
     lastUpdated: Date.now(),
@@ -118,6 +151,8 @@ export function mapC4Media(itemId: number, name: string, room: string, roomId: n
 }
 
 export function mapC4Security(itemId: number, name: string, room: string, roomId: number, floor: string, vars: Record<string, string>): UnifiedDevice {
+  const roomName = room || "Unknown";
+  const floorName = floor || "Unknown";
   let mode: SecurityState["mode"] = "disarmed";
   const ps = (vars["PARTITION_STATE"] || "").toLowerCase();
   if (ps.includes("away")) mode = "away";
@@ -133,9 +168,9 @@ export function mapC4Security(itemId: number, name: string, room: string, roomId
     source: "control4",
     type: "security",
     name,
-    roomId,
-    roomName: room,
-    floorName: floor,
+    roomId: normalizeRoomId(roomId, roomName, floorName),
+    roomName,
+    floorName,
     zoneName: null,
     state,
     lastUpdated: Date.now(),

@@ -32,6 +32,10 @@ const initialState: DeviceContextState = {
   lastRefresh: 0,
 };
 
+function isLightOnValue(value: string): boolean {
+  return value === "1" || value === "true" || value === "on" || value === "On";
+}
+
 function updateDeviceVar(state: DeviceContextState, payload: DeviceAction & { type: "UPDATE_DEVICE_VAR" } extends { payload: infer P } ? P : never): DeviceContextState {
   const { itemId, varName, value } = payload as { itemId: number; varName: string; value: string };
   const deviceId = `control4:${itemId}`;
@@ -47,7 +51,7 @@ function updateDeviceVar(state: DeviceContextState, payload: DeviceAction & { ty
       s.level = parseInt(value, 10) || 0;
       s.on = s.level > 0;
     } else if (varName === "LIGHT_STATE") {
-      s.on = value === "1";
+      s.on = isLightOnValue(value);
       if (!s.on) s.level = 0;
     }
     updated.state = s;

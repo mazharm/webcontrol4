@@ -1,8 +1,9 @@
 import { useCallback, useMemo, useState } from "react";
 import { makeStyles, tokens, Card, Button, Text } from "@fluentui/react-components";
 import type { LLMAction } from "../../types/api";
-import type { Routine, RoutineStep } from "../../types/devices";
+import type { Routine, RoutineStep, ThermostatState, LightState } from "../../types/devices";
 import { useAuth } from "../../contexts/AuthContext";
+import { useDeviceContext } from "../../contexts/DeviceContext";
 import { sendCommand } from "../../api/director";
 import { useDevices } from "../../hooks/useDevices";
 import { getRoutines, saveRoutine } from "../../api/routines";
@@ -36,9 +37,54 @@ interface ActionPreviewProps {
 export function ActionPreview({ actions, onComplete }: ActionPreviewProps) {
   const styles = useStyles();
   const { state: auth } = useAuth();
+  const { dispatch } = useDeviceContext();
   const { devices } = useDevices();
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const applyDeviceUpdate = useCallback((action: {
+    type: string;
+    deviceId?: number;
+    level?: unknown;
+    on?: unknown;
+    mode?: unknown;
+    value?: unknown;
+  }) => {
+    if (!action.deviceId) return;
+    const id = `control4:${action.deviceId}`;
+    const existing = devices.get(id);
+
+    if (action.type === "light_level") {
+      const level = Number(action.level ?? 0);
+      dispatch({ type: "UPDATE_DEVICE", payload: { id, state: { level, on: level > 0 } } });
+      return;
+    }
+
+    if (action.type === "light_power" || action.type === "light_toggle") {
+      const current = existing?.state as LightState | undefined;
+      const on = Boolean(action.on);
+      const level = on ? (current?.level && current.level > 0 ? current.level : 100) : 0;
+      dispatch({ type: "UPDATE_DEVICE", payload: { id, state: { level, on } } });
+      return;
+    }
+
+    if (action.type === "hvac_mode") {
+      dispatch({
+        type: "UPDATE_DEVICE",
+        payload: { id, state: { hvacMode: (action.mode as ThermostatState["hvacMode"]) || "Off" } },
+      });
+      return;
+    }
+
+    if (action.type === "heat_setpoint") {
+      dispatch({ type: "UPDATE_DEVICE", payload: { id, state: { heatSetpointF: Number(action.value ?? 68) } } });
+      return;
+    }
+
+    if (action.type === "cool_setpoint") {
+      dispatch({ type: "UPDATE_DEVICE", payload: { id, state: { coolSetpointF: Number(action.value ?? 74) } } });
+    }
+  }, [devices, dispatch]);
 
   const executeRoutineStep = useCallback(async (
     action: {
@@ -66,7 +112,8 @@ export function ActionPreview({ actions, onComplete }: ActionPreviewProps) {
     } else if (action.type === "cool_setpoint") {
       await sendCommand(opts, action.deviceId, "SET_SETPOINT_COOL", { FAHRENHEIT: action.value ?? 74 });
     }
-  }, []);
+    applyDeviceUpdate(action);
+  }, [applyDeviceUpdate]);
 
   const describeSchedule = useCallback((schedule: LLMAction["schedule"]) => {
     if (!schedule?.enabled || !schedule.time || !Array.isArray(schedule.days)) return "";

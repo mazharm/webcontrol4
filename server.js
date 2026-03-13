@@ -871,7 +871,11 @@ app.post("/api/auth/controllers", async (req, res) => {
       agent: c4Agent,
     });
     const json = JSON.parse(data);
-    res.json(json.account || json);
+    const rawControllers = json.account ?? json.accounts ?? json.controllers ?? json;
+    const controllers = Array.isArray(rawControllers)
+      ? rawControllers
+      : (rawControllers && typeof rawControllers === "object" ? [rawControllers] : []);
+    res.json(controllers);
   } catch (err) {
     console.error("Controller list error:", err.message);
     res.status(500).json({ error: "Failed to fetch controllers" });

@@ -73,6 +73,10 @@ function normalize(s: string): string {
   return s.replace(/[_\-"]/g, "").toLowerCase();
 }
 
+function isIpv4Address(value: string | undefined): value is string {
+  return !!value && /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value);
+}
+
 function isMockController(ctrl: Controller & { localIP?: string }) {
   return ctrl.commonName === "mock-controller" || ctrl.address === "mock" || ctrl.localIP === "mock";
 }
@@ -100,8 +104,21 @@ export function ControllerPicker() {
 
       const result = await getDirectorToken(auth.accountToken!, ctrl.commonName);
       const token = result.directorToken;
-      const ip = isMockController(ctrl) ? "mock" : (ctrl.localIP || ctrl.address || "");
-      if (!ip) throw new Error("No discovered controller IP available");
+      let ip = isMockController(ctrl)
+        ? "mock"
+        : (ctrl.localIP || (isIpv4Address(ctrl.address) ? ctrl.address : ""));
+      if (!ip) {
+        const entered = window.prompt(
+          `Controller "${ctrl.name || ctrl.commonName}" was not auto-discovered. Enter its local IP address:`,
+          "",
+        );
+        if (!entered) return;
+        const trimmed = entered.trim();
+        if (!isIpv4Address(trimmed)) {
+          throw new Error("Please enter a valid IPv4 address");
+        }
+        ip = trimmed;
+      }
 
       await connectRealtime({
         ip,
@@ -138,8 +155,7 @@ export function ControllerPicker() {
         }
       }
 
-      const usableControllers = ctrls.filter((c) => isMockController(c) || !!c.localIP);
-      const finalControllers = usableControllers.length > 0 ? usableControllers : [MOCK_CONTROLLER];
+      const finalControllers = ctrls.length > 0 ? ctrls : [MOCK_CONTROLLER];
 
       if (cancelled) return;
       setControllers(finalControllers);

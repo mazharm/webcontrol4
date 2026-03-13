@@ -18,8 +18,12 @@ export async function getControllers(accountToken: string): Promise<AuthControll
   });
   if (!res.ok) throw new Error(`Failed to get controllers: ${res.statusText}`);
   const data = await res.json();
-  // Backend returns array directly, normalize to { controllers: [...] }
-  const list = Array.isArray(data) ? data : data.controllers || data.account || [];
+  const rawList = Array.isArray(data)
+    ? data
+    : data.controllers ?? data.account ?? data.accounts ?? data;
+  const list = Array.isArray(rawList)
+    ? rawList
+    : (rawList && typeof rawList === "object" ? [rawList] : []);
   return {
     controllers: list.map((c: Record<string, string>) => ({
       commonName: c.controllerCommonName || c.commonName || "",
