@@ -84,7 +84,7 @@ export function AppShell({ children }: AppShellProps) {
   const closeNav = useCallback(() => setNavOpen(false), []);
   const closeChat = useCallback(() => setChatOpen(false), []);
 
-  const showNavInline = isWide;
+  const showNavInline = isWide || isMedium;
   const showChatInline = isWide || isMedium;
   const showNavButton = !showNavInline;
   const showChatButton = !showChatInline;
