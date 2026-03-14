@@ -4,6 +4,8 @@ import { Play24Regular } from "@fluentui/react-icons";
 import type { Scene } from "../../types/devices";
 import { useAuth } from "../../contexts/AuthContext";
 import { sendCommand } from "../../api/director";
+import { sendDeviceCommand } from "../../services/device-commands";
+import { isRemoteMode } from "../../config/transport";
 
 interface SceneCardProps {
   scene: Scene;
@@ -13,17 +15,23 @@ export function SceneCard({ scene }: SceneCardProps) {
   const { state: auth } = useAuth();
   const [running, setRunning] = useState(false);
 
+  const remote = isRemoteMode();
+
   const activate = useCallback(async () => {
     setRunning(true);
     try {
-      await sendCommand(
-        { ip: auth.controllerIp || "", token: auth.directorToken || "" },
-        scene.id,
-        "ACTIVATE",
-      );
+      if (remote) {
+        await sendDeviceCommand("control4", scene.id, { on: true });
+      } else {
+        await sendCommand(
+          { ip: auth.controllerIp || "", token: auth.directorToken || "" },
+          scene.id,
+          "ACTIVATE",
+        );
+      }
     } catch { /* ignore */ }
     setTimeout(() => setRunning(false), 1500);
-  }, [scene.id, auth]);
+  }, [scene.id, auth, remote]);
 
   return (
     <Button

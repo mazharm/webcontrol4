@@ -13,6 +13,8 @@ import type { UnifiedDevice, LightState } from "../../types/devices";
 import { useAuth } from "../../contexts/AuthContext";
 import { useDeviceContext } from "../../contexts/DeviceContext";
 import { sendCommand } from "../../api/director";
+import { sendDeviceCommand } from "../../services/device-commands";
+import { isRemoteMode } from "../../config/transport";
 
 const useStyles = makeStyles({
   card: {
@@ -57,6 +59,8 @@ export function LightCard({ device }: LightCardProps) {
     token: auth.directorToken || "",
   };
 
+  const remote = isRemoteMode();
+
   const toggle = useCallback(async () => {
     const newOn = !lightState.on;
     const newLevel = newOn ? (lightState.level > 0 ? lightState.level : 100) : 0;
@@ -65,7 +69,11 @@ export function LightCard({ device }: LightCardProps) {
       payload: { id: device.id, state: { type: "light", on: newOn, level: newLevel } },
     });
     try {
-      await sendCommand(directorOpts, parseInt(c4Id), newOn ? "SET_LEVEL" : "SET_LEVEL", { LEVEL: newLevel });
+      if (remote) {
+        await sendDeviceCommand("control4", c4Id, { level: newLevel });
+      } else {
+        await sendCommand(directorOpts, parseInt(c4Id), "SET_LEVEL", { LEVEL: newLevel });
+      }
     } catch {
       // revert on error
       dispatch({
@@ -73,7 +81,7 @@ export function LightCard({ device }: LightCardProps) {
         payload: { id: device.id, state: lightState },
       });
     }
-  }, [lightState, device.id, c4Id, directorOpts, dispatch]);
+  }, [lightState, device.id, c4Id, directorOpts, dispatch, remote]);
 
   const onSlider = useCallback((value: number) => {
     dispatch({
@@ -83,12 +91,16 @@ export function LightCard({ device }: LightCardProps) {
     clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       try {
-        await sendCommand(directorOpts, parseInt(c4Id), "SET_LEVEL", { LEVEL: value });
+        if (remote) {
+          await sendDeviceCommand("control4", c4Id, { level: value });
+        } else {
+          await sendCommand(directorOpts, parseInt(c4Id), "SET_LEVEL", { LEVEL: value });
+        }
       } catch {
         // ignore
       }
     }, 300);
-  }, [device.id, c4Id, directorOpts, dispatch]);
+  }, [device.id, c4Id, directorOpts, dispatch, remote]);
 
   return (
     <Card className={styles.card}>

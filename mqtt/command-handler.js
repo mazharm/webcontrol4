@@ -13,6 +13,7 @@ let executeScheduledCommand = null;
 let executeRoutineSteps = null;
 let ringModule = null;
 let routinesFile = null;
+let stateMachine = null;
 
 /**
  * Initialize the command handler.
@@ -23,11 +24,12 @@ let routinesFile = null;
  * @param {object}   opts.ring                    - ring-client module
  * @param {string}   opts.routinesFile            - path to data/routines.json
  */
-function init({ executeScheduledCommand: execCmd, executeRoutineSteps: execRoutine, ring, routinesFile: rf }) {
+function init({ executeScheduledCommand: execCmd, executeRoutineSteps: execRoutine, ring, routinesFile: rf, stateMachine: sm }) {
   executeScheduledCommand = execCmd;
   executeRoutineSteps = execRoutine;
   ringModule = ring;
   routinesFile = rf;
+  stateMachine = sm;
 
   const homeId = mqttClient.getHomeId();
 
@@ -87,23 +89,32 @@ async function handleControl4Command(deviceId, payload) {
     throw new Error(`Invalid Control4 device ID: ${deviceId}`);
   }
 
-  // Map MQTT command fields to Director commands
+  // Map MQTT command fields to Director commands.
+  // Apply state change optimistically BEFORE sending to Director so that
+  // SSE listeners (local web client) update instantly.
   if (payload.level !== undefined) {
+    applyStateChange(itemId, "LIGHT_LEVEL", String(payload.level));
     await executeScheduledCommand(itemId, "SET_LEVEL", { LEVEL: payload.level });
   }
   if (payload.on !== undefined) {
-    await executeScheduledCommand(itemId, "SET_LEVEL", { LEVEL: payload.on ? 100 : 0 });
+    const level = payload.on ? 100 : 0;
+    applyStateChange(itemId, "LIGHT_LEVEL", String(level));
+    await executeScheduledCommand(itemId, "SET_LEVEL", { LEVEL: level });
   }
   if (payload.hvacMode !== undefined) {
+    applyStateChange(itemId, "HVAC_MODE", String(payload.hvacMode));
     await executeScheduledCommand(itemId, "SET_MODE_HVAC", { MODE: payload.hvacMode });
   }
   if (payload.heatSetpointF !== undefined) {
+    applyStateChange(itemId, "HEAT_SETPOINT_F", String(payload.heatSetpointF));
     await executeScheduledCommand(itemId, "SET_SETPOINT_HEAT", { FAHRENHEIT: payload.heatSetpointF });
   }
   if (payload.coolSetpointF !== undefined) {
+    applyStateChange(itemId, "COOL_SETPOINT_F", String(payload.coolSetpointF));
     await executeScheduledCommand(itemId, "SET_SETPOINT_COOL", { FAHRENHEIT: payload.coolSetpointF });
   }
   if (payload.fanMode !== undefined) {
+    applyStateChange(itemId, "FAN_MODE", String(payload.fanMode));
     await executeScheduledCommand(itemId, "SET_FAN_MODE", { MODE: payload.fanMode });
   }
 
@@ -174,6 +185,25 @@ async function handleRoutineExecute(routineId, homeId) {
       error: err.message,
       ts: new Date().toISOString(),
     });
+  }
+}
+
+/**
+ * Immediately apply a state change to the StateMachine so that SSE listeners
+ * (local web client) and MQTT state publishers (remote client) are notified
+ * without waiting for the Control4 WebSocket round-trip.
+ */
+function applyStateChange(itemId, varName, value) {
+  if (!stateMachine) {
+    console.warn(`[mqtt-cmd] applyStateChange: stateMachine is NULL, skipping`);
+    return;
+  }
+  console.log(`[mqtt-cmd] applyStateChange: itemId=${itemId}, varName=${varName}, value=${value}`);
+  try {
+    stateMachine.handleDeviceEvent({ itemId, varName, value });
+    console.log(`[mqtt-cmd] applyStateChange: handleDeviceEvent completed`);
+  } catch (err) {
+    console.error(`[mqtt-cmd] applyStateChange failed: ${err.message}`);
   }
 }
 

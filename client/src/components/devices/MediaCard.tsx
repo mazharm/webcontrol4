@@ -15,6 +15,8 @@ import type { UnifiedDevice, MediaState } from "../../types/devices";
 import { useAuth } from "../../contexts/AuthContext";
 import { useDeviceContext } from "../../contexts/DeviceContext";
 import { sendCommand } from "../../api/director";
+import { sendDeviceCommand } from "../../services/device-commands";
+import { isRemoteMode } from "../../config/transport";
 
 const useStyles = makeStyles({
   card: { padding: "12px", minWidth: "200px" },
@@ -53,15 +55,21 @@ export function MediaCard({ device }: { device: UnifiedDevice }) {
 
   const directorOpts = { ip: auth.controllerIp || "", token: auth.directorToken || "" };
 
+  const remote = isRemoteMode();
+
   const togglePower = useCallback(async () => {
     const newState = { ...ms, powerOn: !ms.powerOn };
     dispatch({ type: "UPDATE_DEVICE", payload: { id: device.id, state: newState } });
     try {
-      await sendCommand(directorOpts, c4Id, ms.powerOn ? "OFF" : "ON");
+      if (remote) {
+        await sendDeviceCommand("control4", c4Id, { on: !ms.powerOn });
+      } else {
+        await sendCommand(directorOpts, c4Id, ms.powerOn ? "OFF" : "ON");
+      }
     } catch {
       dispatch({ type: "UPDATE_DEVICE", payload: { id: device.id, state: ms } });
     }
-  }, [ms, device.id, c4Id, directorOpts, dispatch]);
+  }, [ms, device.id, c4Id, directorOpts, dispatch, remote]);
 
   return (
     <Card className={styles.card}>

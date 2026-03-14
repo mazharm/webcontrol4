@@ -15,6 +15,8 @@ import type { UnifiedDevice, LockState } from "../../types/devices";
 import { useAuth } from "../../contexts/AuthContext";
 import { useDeviceContext } from "../../contexts/DeviceContext";
 import { sendCommand } from "../../api/director";
+import { sendDeviceCommand } from "../../services/device-commands";
+import { isRemoteMode } from "../../config/transport";
 
 const useStyles = makeStyles({
   card: { padding: "12px", minWidth: "200px" },
@@ -51,19 +53,25 @@ export function LockCard({ device }: { device: UnifiedDevice }) {
   const ls = device.state as LockState;
   const c4Id = parseInt(device.id.replace("control4:", ""));
 
+  const remote = isRemoteMode();
+
   const toggle = useCallback(async () => {
     const newLocked = !ls.locked;
     dispatch({ type: "UPDATE_DEVICE", payload: { id: device.id, state: { ...ls, locked: newLocked } } });
     try {
-      await sendCommand(
-        { ip: auth.controllerIp || "", token: auth.directorToken || "" },
-        c4Id,
-        newLocked ? "LOCK" : "UNLOCK",
-      );
+      if (remote) {
+        await sendDeviceCommand("control4", c4Id, { on: !newLocked });
+      } else {
+        await sendCommand(
+          { ip: auth.controllerIp || "", token: auth.directorToken || "" },
+          c4Id,
+          newLocked ? "LOCK" : "UNLOCK",
+        );
+      }
     } catch {
       dispatch({ type: "UPDATE_DEVICE", payload: { id: device.id, state: ls } });
     }
-  }, [ls, device.id, c4Id, auth, dispatch]);
+  }, [ls, device.id, c4Id, auth, dispatch, remote]);
 
   return (
     <Card className={styles.card}>

@@ -56,6 +56,7 @@ async function init(opts) {
     executeRoutineSteps: opts.executeRoutineSteps,
     ring: opts.ring,
     routinesFile: opts.routinesFile,
+    stateMachine: opts.stateMachine,
   });
 
   rpcHandler.init({

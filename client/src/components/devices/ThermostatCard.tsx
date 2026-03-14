@@ -13,6 +13,8 @@ import type { UnifiedDevice, ThermostatState } from "../../types/devices";
 import { useAuth } from "../../contexts/AuthContext";
 import { useDeviceContext } from "../../contexts/DeviceContext";
 import { sendCommand } from "../../api/director";
+import { sendDeviceCommand } from "../../services/device-commands";
+import { isRemoteMode } from "../../config/transport";
 
 const useStyles = makeStyles({
   card: { padding: "12px", minWidth: "220px" },
@@ -80,28 +82,38 @@ export function ThermostatCard({ device }: ThermostatCardProps) {
     token: auth.directorToken || "",
   };
 
+  const remote = isRemoteMode();
+
   const adjustSetpoint = useCallback(async (field: "heatSetpointF" | "coolSetpointF", delta: number) => {
     const newVal = ts[field] + delta;
     if (newVal < 32 || newVal > 120) return;
     const newState = { ...ts, [field]: newVal };
     dispatch({ type: "UPDATE_DEVICE", payload: { id: device.id, state: newState } });
-    const command = field === "heatSetpointF" ? "SET_SETPOINT_HEAT" : "SET_SETPOINT_COOL";
     try {
-      await sendCommand(directorOpts, c4Id, command, { FAHRENHEIT: newVal });
+      if (remote) {
+        await sendDeviceCommand("control4", c4Id, { [field]: newVal });
+      } else {
+        const command = field === "heatSetpointF" ? "SET_SETPOINT_HEAT" : "SET_SETPOINT_COOL";
+        await sendCommand(directorOpts, c4Id, command, { FAHRENHEIT: newVal });
+      }
     } catch {
       dispatch({ type: "UPDATE_DEVICE", payload: { id: device.id, state: ts } });
     }
-  }, [ts, device.id, c4Id, directorOpts, dispatch]);
+  }, [ts, device.id, c4Id, directorOpts, dispatch, remote]);
 
   const changeMode = useCallback(async (mode: string) => {
     const newState = { ...ts, hvacMode: mode as ThermostatState["hvacMode"] };
     dispatch({ type: "UPDATE_DEVICE", payload: { id: device.id, state: newState } });
     try {
-      await sendCommand(directorOpts, c4Id, "SET_MODE_HVAC", { MODE: mode });
+      if (remote) {
+        await sendDeviceCommand("control4", c4Id, { hvacMode: mode });
+      } else {
+        await sendCommand(directorOpts, c4Id, "SET_MODE_HVAC", { MODE: mode });
+      }
     } catch {
       dispatch({ type: "UPDATE_DEVICE", payload: { id: device.id, state: ts } });
     }
-  }, [ts, device.id, c4Id, directorOpts, dispatch]);
+  }, [ts, device.id, c4Id, directorOpts, dispatch, remote]);
 
   return (
     <Card className={styles.card}>
