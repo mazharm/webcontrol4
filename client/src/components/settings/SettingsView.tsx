@@ -15,7 +15,7 @@ import {
 } from "@fluentui/react-components";
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../contexts/ThemeContext";
-import { getSettings, saveSettings, goveeLogin, goveeDisconnect } from "../../api/settings";
+import { getSettings, saveSettings, goveeLogin, goveeDisconnect, mqttConnect, mqttDisconnect } from "../../api/settings";
 import { getModels } from "../../api/llm";
 import { getRingStatus, ringLogin, ringVerify } from "../../api/ring";
 import type { SettingsResponse, RingStatusResponse } from "../../types/api";
@@ -88,6 +88,12 @@ export function SettingsView() {
   const [ringPrompt, setRingPrompt] = useState<string | null>(null);
   const [ringBusy, setRingBusy] = useState(false);
   const [ringError, setRingError] = useState<string | null>(null);
+  const [mqttBrokerUrl, setMqttBrokerUrl] = useState("");
+  const [mqttUsername, setMqttUsername] = useState("");
+  const [mqttPassword, setMqttPassword] = useState("");
+  const [mqttHomeId, setMqttHomeId] = useState("");
+  const [mqttBusy, setMqttBusy] = useState(false);
+  const [mqttError, setMqttError] = useState<string | null>(null);
 
   const refreshRingStatus = useCallback(async () => {
     const status = await getRingStatus();
@@ -107,6 +113,9 @@ export function SettingsView() {
         setSelectedModel(s.anthropicModel || "");
         setModels(m);
         setRingStatus(r);
+        if (s.mqttBrokerUrl) setMqttBrokerUrl(s.mqttBrokerUrl);
+        if (s.mqttUsername) setMqttUsername(s.mqttUsername);
+        if (s.mqttHomeId) setMqttHomeId(s.mqttHomeId);
       } catch { /* ignore */ }
       setLoading(false);
     })();
@@ -198,6 +207,42 @@ export function SettingsView() {
     }
     setRingBusy(false);
   }, [refreshRingStatus, ringCode]);
+
+  const handleMqttConnect = useCallback(async () => {
+    setMqttBusy(true);
+    setMqttError(null);
+    try {
+      await mqttConnect({
+        brokerUrl: mqttBrokerUrl,
+        username: mqttUsername,
+        password: mqttPassword,
+        homeId: mqttHomeId || undefined,
+      });
+      setMqttPassword("");
+      const updated = await getSettings();
+      setSettings(updated);
+    } catch (err) {
+      setMqttError(err instanceof Error ? err.message : "MQTT connection failed");
+    }
+    setMqttBusy(false);
+  }, [mqttBrokerUrl, mqttUsername, mqttPassword, mqttHomeId]);
+
+  const handleMqttDisconnect = useCallback(async () => {
+    setMqttBusy(true);
+    setMqttError(null);
+    try {
+      await mqttDisconnect();
+      setMqttBrokerUrl("");
+      setMqttUsername("");
+      setMqttPassword("");
+      setMqttHomeId("");
+      const updated = await getSettings();
+      setSettings(updated);
+    } catch (err) {
+      setMqttError(err instanceof Error ? err.message : "Failed to disconnect MQTT");
+    }
+    setMqttBusy(false);
+  }, []);
 
   if (loading) return <Spinner label="Loading settings..." />;
 
@@ -391,6 +436,82 @@ export function SettingsView() {
               disabled={goveeSaving || !goveeEmail || !goveePassword}
             >
               {goveeSaving ? "Connecting..." : "Connect Govee"}
+            </Button>
+          </div>
+        )}
+      </Card>
+
+      {/* MQTT Cloud Bridge */}
+      <Card className={styles.card}>
+        <div className={styles.cardTitle}>MQTT Cloud Bridge</div>
+        <div className={styles.status}>
+          <span>Status:</span>
+          <Badge appearance="filled" color={settings?.mqttConnected ? "success" : "warning"}>
+            {settings?.mqttConnected ? "Connected" : "Not connected"}
+          </Badge>
+        </div>
+        {mqttError && (
+          <MessageBar intent="error">
+            <MessageBarBody>{mqttError}</MessageBarBody>
+          </MessageBar>
+        )}
+        {settings?.mqttConnected ? (
+          <div className={styles.column}>
+            <Text className={styles.help}>Broker: {settings.mqttBrokerUrl}</Text>
+            <Text className={styles.help}>Home ID: {settings.mqttHomeId || "home1"}</Text>
+            <Button
+              appearance="outline"
+              onClick={handleMqttDisconnect}
+              disabled={mqttBusy}
+              style={{ marginTop: "8px" }}
+            >
+              {mqttBusy ? "Disconnecting..." : "Disconnect"}
+            </Button>
+          </div>
+        ) : (
+          <div className={styles.column}>
+            <div className={styles.field}>
+              <label className={styles.label}>Broker URL</label>
+              <Input
+                value={mqttBrokerUrl}
+                onChange={(_, d) => setMqttBrokerUrl(d.value)}
+                placeholder="mqtts://xxx.hivemq.cloud:8883"
+              />
+            </div>
+            <div className={styles.field}>
+              <label className={styles.label}>Username</label>
+              <Input
+                value={mqttUsername}
+                onChange={(_, d) => setMqttUsername(d.value)}
+                placeholder="MQTT username"
+              />
+            </div>
+            <div className={styles.field}>
+              <label className={styles.label}>Password</label>
+              <Input
+                type="password"
+                value={mqttPassword}
+                onChange={(_, d) => setMqttPassword(d.value)}
+                placeholder={settings?.hasMqttPassword ? "Password is set (enter to change)" : "MQTT password"}
+              />
+            </div>
+            <div className={styles.field}>
+              <label className={styles.label}>Home ID</label>
+              <Input
+                value={mqttHomeId}
+                onChange={(_, d) => setMqttHomeId(d.value)}
+                placeholder="home1"
+              />
+            </div>
+            <Text className={styles.help}>
+              Connect to an MQTT broker (e.g. HiveMQ Cloud) to enable remote access via the cloud.
+            </Text>
+            <Button
+              appearance="primary"
+              onClick={handleMqttConnect}
+              disabled={mqttBusy || !mqttBrokerUrl || !mqttUsername || !mqttPassword}
+            >
+              {mqttBusy ? "Connecting..." : "Connect MQTT"}
             </Button>
           </div>
         )}

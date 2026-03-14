@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   makeStyles,
   tokens,
@@ -14,6 +14,10 @@ import {
 } from "@fluentui/react-icons";
 import type { UnifiedDevice, CameraState } from "../../types/devices";
 import { toggleCameraLight, toggleCameraSiren } from "../../api/ring";
+import { isRemoteMode } from "../../config/transport";
+import { getSnapshot } from "../../services/mqtt-rpc";
+import { sendDeviceCommand } from "../../services/device-commands";
+import { getCached, setCache } from "../../services/rpc-cache";
 
 const useStyles = makeStyles({
   card: { padding: "12px", minWidth: "220px" },
@@ -48,18 +52,52 @@ export function CameraCard({ device }: { device: UnifiedDevice }) {
   const cs = device.state as CameraState;
   const ringId = device.id.replace("ring:", "");
   const [imgError, setImgError] = useState(false);
+  const remote = isRemoteMode();
+  const cacheKey = `snapshot:${ringId}`;
+  const [remoteSnapshotUrl, setRemoteSnapshotUrl] = useState<string | null>(
+    () => getCached<string>(cacheKey) ?? null,
+  );
+
+  // In remote mode, fetch snapshot via MQTT RPC (only for online cameras)
+  useEffect(() => {
+    if (!remote || !cs.online) return;
+    let cancelled = false;
+    getSnapshot(ringId)
+      .then((result) => {
+        if (!cancelled) {
+          setRemoteSnapshotUrl(result.image);
+          setCache(cacheKey, result.image);
+          setImgError(false);
+        }
+      })
+      .catch(() => {
+        // Only show error if there's no cached image to fall back on
+        if (!cancelled && !getCached(cacheKey)) setImgError(true);
+      });
+    return () => { cancelled = true; };
+  }, [remote, ringId, cs.online, cacheKey]);
+
+  const snapshotSrc = remote ? remoteSnapshotUrl : cs.snapshotUrl;
 
   const onToggleLight = useCallback(async () => {
     try {
-      await toggleCameraLight(ringId, !cs.lightOn);
+      if (remote) {
+        await sendDeviceCommand("ring", ringId, { light: !cs.lightOn });
+      } else {
+        await toggleCameraLight(ringId, !cs.lightOn);
+      }
     } catch { /* ignore */ }
-  }, [ringId, cs.lightOn]);
+  }, [remote, ringId, cs.lightOn]);
 
   const onToggleSiren = useCallback(async () => {
     try {
-      await toggleCameraSiren(ringId, !cs.sirenOn);
+      if (remote) {
+        await sendDeviceCommand("ring", ringId, { siren: !cs.sirenOn });
+      } else {
+        await toggleCameraSiren(ringId, !cs.sirenOn);
+      }
     } catch { /* ignore */ }
-  }, [ringId, cs.sirenOn]);
+  }, [remote, ringId, cs.sirenOn]);
 
   return (
     <Card className={styles.card}>
@@ -70,9 +108,9 @@ export function CameraCard({ device }: { device: UnifiedDevice }) {
           {cs.online ? "Online" : "Offline"}
         </Badge>
       </div>
-      {cs.snapshotUrl && !imgError && (
+      {snapshotSrc && !imgError && (
         <img
-          src={cs.snapshotUrl}
+          src={snapshotSrc}
           alt={`${device.name} snapshot`}
           className={styles.snapshot}
           onError={() => setImgError(true)}

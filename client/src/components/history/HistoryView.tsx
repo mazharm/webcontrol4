@@ -12,6 +12,9 @@ import {
 import { useDevicesByType } from "../../hooks/useDevices";
 import { useFloorTree } from "../../hooks/useDevices";
 import { getHistory } from "../../api/history";
+import { isRemoteMode } from "../../config/transport";
+import { getAppHistory } from "../../services/mqtt-rpc";
+import { getCached, setCache } from "../../services/rpc-cache";
 import { LightHistoryChart } from "./LightHistoryChart";
 import { TempHistoryChart } from "./TempHistoryChart";
 import { FloorActivityChart } from "./FloorActivityChart";
@@ -63,33 +66,50 @@ export function HistoryView() {
   }, [tab, lights, thermostats, floors, selectedId]);
 
   const fetchData = useCallback(async () => {
-    setLoading(true);
-    try {
-      if (tab === "floor") {
+    const remote = isRemoteMode();
+    const fetchHistory = remote ? getAppHistory : getHistory;
+
+    if (tab === "floor") {
+      const cacheKey = `history:floor:__all__`;
+      const cached = getCached<FloorHistorySeries[]>(cacheKey);
+      if (cached) { setFloorData(cached); setData([]); }
+      setLoading(!cached);
+      try {
         const result = await Promise.all(
           floors.map(async (floor) => ({
             floor: floor.name,
-            points: await getHistory("floor", floor.name),
+            points: await fetchHistory("floor", floor.name),
           })),
         );
         setFloorData(result);
         setData([]);
-      } else {
-        if (!selectedId) {
-          setData([]);
-          setFloorData([]);
-          return;
-        }
-        const type = tab === "lights" ? "light" : "thermo";
-        const result = await getHistory(type, selectedId);
+        setCache(cacheKey, result);
+      } catch {
+        if (!cached) { setData([]); setFloorData([]); }
+      } finally {
+        setLoading(false);
+      }
+    } else {
+      if (!selectedId) {
+        setData([]);
+        setFloorData([]);
+        return;
+      }
+      const type = tab === "lights" ? "light" : "thermo";
+      const cacheKey = `history:${type}:${selectedId}`;
+      const cached = getCached<HistoryPoint[]>(cacheKey);
+      if (cached) { setData(cached); setFloorData([]); }
+      setLoading(!cached);
+      try {
+        const result = await fetchHistory(type, selectedId);
         setData(result);
         setFloorData([]);
+        setCache(cacheKey, result);
+      } catch {
+        if (!cached) { setData([]); setFloorData([]); }
+      } finally {
+        setLoading(false);
       }
-    } catch {
-      setData([]);
-      setFloorData([]);
-    } finally {
-      setLoading(false);
     }
   }, [floors, selectedId, tab]);
 

@@ -48,3 +48,26 @@ export async function saveGoveeSensorRooms(mapping: Record<string, string>): Pro
   });
   if (!res.ok) throw new Error("Failed to save sensor rooms");
 }
+
+export async function mqttConnect(config: {
+  brokerUrl: string;
+  username: string;
+  password: string;
+  homeId?: string;
+}): Promise<{ ok: boolean; connected: boolean }> {
+  const res = await fetch("/api/mqtt/connect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "MQTT connection failed");
+  }
+  return res.json();
+}
+
+export async function mqttDisconnect(): Promise<void> {
+  const res = await fetch("/api/mqtt/disconnect", { method: "POST" });
+  if (!res.ok) throw new Error("Failed to disconnect MQTT");
+}

@@ -10,6 +10,8 @@ import { getState } from "./api/director";
 import { getCameras, getSensors, getAlarmMode } from "./api/ring";
 import { recordHistory } from "./api/history";
 import { mapStateDevices, mapRingCamera, mapRingSensor, mapC4Scene } from "./utils/deviceMapping";
+import { isRemoteMode } from "./config/transport";
+import { TransportProvider } from "./contexts/TransportProvider";
 import type { UnifiedDevice, Alert } from "./types/devices";
 import type { StateSnapshot } from "./types/api";
 
@@ -46,7 +48,10 @@ const useStyles = makeStyles({
   },
 });
 
-function ConnectedApp() {
+/**
+ * ConnectedApp for LOCAL mode — existing REST/SSE flow, unchanged.
+ */
+function LocalConnectedApp() {
   const styles = useStyles();
   const { dispatch } = useDeviceContext();
   const [initializing, setInitializing] = useState(true);
@@ -172,13 +177,35 @@ function ConnectedApp() {
     };
   }, [captureHistory, dispatch, loadC4Snapshot, loadRingDevices]);
 
+  return <AppRoutes initializing={initializing} />;
+}
+
+/**
+ * ConnectedApp for MQTT mode — state is fed by MqttProvider.
+ */
+function MqttConnectedApp() {
+  const { state: deviceState } = useDeviceContext();
+  const initializing = deviceState.connectionStatus === "connecting" || deviceState.connectionStatus === "disconnected";
+
+  return <AppRoutes initializing={initializing && deviceState.devices.size === 0} />;
+}
+
+/**
+ * Shared route definitions for both local and remote modes.
+ */
+function AppRoutes({ initializing }: { initializing: boolean }) {
+  const styles = useStyles();
+  const remote = isRemoteMode();
+
   return (
     <AppShell>
       {initializing ? (
         <div className={styles.loadingState}>
-          <Spinner size="large" label="Loading your controller data..." labelPosition="below" />
+          <Spinner size="large" label={remote ? "Connecting to MQTT broker..." : "Loading your controller data..."} labelPosition="below" />
           <Text className={styles.loadingHint}>
-            Your devices are on the way. The first load can take a few seconds, especially while optional integrations finish checking in.
+            {remote
+              ? "Waiting for device state from the home bridge."
+              : "Your devices are on the way. The first load can take a few seconds, especially while optional integrations finish checking in."}
           </Text>
         </div>
       ) : (
@@ -193,7 +220,7 @@ function ConnectedApp() {
           <Route path="/water-leak" element={<WaterLeakView />} />
           <Route path="/history" element={<HistoryView />} />
           <Route path="/routines" element={<RoutinesView />} />
-          <Route path="/settings" element={<SettingsView />} />
+          {!remote && <Route path="/settings" element={<SettingsView />} />}
           <Route path="/more" element={<MoreView />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
@@ -205,13 +232,24 @@ function ConnectedApp() {
 export function App() {
   const { mode } = useTheme();
   const { state: auth } = useAuth();
+  const remote = isRemoteMode();
 
   return (
     <FluentProvider theme={mode === "dark" ? darkTheme : lightTheme} style={{ height: "100%" }}>
-      {auth.stage === "checking" && <LoginView />}
-      {auth.stage === "login" && <LoginView />}
-      {auth.stage === "controller-select" && <ControllerPicker />}
-      {auth.stage === "connected" && <ConnectedApp />}
+      <TransportProvider>
+        {remote ? (
+          // MQTT mode: skip OAuth, go straight to connected app
+          <MqttConnectedApp />
+        ) : (
+          // Local mode: existing auth flow
+          <>
+            {auth.stage === "checking" && <LoginView />}
+            {auth.stage === "login" && <LoginView />}
+            {auth.stage === "controller-select" && <ControllerPicker />}
+            {auth.stage === "connected" && <LocalConnectedApp />}
+          </>
+        )}
+      </TransportProvider>
     </FluentProvider>
   );
 }

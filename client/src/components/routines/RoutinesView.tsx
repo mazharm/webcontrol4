@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback } from "react";
 import { makeStyles, tokens, Text, Button, Spinner } from "@fluentui/react-components";
 import { Add24Regular } from "@fluentui/react-icons";
 import { getRoutines } from "../../api/routines";
+import { isRemoteMode } from "../../config/transport";
+import { getRemoteRoutines } from "../../services/mqtt-rpc";
 import { RoutineCard } from "./RoutineCard";
 import { RoutineEditor } from "./RoutineEditor";
 import type { Routine } from "../../types/devices";
@@ -32,6 +34,7 @@ const useStyles = makeStyles({
 
 export function RoutinesView() {
   const styles = useStyles();
+  const remote = isRemoteMode();
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [loading, setLoading] = useState(true);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -40,13 +43,13 @@ export function RoutinesView() {
   const fetchRoutines = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await getRoutines();
+      const data = remote ? await getRemoteRoutines() : await getRoutines();
       setRoutines(data);
     } catch {
       setRoutines([]);
     }
     setLoading(false);
-  }, []);
+  }, [remote]);
 
   useEffect(() => { fetchRoutines(); }, [fetchRoutines]);
 
@@ -57,25 +60,27 @@ export function RoutinesView() {
     <div className={styles.root}>
       <div className={styles.header}>
         <Text className={styles.title}>Routines</Text>
-        <Button icon={<Add24Regular />} appearance="primary" onClick={openNew}>New Routine</Button>
+        {!remote && <Button icon={<Add24Regular />} appearance="primary" onClick={openNew}>New Routine</Button>}
       </div>
       {loading ? (
         <Spinner label="Loading routines..." />
       ) : routines.length === 0 ? (
-        <div className={styles.empty}>No routines yet. Create one to get started.</div>
+        <div className={styles.empty}>No routines yet.</div>
       ) : (
         <div className={styles.grid}>
           {routines.map((r) => (
-            <RoutineCard key={r.id} routine={r} onEdit={openEdit} onDeleted={fetchRoutines} />
+            <RoutineCard key={r.id} routine={r} onEdit={openEdit} onDeleted={fetchRoutines} remote={remote} />
           ))}
         </div>
       )}
-      <RoutineEditor
-        routine={editingRoutine}
-        open={editorOpen}
-        onClose={() => setEditorOpen(false)}
-        onSaved={fetchRoutines}
-      />
+      {!remote && (
+        <RoutineEditor
+          routine={editingRoutine}
+          open={editorOpen}
+          onClose={() => setEditorOpen(false)}
+          onSaved={fetchRoutines}
+        />
+      )}
     </div>
   );
 }

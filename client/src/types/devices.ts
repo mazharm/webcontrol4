@@ -1,4 +1,4 @@
-export type DeviceSource = "control4" | "ring";
+export type DeviceSource = "control4" | "ring" | "govee";
 export type DeviceType = "light" | "thermostat" | "lock" | "sensor" | "camera" | "security" | "media";
 
 export interface UnifiedDevice {

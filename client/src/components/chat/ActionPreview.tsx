@@ -7,6 +7,8 @@ import { useDeviceContext } from "../../contexts/DeviceContext";
 import { sendCommand } from "../../api/director";
 import { useDevices } from "../../hooks/useDevices";
 import { getRoutines, saveRoutine } from "../../api/routines";
+import { isRemoteMode } from "../../config/transport";
+import { sendDeviceCommand } from "../../services/device-commands";
 
 const useStyles = makeStyles({
   card: {
@@ -171,8 +173,26 @@ export function ActionPreview({ actions, onComplete }: ActionPreviewProps) {
     return routineStep;
   }, [devices]);
 
+  const executeRemoteAction = useCallback(async (action: LLMAction) => {
+    if (!action.deviceId) return;
+    if (action.type === "light_level") {
+      await sendDeviceCommand("control4", action.deviceId, { level: action.level ?? 0 });
+    } else if (action.type === "light_power" || action.type === "light_toggle") {
+      await sendDeviceCommand("control4", action.deviceId, { on: action.on });
+    } else if (action.type === "hvac_mode") {
+      await sendDeviceCommand("control4", action.deviceId, { hvacMode: action.mode ?? "Off" });
+    } else if (action.type === "heat_setpoint") {
+      await sendDeviceCommand("control4", action.deviceId, { heatSetpointF: action.value ?? 68 });
+    } else if (action.type === "cool_setpoint") {
+      await sendDeviceCommand("control4", action.deviceId, { coolSetpointF: action.value ?? 74 });
+    }
+    applyDeviceUpdate(action);
+  }, [applyDeviceUpdate]);
+
   const execute = useCallback(async () => {
-    if (!auth.controllerIp || !auth.directorToken) {
+    const remote = isRemoteMode();
+
+    if (!remote && (!auth.controllerIp || !auth.directorToken)) {
       setError("Controller connection details are missing.");
       return;
     }
@@ -185,18 +205,31 @@ export function ActionPreview({ actions, onComplete }: ActionPreviewProps) {
     for (const action of actions) {
       try {
         if (["light_level", "light_power", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"].includes(action.type)) {
-          await executeRoutineStep(action, opts);
-        } else if (action.type === "run_routine") {
-          const routines = await getRoutines();
-          const routine = routines.find((candidate) => candidate.id === action.routineId);
-          if (!routine) {
-            throw new Error(`Routine ${action.routineId || "unknown"} not found.`);
+          if (remote) {
+            await executeRemoteAction(action);
+          } else {
+            await executeRoutineStep(action, opts);
           }
-
-          for (const step of routine.steps) {
-            await executeRoutineStep(step, opts);
+        } else if (action.type === "run_routine") {
+          if (remote) {
+            // In remote mode, publish routine execute command via MQTT
+            const { executeRoutine } = await import("../../services/device-commands");
+            executeRoutine(action.routineId || "");
+          } else {
+            const routines = await getRoutines();
+            const routine = routines.find((candidate) => candidate.id === action.routineId);
+            if (!routine) {
+              throw new Error(`Routine ${action.routineId || "unknown"} not found.`);
+            }
+            for (const step of routine.steps) {
+              await executeRoutineStep(step, opts);
+            }
           }
         } else if (action.type === "create_routine") {
+          if (remote) {
+            // Routine creation not supported in remote mode
+            throw new Error("Routine creation is not available remotely.");
+          }
           if (!action.name || !Array.isArray(action.steps) || action.steps.length === 0) {
             throw new Error("Routine action is missing a name or steps.");
           }
@@ -232,7 +265,7 @@ export function ActionPreview({ actions, onComplete }: ActionPreviewProps) {
     }
 
     onComplete();
-  }, [actions, auth.controllerIp, auth.directorToken, describeAction, executeRoutineStep, onComplete, toRoutineStep]);
+  }, [actions, auth.controllerIp, auth.directorToken, describeAction, executeRemoteAction, executeRoutineStep, onComplete, toRoutineStep]);
 
   return (
     <Card className={styles.card}>

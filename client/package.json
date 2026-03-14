@@ -12,6 +12,7 @@
     "@fluentui/react-components": "^9.56.0",
     "@fluentui/react-icons": "^2.0.258",
     "chart.js": "^4.4.7",
+    "mqtt": "^5.15.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.28.0"

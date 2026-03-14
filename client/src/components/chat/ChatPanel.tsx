@@ -5,6 +5,8 @@ import { useChat } from "../../contexts/ChatContext";
 import { useDevices } from "../../hooks/useDevices";
 import { chatWithLLM } from "../../api/llm";
 import { getRoutines } from "../../api/routines";
+import { isRemoteMode } from "../../config/transport";
+import { llmChat as mqttLlmChat } from "../../services/mqtt-rpc";
 import { ChatMessages } from "./ChatMessages";
 import { ChatInput } from "./ChatInput";
 import type { LLMControlContext } from "../../types/api";
@@ -99,11 +101,13 @@ export function ChatPanel({ overlay, mobile }: ChatPanelProps) {
       });
 
     let routines: LLMControlContext["routines"] = [];
-    try {
-      const savedRoutines = await getRoutines();
-      routines = savedRoutines.map((routine) => ({ id: routine.id, name: routine.name }));
-    } catch {
-      routines = [];
+    if (!isRemoteMode()) {
+      try {
+        const savedRoutines = await getRoutines();
+        routines = savedRoutines.map((routine) => ({ id: routine.id, name: routine.name }));
+      } catch {
+        routines = [];
+      }
     }
 
     return { devices: control4Devices, routines };
@@ -118,11 +122,9 @@ export function ChatPanel({ overlay, mobile }: ChatPanelProps) {
 
     try {
       const context = await buildLlmContext();
-      const response = await chatWithLLM({
-        message,
-        context,
-        mode: "control",
-      });
+      const response = isRemoteMode()
+        ? await mqttLlmChat({ message, context: context as Record<string, unknown>, mode: "control" })
+        : await chatWithLLM({ message, context, mode: "control" });
       dispatch({
         type: "ADD_MESSAGE",
         payload: {

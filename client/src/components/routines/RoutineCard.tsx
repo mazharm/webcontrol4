@@ -17,6 +17,7 @@ import type { Routine } from "../../types/devices";
 import { useAuth } from "../../contexts/AuthContext";
 import { sendCommand } from "../../api/director";
 import { deleteRoutine } from "../../api/routines";
+import { executeRoutine as mqttExecuteRoutine } from "../../services/device-commands";
 
 const useStyles = makeStyles({
   card: { padding: "12px" },
@@ -56,15 +57,22 @@ interface RoutineCardProps {
   routine: Routine;
   onEdit: (routine: Routine) => void;
   onDeleted: () => void;
+  remote?: boolean;
 }
 
-export function RoutineCard({ routine, onEdit, onDeleted }: RoutineCardProps) {
+export function RoutineCard({ routine, onEdit, onDeleted, remote }: RoutineCardProps) {
   const styles = useStyles();
   const { state: auth } = useAuth();
   const [running, setRunning] = useState(false);
 
   const run = useCallback(async () => {
     setRunning(true);
+    if (remote) {
+      mqttExecuteRoutine(routine.id);
+      // Brief delay to show feedback since MQTT is fire-and-forget
+      setTimeout(() => setRunning(false), 1500);
+      return;
+    }
     const opts = { ip: auth.controllerIp || "", token: auth.directorToken || "" };
     for (const step of routine.steps) {
       try {
@@ -82,7 +90,7 @@ export function RoutineCard({ routine, onEdit, onDeleted }: RoutineCardProps) {
       } catch { /* continue */ }
     }
     setRunning(false);
-  }, [routine, auth]);
+  }, [routine, auth, remote]);
 
   const handleDelete = useCallback(async () => {
     try {
@@ -113,12 +121,16 @@ export function RoutineCard({ routine, onEdit, onDeleted }: RoutineCardProps) {
         <Button size="small" appearance="primary" icon={<Play24Regular />} onClick={run} disabled={running}>
           {running ? "Running..." : "Run"}
         </Button>
-        <Button size="small" appearance="subtle" icon={<Edit24Regular />} onClick={() => onEdit(routine)}>
-          Edit
-        </Button>
-        <Button size="small" appearance="subtle" icon={<Delete24Regular />} onClick={handleDelete}>
-          Delete
-        </Button>
+        {!remote && (
+          <Button size="small" appearance="subtle" icon={<Edit24Regular />} onClick={() => onEdit(routine)}>
+            Edit
+          </Button>
+        )}
+        {!remote && (
+          <Button size="small" appearance="subtle" icon={<Delete24Regular />} onClick={handleDelete}>
+            Delete
+          </Button>
+        )}
       </div>
     </Card>
   );

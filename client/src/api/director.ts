@@ -1,4 +1,4 @@
-interface DirectorOptions {
+export interface DirectorOptions {
   ip: string;
   token: string;
 }

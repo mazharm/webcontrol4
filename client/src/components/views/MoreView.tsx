@@ -10,6 +10,7 @@ import {
   Settings24Regular,
   ChevronRight20Regular,
 } from "@fluentui/react-icons";
+import { isRemoteMode } from "../../config/transport";
 
 const useStyles = makeStyles({
   root: {
@@ -50,6 +51,7 @@ const useStyles = makeStyles({
 export function MoreView() {
   const styles = useStyles();
   const navigate = useNavigate();
+  const remote = isRemoteMode();
 
   const deviceViews = [
     { path: "/climate", label: "All Climate", icon: <Temperature24Regular /> },
@@ -61,7 +63,7 @@ export function MoreView() {
   const utilityViews = [
     { path: "/history", label: "History", icon: <ChartMultiple24Regular /> },
     { path: "/routines", label: "Routines", icon: <Flash24Regular /> },
-    { path: "/settings", label: "Settings", icon: <Settings24Regular /> },
+    ...(!remote ? [{ path: "/settings", label: "Settings", icon: <Settings24Regular /> }] : []),
   ];
 
   const renderItem = (item: { path: string; label: string; icon: JSX.Element }) => (
@@ -78,10 +80,14 @@ export function MoreView() {
       <div className={styles.group}>
         {deviceViews.map(renderItem)}
       </div>
-      <div className={styles.divider} />
-      <div className={styles.group}>
-        {utilityViews.map(renderItem)}
-      </div>
+      {utilityViews.length > 0 && (
+        <>
+          <div className={styles.divider} />
+          <div className={styles.group}>
+            {utilityViews.map(renderItem)}
+          </div>
+        </>
+      )}
     </div>
   );
 }

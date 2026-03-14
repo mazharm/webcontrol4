@@ -135,13 +135,14 @@ export function ControllerPicker() {
   }, [auth.accountToken, dispatch]);
 
   // Run SDDP discovery and match IPs to controllers, then auto-connect if single.
-  // If nothing usable is discovered, fall back to the mock controller instead of
-  // prompting for manual connection details.
+  // If no controllers were discovered on the network and none have a usable IP,
+  // fall back to the mock controller (matching legacy behavior).
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
       const ctrls = auth.controllers.map((c) => ({ ...c, localIP: c.address || undefined }));
+      let discoveredAny = false;
       const devices = await discoverControllers();
 
       if (devices.length > 0) {
@@ -151,11 +152,18 @@ export function ControllerPicker() {
             const host = normalize(d.host || "");
             return host && cn && (cn.includes(host) || host.includes(cn));
           });
-          if (match) c.localIP = match.ip;
+          if (match) {
+            c.localIP = match.ip;
+            discoveredAny = true;
+          }
         }
       }
 
-      const finalControllers = ctrls.length > 0 ? ctrls : [MOCK_CONTROLLER];
+      // Fall back to mock if no controller was discovered and none have a usable IP
+      const hasUsableIp = ctrls.some((c) => c.localIP && (isMockController(c) || isIpv4Address(c.localIP)));
+      const finalControllers = (ctrls.length === 0 || (!discoveredAny && !hasUsableIp))
+        ? [MOCK_CONTROLLER]
+        : ctrls;
 
       if (cancelled) return;
       setControllers(finalControllers);

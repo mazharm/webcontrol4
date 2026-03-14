@@ -5,6 +5,7 @@ import {
   Flash24Regular,
   Settings24Regular,
 } from "@fluentui/react-icons";
+import { isRemoteMode } from "../../config/transport";
 
 const useStyles = makeStyles({
   root: {
@@ -39,10 +40,11 @@ export function NavFooter({ onNavigate }: NavFooterProps) {
   const navigate = useNavigate();
   const location = useLocation();
 
+  const remote = isRemoteMode();
   const items = [
     { path: "/history", label: "History", icon: <ChartMultiple24Regular /> },
     { path: "/routines", label: "Routines", icon: <Flash24Regular /> },
-    { path: "/settings", label: "Settings", icon: <Settings24Regular /> },
+    ...(!remote ? [{ path: "/settings", label: "Settings", icon: <Settings24Regular /> }] : []),
   ];
 
   return (

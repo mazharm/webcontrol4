@@ -18,6 +18,7 @@ const { initGoveeLeak, registerGoveeRoutes } = require("./govee-leak-integration
 const GoveeLeak = require("./govee-leak");
 let TrendingEngine = null;
 let trendingUnavailableReason = null;
+let mqttModule = null;        // MQTT cloud bridge (optional)
 
 try {
   ({ TrendingEngine } = require("./trending"));
@@ -57,6 +58,10 @@ let appSettings = {
   goveeTokenTimestamp: 0,
   goveePollInterval: 60,
   goveeSensorRooms: {},
+  mqttBrokerUrl: "",
+  mqttUsername: "",
+  mqttPassword: "",
+  mqttHomeId: "",
 };
 
 try {
@@ -344,6 +349,61 @@ function addHistoryPoint(key, point) {
   historyStore[key].push(point);
   if (historyStore[key].length > MAX_HISTORY_POINTS) {
     historyStore[key].shift();
+  }
+}
+
+let historyRecordTimer = null;
+const HISTORY_RECORD_INTERVAL_MS = 10_000; // 10 seconds
+
+/**
+ * Server-side history recording: snapshot device states from the stateMachine.
+ * This replaces the client-side POST to /api/history/record.
+ */
+function captureHistoryFromStateMachine() {
+  if (!stateMachine) return;
+  const devices = stateMachine.getAllDeviceStates();
+  if (!devices || devices.size === 0) return;
+  const ts = Date.now();
+  const floorCounts = Object.create(null);
+
+  for (const device of devices.values()) {
+    const vars = device.variables || {};
+    if (device.type === "light") {
+      const level = parseInt(vars.LIGHT_LEVEL, 10) || 0;
+      const lightState = vars.LIGHT_STATE;
+      const on = lightState !== undefined
+        ? (lightState === "1" || lightState === "true" || lightState === "on" || lightState === "On")
+        : level > 0;
+      addHistoryPoint(`light:${device.itemId}`, { ts, on, level });
+      const floor = device.floor || "Unknown";
+      if (!(floor in floorCounts)) floorCounts[floor] = 0;
+      if (on) floorCounts[floor]++;
+    } else if (device.type === "thermostat") {
+      addHistoryPoint(`thermo:${device.itemId}`, {
+        ts,
+        tempF: parseFloat(vars.TEMPERATURE_F) || null,
+        heatF: parseFloat(vars.HEAT_SETPOINT_F) || null,
+        coolF: parseFloat(vars.COOL_SETPOINT_F) || null,
+        hvacMode: vars.HVAC_MODE || null,
+      });
+    }
+  }
+
+  for (const [floor, onCount] of Object.entries(floorCounts)) {
+    const safeKey = floor.replace(/[^a-zA-Z0-9 _\-]/g, "").slice(0, 128);
+    if (safeKey) addHistoryPoint(`floor:${safeKey}`, { ts, onCount });
+  }
+}
+
+function startHistoryRecording() {
+  stopHistoryRecording();
+  historyRecordTimer = setInterval(captureHistoryFromStateMachine, HISTORY_RECORD_INTERVAL_MS);
+}
+
+function stopHistoryRecording() {
+  if (historyRecordTimer) {
+    clearInterval(historyRecordTimer);
+    historyRecordTimer = null;
   }
 }
 
@@ -1164,6 +1224,7 @@ app.get("/api/history", (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.get("/api/settings", (_req, res) => {
+  const mqttClient = mqttModule ? require("./mqtt/mqtt-client") : null;
   res.json({
     anthropicModel: appSettings.anthropicModel,
     hasAnthropicKey: !!appSettings.anthropicKey,
@@ -1175,6 +1236,11 @@ app.get("/api/settings", (_req, res) => {
     goveeSensorCount: goveeInstance ? goveeInstance.devices.size : 0,
     goveeNeedsReauth: goveeInstance ? goveeInstance.needsReauth : false,
     goveeSensorRooms: appSettings.goveeSensorRooms || {},
+    mqttConnected: mqttClient ? mqttClient.isConnected() : false,
+    mqttBrokerUrl: appSettings.mqttBrokerUrl || process.env.MQTT_BROKER_URL || "",
+    mqttUsername: appSettings.mqttUsername || process.env.MQTT_USERNAME || "",
+    mqttHomeId: appSettings.mqttHomeId || process.env.MQTT_HOME_ID || "",
+    hasMqttPassword: !!(appSettings.mqttPassword || process.env.MQTT_PASSWORD),
   });
 });
 
@@ -1225,6 +1291,88 @@ app.post("/api/settings", (req, res) => {
   persistSettings();
   applyPushoverEnv();
   res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// MQTT: connect / disconnect / status endpoints
+// ---------------------------------------------------------------------------
+
+app.post("/api/mqtt/connect", async (req, res) => {
+  const { brokerUrl, username, password, homeId } = req.body;
+
+  if (!brokerUrl || typeof brokerUrl !== "string") {
+    return res.status(400).json({ error: "brokerUrl is required" });
+  }
+  if (!username || typeof username !== "string") {
+    return res.status(400).json({ error: "username is required" });
+  }
+  if (!password || typeof password !== "string") {
+    return res.status(400).json({ error: "password is required" });
+  }
+  if (brokerUrl.length > 500 || username.length > 200 || password.length > 200) {
+    return res.status(400).json({ error: "field too long" });
+  }
+
+  // Disconnect existing MQTT connection if active
+  if (mqttModule) {
+    try { await mqttModule.disconnect(); } catch {}
+    mqttModule = null;
+  }
+
+  // Store credentials
+  appSettings.mqttBrokerUrl = brokerUrl.trim();
+  appSettings.mqttUsername = username.trim();
+  appSettings.mqttPassword = password;
+  appSettings.mqttHomeId = (homeId || "home1").trim();
+  persistSettings();
+
+  try {
+    const mqttBridge = require("./mqtt");
+    mqttModule = await mqttBridge.init({
+      brokerUrl: appSettings.mqttBrokerUrl,
+      username: appSettings.mqttUsername,
+      password: appSettings.mqttPassword,
+      homeId: appSettings.mqttHomeId,
+      stateMachine,
+      ring,
+      goveeInstance,
+      trending,
+      executeScheduledCommand,
+      executeRoutineSteps,
+      routinesFile: ROUTINES_FILE,
+      getRoutines: () => routinesStore,
+      handleLlmChat,
+      getHistoryStore: (key) => historyStore[key] || [],
+    });
+    res.json({ ok: true, connected: true });
+  } catch (err) {
+    console.error("[mqtt] Connect via settings failed:", err.message);
+    mqttModule = null;
+    res.status(500).json({ error: err.message || "MQTT connection failed" });
+  }
+});
+
+app.post("/api/mqtt/disconnect", async (_req, res) => {
+  if (mqttModule) {
+    try { await mqttModule.disconnect(); } catch {}
+    mqttModule = null;
+  }
+  appSettings.mqttBrokerUrl = "";
+  appSettings.mqttUsername = "";
+  appSettings.mqttPassword = "";
+  appSettings.mqttHomeId = "";
+  persistSettings();
+  res.json({ ok: true });
+});
+
+app.get("/api/mqtt/status", (_req, res) => {
+  const mqttClient = mqttModule ? require("./mqtt/mqtt-client") : null;
+  res.json({
+    connected: mqttClient ? mqttClient.isConnected() : false,
+    brokerUrl: appSettings.mqttBrokerUrl || process.env.MQTT_BROKER_URL || "",
+    homeId: appSettings.mqttHomeId || process.env.MQTT_HOME_ID || "",
+    uptime: mqttClient ? mqttClient.getUptime() : 0,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1378,6 +1526,7 @@ app.post("/api/routines", (req, res) => {
     routinesStore.push(cleanRoutine);
   }
   persistRoutines();
+  if (mqttModule) mqttModule.onRoutinesChanged();
   res.json({ ok: true });
 });
 
@@ -1387,6 +1536,7 @@ app.delete("/api/routines/:id", (req, res) => {
   conditionMetSince.delete(id);
   lastTriggered.delete(id);
   persistRoutines();
+  if (mqttModule) mqttModule.onRoutinesChanged();
   res.json({ ok: true });
 });
 
@@ -1504,19 +1654,20 @@ function buildSystemPrompt(context, mode) {
   return prompt;
 }
 
-app.post("/api/llm/chat", async (req, res) => {
+/**
+ * Core LLM chat logic — shared by REST endpoint and MQTT RPC.
+ * @param {{ message?: string, messages?: Array, context?: object, mode?: string }} body
+ * @returns {Promise<{ message: string, actions: Array }>}
+ */
+async function handleLlmChat(body) {
   if (!appSettings.anthropicKey) {
-    return res.status(400).json({
-      error: "Anthropic API key not configured. Go to Settings to add your key.",
-    });
+    throw new Error("Anthropic API key not configured. Go to Settings to add your key.");
   }
 
-  const { message, messages: rawMessages, context, mode } = req.body;
+  const { message, messages: rawMessages, context, mode } = body;
 
-  // Support both single message (legacy) and full conversation history
   let chatMessages;
   if (Array.isArray(rawMessages) && rawMessages.length > 0) {
-    // Validate and sanitize conversation history
     chatMessages = [];
     for (const m of rawMessages) {
       if (!m || typeof m !== "object") continue;
@@ -1525,94 +1676,95 @@ app.post("/api/llm/chat", async (req, res) => {
       chatMessages.push({ role: m.role, content: String(m.content).slice(0, 10000) });
     }
     if (chatMessages.length === 0 || chatMessages[chatMessages.length - 1].role !== "user") {
-      return res.status(400).json({ error: "messages must end with a user message" });
+      throw new Error("messages must end with a user message");
     }
-    // Limit conversation length to prevent abuse
     if (chatMessages.length > 50) {
       chatMessages = chatMessages.slice(-50);
     }
   } else if (message && typeof message === "string") {
     if (message.length > 10000) {
-      return res.status(400).json({ error: "message too long (max 10000 characters)" });
+      throw new Error("message too long (max 10000 characters)");
     }
     chatMessages = [{ role: "user", content: String(message) }];
   } else {
-    return res.status(400).json({ error: "message or messages required" });
+    throw new Error("message or messages required");
   }
 
   const systemPrompt = buildSystemPrompt(context, mode);
 
+  const bodyStr = JSON.stringify({
+    model: appSettings.anthropicModel,
+    max_tokens: 2048,
+    system: systemPrompt,
+    messages: chatMessages,
+  });
+
+  const responseStr = await request("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": appSettings.anthropicKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: bodyStr,
+  });
+
+  const response = JSON.parse(responseStr);
+  const text = response?.content?.[0]?.text || "";
+
+  if (mode === "analyze") {
+    return { message: text, actions: [] };
+  }
+
+  let parsed = { message: text, actions: [] };
   try {
-    const bodyStr = JSON.stringify({
-      model: appSettings.anthropicModel,
-      max_tokens: 2048,
-      system: systemPrompt,
-      messages: chatMessages,
+    const jsonMatch = text.match(/```(?:json)?\n?([\s\S]*?)\n?```/);
+    const jsonStr = jsonMatch ? jsonMatch[1] : text.trim();
+    const j = JSON.parse(jsonStr);
+    if (j && j.message) parsed = j;
+  } catch {
+    // Not valid JSON — treat raw text as the message
+  }
+
+  // Validate actions from LLM output to prevent prompt injection attacks
+  if (Array.isArray(parsed.actions)) {
+    const validActionTypes = [
+      "light_level", "light_power", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint",
+      "run_routine", "create_routine",
+      "ring_alarm_mode", "ring_siren", "ring_camera_light", "ring_camera_siren", "ring_camera_snapshot",
+      "send_notification",
+    ];
+    parsed.actions = parsed.actions.filter(a => {
+      if (!a || typeof a !== "object") return false;
+      if (!validActionTypes.includes(a.type)) return false;
+      if (a.type === "light_level" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.level) || a.level < 0 || a.level > 100)) return false;
+      if ((a.type === "light_power" || a.type === "light_toggle") && (!Number.isFinite(a.deviceId) || typeof a.on !== "boolean")) return false;
+      if (a.type === "hvac_mode" && (!Number.isFinite(a.deviceId) || !["Off", "Heat", "Cool", "Auto"].includes(a.mode))) return false;
+      if (a.type === "heat_setpoint" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.value) || a.value < 32 || a.value > 120)) return false;
+      if (a.type === "cool_setpoint" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.value) || a.value < 32 || a.value > 120)) return false;
+      if (a.type === "run_routine" && (typeof a.routineId !== "string" || a.routineId.length > 100 || !/^[a-zA-Z0-9_-]+$/.test(a.routineId))) return false;
+      if (a.type === "create_routine" && (!a.name || typeof a.name !== "string" || a.name.length > 200 || !Array.isArray(a.steps) || a.steps.length > 100)) return false;
+      if (a.type === "ring_alarm_mode" && (!a.mode || !["away", "home", "disarm"].includes(a.mode))) return false;
+      if (a.type === "ring_siren" && (!a.action || !["on", "off"].includes(a.action))) return false;
+      if (a.type === "ring_camera_light" && (!Number.isFinite(a.cameraId) || typeof a.on !== "boolean")) return false;
+      if (a.type === "ring_camera_siren" && (!Number.isFinite(a.cameraId) || typeof a.on !== "boolean")) return false;
+      if (a.type === "ring_camera_snapshot" && !Number.isFinite(a.cameraId)) return false;
+      if (a.type === "send_notification" && (!a.message || typeof a.message !== "string" || a.message.length > 1024)) return false;
+      return true;
     });
+  } else {
+    parsed.actions = [];
+  }
+  parsed.message = String(parsed.message || "").slice(0, 10000);
 
-    const responseStr = await request("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": appSettings.anthropicKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: bodyStr,
-    });
+  return parsed;
+}
 
-    const response = JSON.parse(responseStr);
-    const text = response?.content?.[0]?.text || "";
-
-    if (mode === "analyze") {
-      return res.json({ message: text, actions: [] });
-    }
-
-    // Try to parse as JSON (model may wrap in markdown code fences)
-    let parsed = { message: text, actions: [] };
-    try {
-      const jsonMatch = text.match(/```(?:json)?\n?([\s\S]*?)\n?```/);
-      const jsonStr = jsonMatch ? jsonMatch[1] : text.trim();
-      const j = JSON.parse(jsonStr);
-      if (j && j.message) parsed = j;
-    } catch {
-      // Not valid JSON — treat raw text as the message
-    }
-
-    // Validate actions from LLM output to prevent prompt injection attacks
-    if (Array.isArray(parsed.actions)) {
-      const validActionTypes = [
-        "light_level", "light_power", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint",
-        "run_routine", "create_routine",
-        "ring_alarm_mode", "ring_siren", "ring_camera_light", "ring_camera_siren", "ring_camera_snapshot",
-        "send_notification",
-      ];
-      parsed.actions = parsed.actions.filter(a => {
-        if (!a || typeof a !== "object") return false;
-        if (!validActionTypes.includes(a.type)) return false;
-        if (a.type === "light_level" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.level) || a.level < 0 || a.level > 100)) return false;
-        if ((a.type === "light_power" || a.type === "light_toggle") && (!Number.isFinite(a.deviceId) || typeof a.on !== "boolean")) return false;
-        if (a.type === "hvac_mode" && (!Number.isFinite(a.deviceId) || !["Off", "Heat", "Cool", "Auto"].includes(a.mode))) return false;
-        if (a.type === "heat_setpoint" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.value) || a.value < 32 || a.value > 120)) return false;
-        if (a.type === "cool_setpoint" && (!Number.isFinite(a.deviceId) || !Number.isFinite(a.value) || a.value < 32 || a.value > 120)) return false;
-        if (a.type === "run_routine" && (typeof a.routineId !== "string" || a.routineId.length > 100 || !/^[a-zA-Z0-9_-]+$/.test(a.routineId))) return false;
-        if (a.type === "create_routine" && (!a.name || typeof a.name !== "string" || a.name.length > 200 || !Array.isArray(a.steps) || a.steps.length > 100)) return false;
-        // Ring actions
-        if (a.type === "ring_alarm_mode" && (!a.mode || !["away", "home", "disarm"].includes(a.mode))) return false;
-        if (a.type === "ring_siren" && (!a.action || !["on", "off"].includes(a.action))) return false;
-        if (a.type === "ring_camera_light" && (!Number.isFinite(a.cameraId) || typeof a.on !== "boolean")) return false;
-        if (a.type === "ring_camera_siren" && (!Number.isFinite(a.cameraId) || typeof a.on !== "boolean")) return false;
-        if (a.type === "ring_camera_snapshot" && !Number.isFinite(a.cameraId)) return false;
-        if (a.type === "send_notification" && (!a.message || typeof a.message !== "string" || a.message.length > 1024)) return false;
-        return true;
-      });
-    } else {
-      parsed.actions = [];
-    }
-    parsed.message = String(parsed.message || "").slice(0, 10000);
-
-    res.json(parsed);
+app.post("/api/llm/chat", async (req, res) => {
+  try {
+    const result = await handleLlmChat(req.body);
+    res.json(result);
   } catch (err) {
-    // Only forward known Anthropic error types; generic message for all else
     let errMsg = "LLM request failed";
     try {
       const bodyPart = err.message.replace(/^HTTP \d+: /, "");
@@ -1874,6 +2026,9 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
   await stateMachine.discover();
   await stateMachine.readInitialState();
 
+  // 2b. Server-side history recording (every 10s)
+  startHistoryRecording();
+
   // 3. Wire state changes → trending + SSE
   let prevMode = null;
   stateMachine.on("stateChange", (change) => {
@@ -1898,6 +2053,35 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
     broadcastSSE("homeState", homeState);
     onStateChangeForConditions();
   });
+
+  // 3b. MQTT cloud bridge (optional — env vars or persisted settings)
+  const mqttUrl = process.env.MQTT_BROKER_URL || appSettings.mqttBrokerUrl;
+  const mqttUser = process.env.MQTT_USERNAME || appSettings.mqttUsername;
+  const mqttPass = process.env.MQTT_PASSWORD || appSettings.mqttPassword;
+  if (mqttUrl && mqttUser && mqttPass) {
+    try {
+      const mqttBridge = require("./mqtt");
+      mqttModule = await mqttBridge.init({
+        brokerUrl: mqttUrl,
+        username: mqttUser,
+        password: mqttPass,
+        homeId: process.env.MQTT_HOME_ID || appSettings.mqttHomeId || "home1",
+        stateMachine,
+        ring,
+        goveeInstance,
+        trending,
+        executeScheduledCommand,
+        executeRoutineSteps,
+        routinesFile: ROUTINES_FILE,
+        getRoutines: () => routinesStore,
+        handleLlmChat,
+        getHistoryStore: (key) => historyStore[key] || [],
+      });
+    } catch (err) {
+      console.error("[mqtt] Failed to initialize MQTT bridge:", err.message);
+      mqttModule = null;
+    }
+  }
 
   // 4. WebSocket (skip for mock)
   if (controllerIp !== "mock") {
@@ -2379,8 +2563,11 @@ function startServer() {
 startServer();
 startScheduler();
 
-function shutdown() {
+async function shutdown() {
   console.log("[shutdown] Cleaning up...");
+  if (mqttModule) {
+    try { await mqttModule.disconnect(); } catch {}
+  }
   if (goveeInstance) goveeInstance.stop();
   if (trending) trending.close();
   if (c4ws) c4ws.disconnect();

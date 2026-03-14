@@ -227,4 +227,9 @@ export interface SettingsResponse {
   goveeSensorCount?: number;
   goveeNeedsReauth?: boolean;
   goveeSensorRooms?: Record<string, string>;
+  mqttConnected?: boolean;
+  mqttBrokerUrl?: string;
+  mqttUsername?: string;
+  mqttHomeId?: string;
+  hasMqttPassword?: boolean;
 }
