@@ -69,12 +69,26 @@ const useStyles = makeStyles({
   },
 });
 
-function normalize(s: string): string {
-  return s.replace(/[_\-"]/g, "").toLowerCase();
-}
-
 function isIpv4Address(value: string | undefined): value is string {
   return !!value && /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value);
+}
+
+function isPrivateIpv4Address(value: string | undefined): value is string {
+  if (!isIpv4Address(value)) return false;
+  const [a, b] = value.split(".").map((part) => Number(part));
+  return a === 10
+    || a === 127
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168);
+}
+
+function normalizeControllerId(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\.local$/g, "")
+    .replace(/^control4[_-]?/g, "")
+    .replace(/[^a-z0-9]/g, "");
 }
 
 function isMockController(ctrl: Controller & { localIP?: string }) {
@@ -106,18 +120,9 @@ export function ControllerPicker() {
       const token = result.directorToken;
       let ip = isMockController(ctrl)
         ? "mock"
-        : (ctrl.localIP || (isIpv4Address(ctrl.address) ? ctrl.address : ""));
+        : (isPrivateIpv4Address(ctrl.localIP) ? ctrl.localIP : "");
       if (!ip) {
-        const entered = window.prompt(
-          `Controller "${ctrl.name || ctrl.commonName}" was not auto-discovered. Enter its local IP address:`,
-          "",
-        );
-        if (!entered) return;
-        const trimmed = entered.trim();
-        if (!isIpv4Address(trimmed)) {
-          throw new Error("Please enter a valid IPv4 address");
-        }
-        ip = trimmed;
+        throw new Error(`Controller "${ctrl.name || ctrl.commonName}" was discovered without a usable local IP`);
       }
 
       await connectRealtime({
@@ -141,37 +146,46 @@ export function ControllerPicker() {
     let cancelled = false;
 
     (async () => {
-      const ctrls = auth.controllers.map((c) => ({ ...c, localIP: c.address || undefined }));
-      let discoveredAny = false;
+      const ctrls = auth.controllers.map((c) => ({
+        ...c,
+        localIP: isPrivateIpv4Address(c.address) ? c.address : undefined,
+      }));
       const devices = await discoverControllers();
 
       if (devices.length > 0) {
         for (const c of ctrls) {
-          const cn = normalize(c.commonName || "");
-          const match = devices.find((d) => {
-            const host = normalize(d.host || "");
-            return host && cn && (cn.includes(host) || host.includes(cn));
+          const controllerIds = [
+            normalizeControllerId(c.commonName || ""),
+            normalizeControllerId(c.name || ""),
+          ].filter(Boolean);
+
+          let match = devices.find((d) => {
+            const host = normalizeControllerId(d.host || "");
+            return !!host && controllerIds.some((controllerId) =>
+              controllerId === host || controllerId.includes(host) || host.includes(controllerId)
+            );
           });
-          if (match) {
+
+          if (!match && ctrls.length === 1 && devices.length === 1) {
+            match = devices[0];
+          }
+
+          if (match && isPrivateIpv4Address(match.ip)) {
             c.localIP = match.ip;
-            discoveredAny = true;
           }
         }
       }
 
-      // Fall back to mock if no controller was discovered and none have a usable IP
-      const hasUsableIp = ctrls.some((c) => c.localIP && (isMockController(c) || isIpv4Address(c.localIP)));
-      const finalControllers = (ctrls.length === 0 || (!discoveredAny && !hasUsableIp))
-        ? [MOCK_CONTROLLER]
-        : ctrls;
+      const finalControllers = ctrls.filter((c) => isPrivateIpv4Address(c.localIP));
+      const usableControllers = finalControllers.length > 0 ? finalControllers : [MOCK_CONTROLLER];
 
       if (cancelled) return;
-      setControllers(finalControllers);
+      setControllers(usableControllers);
       setDiscovering(false);
-      setSelectedCN(finalControllers.length > 1 ? finalControllers[0].commonName : "");
+      setSelectedCN(usableControllers[0]?.commonName || "");
 
-      if (finalControllers.length === 1) {
-        void selectController(finalControllers[0]);
+      if (usableControllers.length === 1) {
+        void selectController(usableControllers[0]);
       }
     })();
 
@@ -184,6 +198,10 @@ export function ControllerPicker() {
     const ctrl = controllers.find((c) => c.commonName === selectedCN);
     if (ctrl) selectController(ctrl);
   }, [selectedCN, controllers, selectController]);
+
+  const showControllerList = !discovering && (
+    controllers.length > 1 || (controllers.length === 1 && (!loading || !!auth.error))
+  );
 
   return (
     <div className={styles.root}>
@@ -198,7 +216,7 @@ export function ControllerPicker() {
           <div className={styles.discovering}>
             <Spinner size="small" label="Discovering controllers on network..." />
           </div>
-        ) : controllers.length > 1 ? (
+        ) : showControllerList ? (
           <>
             <div className={styles.list}>
               {controllers.map((ctrl) => (
