@@ -28,6 +28,7 @@ import { AllCamerasView } from "./components/views/AllCamerasView";
 import { HistoryView } from "./components/history/HistoryView";
 import { RoutinesView } from "./components/routines/RoutinesView";
 import { SettingsView } from "./components/settings/SettingsView";
+import { RemoteSettingsView } from "./components/settings/RemoteSettingsView";
 import { MoreView } from "./components/views/MoreView";
 import { WaterLeakView } from "./components/views/WaterLeakView";
 
@@ -220,7 +221,7 @@ function AppRoutes({ initializing }: { initializing: boolean }) {
           <Route path="/water-leak" element={<WaterLeakView />} />
           <Route path="/history" element={<HistoryView />} />
           <Route path="/routines" element={<RoutinesView />} />
-          {!remote && <Route path="/settings" element={<SettingsView />} />}
+          <Route path="/settings" element={remote ? <RemoteSettingsView /> : <SettingsView />} />
           <Route path="/more" element={<MoreView />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

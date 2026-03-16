@@ -44,10 +44,11 @@ export function MqttProvider({ children }: { children: React.ReactNode }) {
   const styles = useStyles();
   const { dispatch } = useDeviceContext();
   const [connectionState, setConnectionState] = useState<MqttConnectionState>("disconnected");
-  const [bridgeOnline, setBridgeOnline] = useState(true);
+  const [bridgeOnline, setBridgeOnline] = useState<boolean | null>(null);
   const devicesRef = useRef(new Map<string, UnifiedDevice>());
   const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initializedRef = useRef(false);
+  const bridgeGraceRef = useRef(false);
 
   useEffect(() => {
     const config = getMqttConfig();
@@ -126,10 +127,16 @@ export function MqttProvider({ children }: { children: React.ReactNode }) {
       }
     });
 
-    // Subscribe to bridge status
+    // Subscribe to bridge status — grace period avoids flash from stale LWT retained msg
+    const bridgeGraceTimer = setTimeout(() => {
+      bridgeGraceRef.current = true;
+    }, 5000);
     const unsubBridge = subscribe(`wc4/${homeId}/status/bridge`, (payload: unknown) => {
       const data = payload as { online?: boolean };
-      setBridgeOnline(data.online ?? false);
+      const online = data.online ?? false;
+      if (online || bridgeGraceRef.current) {
+        setBridgeOnline(online);
+      }
     });
 
     function resetSettleTimer() {
@@ -162,6 +169,7 @@ export function MqttProvider({ children }: { children: React.ReactNode }) {
       unsubDevices();
       unsubBridge();
       clearTimeout(initTimeout);
+      clearTimeout(bridgeGraceTimer);
       if (settleTimerRef.current) clearTimeout(settleTimerRef.current);
       disconnectMqtt();
     };
@@ -189,7 +197,7 @@ export function MqttProvider({ children }: { children: React.ReactNode }) {
           </MessageBar>
         </div>
       )}
-      {connectionState === "connected" && !bridgeOnline && (
+      {connectionState === "connected" && bridgeOnline === false && (
         <div className={styles.banner}>
           <MessageBar intent="warning" style={{ backgroundColor: tokens.colorPaletteYellowBackground1 }}>
             <MessageBarBody>
