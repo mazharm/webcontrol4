@@ -61,6 +61,11 @@ function init({ stateMachine, ring, goveeInstance, getRoutines, getScenes }) {
   }, 30_000);
   if (heartbeatTimer.unref) heartbeatTimer.unref();
 
+  // -------------------------------------------------------------------------
+  // 4. Clean up stale retained messages from previous server instances
+  // -------------------------------------------------------------------------
+  cleanupStaleRetained(homeId, { stateMachine, ring, goveeInstance });
+
   console.log("[mqtt-state] State publisher initialized");
 }
 
@@ -215,6 +220,74 @@ function onGoveeUpdate(goveeInstance) {
 function onRoutinesChanged(getRoutines) {
   const homeId = mqttClient.getHomeId();
   publishRoutineList(getRoutines, homeId);
+}
+
+/**
+ * Remove stale retained messages left by a previous server instance.
+ * Subscribes to the state wildcard, waits for retained messages, then clears
+ * any device topics that don't belong to the current state.
+ */
+async function cleanupStaleRetained(homeId, { stateMachine, ring, goveeInstance }) {
+  const validTopics = new Set();
+
+  // Collect current Control4 device topics
+  if (stateMachine) {
+    for (const [itemId] of stateMachine.getAllDeviceStates()) {
+      validTopics.add(`wc4/${homeId}/state/control4/${itemId}`);
+    }
+  }
+
+  // Collect current Ring device topics
+  try {
+    if (ring.getStatus().connected) {
+      const cameras = await ring.getCameras().catch(() => []);
+      for (const cam of cameras) validTopics.add(`wc4/${homeId}/state/ring/${cam.id}`);
+      const devices = await ring.getDevices().catch(() => []);
+      for (const s of devices) validTopics.add(`wc4/${homeId}/state/ring/${s.zid || s.id}`);
+      validTopics.add(`wc4/${homeId}/state/ring/alarm`);
+    }
+  } catch { /* ignore */ }
+
+  // Collect current Govee device topics
+  if (goveeInstance) {
+    try {
+      const state = goveeInstance.getState();
+      if (state && state.sensors) {
+        for (const s of state.sensors) validTopics.add(`wc4/${homeId}/state/govee/${s.id}`);
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Subscribe to wildcard and collect stale device topics
+  const staleTopics = [];
+  const devicePrefixes = [
+    `wc4/${homeId}/state/control4/`,
+    `wc4/${homeId}/state/ring/`,
+    `wc4/${homeId}/state/govee/`,
+  ];
+
+  const handler = (_payload, topic) => {
+    const isDeviceTopic = devicePrefixes.some((p) => topic.startsWith(p));
+    if (isDeviceTopic && !validTopics.has(topic)) {
+      staleTopics.push(topic);
+    }
+  };
+
+  mqttClient.subscribe(`wc4/${homeId}/state/#`, handler);
+
+  // Wait for retained messages to arrive from the broker
+  await new Promise((r) => setTimeout(r, 3000));
+
+  mqttClient.unsubscribe(`wc4/${homeId}/state/#`, handler);
+
+  // Clear stale retained messages (empty payload + retain = delete)
+  for (const topic of staleTopics) {
+    mqttClient.publish(topic, "", { retain: true });
+  }
+
+  if (staleTopics.length > 0) {
+    console.log(`[mqtt-state] Cleared ${staleTopics.length} stale retained messages`);
+  }
 }
 
 /**
