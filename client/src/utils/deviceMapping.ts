@@ -1,7 +1,7 @@
 import type { UnifiedDevice, LightState, ThermostatState, LockState, SensorState, CameraState, SecurityState, MediaState, Scene } from "../types/devices";
 import type { C4LightItem, C4ThermostatItem, C4Variable, C4SceneItem, RingCamera, RingSensor, StateSnapshot } from "../types/api";
 
-function synthesizeRoomId(roomName: string, floorName: string): number | null {
+export function synthesizeRoomId(roomName: string, floorName: string): number | null {
   const room = roomName.trim();
   const floor = floorName.trim();
   if (!room && !floor) return null;
@@ -15,7 +15,7 @@ function synthesizeRoomId(roomName: string, floorName: string): number | null {
   return -Math.abs(hash);
 }
 
-function normalizeRoomId(roomId: number | null | undefined, roomName: string, floorName: string): number | null {
+export function normalizeRoomId(roomId: number | null | undefined, roomName: string, floorName: string): number | null {
   if (Number.isFinite(roomId) && Number(roomId) > 0) return Number(roomId);
   return synthesizeRoomId(roomName, floorName);
 }

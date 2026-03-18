@@ -123,13 +123,14 @@ export function subscribe(topic: string, handler: MessageHandler): () => void {
   };
 }
 
-export function publish(topic: string, payload: unknown): void {
+export function publish(topic: string, payload: unknown): boolean {
   if (!client?.connected) {
     console.warn("[mqtt-client] Cannot publish, not connected");
-    return;
+    return false;
   }
   const message = typeof payload === "string" ? payload : JSON.stringify(payload);
   client.publish(topic, message, { qos: 1 });
+  return true;
 }
 
 export function disconnectMqtt(): void {

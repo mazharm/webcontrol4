@@ -12,6 +12,7 @@ let homeId = "";
 let connected = false;
 const startTime = Date.now();
 const subscriptions = new Map(); // topic -> Set<handler>
+const reconnectListeners = new Set(); // callbacks invoked after broker reconnect
 
 function getHomeId() {
   return homeId;
@@ -55,6 +56,7 @@ function connect({ brokerUrl, username, password, homeId: hid }) {
     });
 
     client.on("connect", () => {
+      const isReconnect = connected === false && settled;
       connected = true;
       // Enable auto-reconnect now that we know credentials are valid
       client.options.reconnectPeriod = 1000;
@@ -66,6 +68,15 @@ function connect({ brokerUrl, username, password, homeId: hid }) {
       }
 
       if (!settled) { settled = true; resolve(client); }
+
+      // Notify listeners so they can re-publish retained state
+      if (isReconnect) {
+        for (const listener of reconnectListeners) {
+          try { listener(); } catch (err) {
+            console.error("[mqtt] Reconnect listener error:", err.message);
+          }
+        }
+      }
     });
 
     client.on("reconnect", () => {
@@ -225,6 +236,14 @@ function topicMatchesPattern(topic, pattern) {
   return topicParts.length === patternParts.length;
 }
 
+/**
+ * Register a callback to be invoked when the broker connection is re-established.
+ */
+function onReconnect(listener) {
+  reconnectListeners.add(listener);
+  return () => reconnectListeners.delete(listener);
+}
+
 module.exports = {
   connect,
   publish,
@@ -232,6 +251,7 @@ module.exports = {
   unsubscribe,
   disconnect,
   isConnected,
+  onReconnect,
   getHomeId,
   getUptime,
 };

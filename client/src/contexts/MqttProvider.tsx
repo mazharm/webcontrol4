@@ -17,6 +17,7 @@ import {
 import { getMqttConfig } from "../config/transport";
 import { useDeviceContext } from "./DeviceContext";
 import type { UnifiedDevice, Alert, Scene } from "../types/devices";
+import { normalizeRoomId } from "../utils/deviceMapping";
 
 const useStyles = makeStyles({
   banner: {
@@ -36,6 +37,7 @@ interface MqttDevicePayload {
   roomId: number | null;
   roomName: string;
   floorName: string;
+  zoneName?: string | null;
   state: UnifiedDevice["state"];
   ts: string;
 }
@@ -62,6 +64,12 @@ export function MqttProvider({ children }: { children: React.ReactNode }) {
     const unsubConnection = onConnectionChange((state) => {
       setConnectionState(state);
       if (state === "connected") {
+        // If we were already initialized, this is a reconnect —
+        // reset so incoming retained messages are re-batched into SET_DEVICES
+        if (initializedRef.current) {
+          initializedRef.current = false;
+          devicesRef.current.clear();
+        }
         dispatch({ type: "SET_CONNECTION", payload: "connected" });
       } else if (state === "disconnected") {
         dispatch({ type: "SET_CONNECTION", payload: "disconnected" });
@@ -99,30 +107,49 @@ export function MqttProvider({ children }: { children: React.ReactNode }) {
       if (parts.length === 2) {
         const mqttPayload = payload as MqttDevicePayload;
         if (!mqttPayload?.id || !mqttPayload?.type || !mqttPayload?.state) return;
+        const roomName = mqttPayload.roomName || "";
+        const floorName = mqttPayload.floorName || "";
 
         const device: UnifiedDevice = {
           id: mqttPayload.id,
           source: mqttPayload.source === "govee" ? "ring" : mqttPayload.source, // map govee to ring for DeviceSource compat
           type: mqttPayload.type,
           name: mqttPayload.name,
-          roomId: mqttPayload.roomId,
-          roomName: mqttPayload.roomName || "",
-          floorName: mqttPayload.floorName || "",
-          zoneName: null,
+          roomId: normalizeRoomId(mqttPayload.roomId, roomName, floorName),
+          roomName,
+          floorName,
+          zoneName: mqttPayload.zoneName ?? null,
           state: mqttPayload.state,
           lastUpdated: Date.now(),
         };
 
+        const existing = devicesRef.current.get(device.id);
+        const mergedDevice = existing
+          ? { ...existing, ...device, state: device.state, lastUpdated: device.lastUpdated }
+          : device;
+        devicesRef.current.set(device.id, mergedDevice);
+
         if (!initializedRef.current) {
           // Collecting retained messages — batch them
-          devicesRef.current.set(device.id, device);
           resetSettleTimer();
         } else {
-          // Live update — dispatch immediately
-          dispatch({
-            type: "UPDATE_DEVICE",
-            payload: { id: device.id, state: device.state },
-          });
+          const metadataChanged = !existing
+            || existing.name !== mergedDevice.name
+            || existing.type !== mergedDevice.type
+            || existing.source !== mergedDevice.source
+            || existing.roomId !== mergedDevice.roomId
+            || existing.roomName !== mergedDevice.roomName
+            || existing.floorName !== mergedDevice.floorName
+            || existing.zoneName !== mergedDevice.zoneName;
+
+          if (metadataChanged) {
+            dispatch({ type: "SET_DEVICES", payload: Array.from(devicesRef.current.values()) });
+          } else {
+            dispatch({
+              type: "UPDATE_DEVICE",
+              payload: { id: mergedDevice.id, state: mergedDevice.state },
+            });
+          }
         }
       }
     });

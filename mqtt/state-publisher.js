@@ -62,7 +62,23 @@ function init({ stateMachine, ring, goveeInstance, getRoutines, getScenes }) {
   if (heartbeatTimer.unref) heartbeatTimer.unref();
 
   // -------------------------------------------------------------------------
-  // 4. Clean up stale retained messages from previous server instances
+  // 4. Re-publish all retained state after broker reconnect
+  // -------------------------------------------------------------------------
+  mqttClient.onReconnect(() => {
+    console.log("[mqtt-state] Broker reconnected — re-publishing all state");
+    if (stateMachine) {
+      publishAllDevices(stateMachine, homeId);
+      publishHomeState(stateMachine, homeId);
+    }
+    if (getRoutines) publishRoutineList(getRoutines, homeId);
+    if (getScenes) publishScenes(getScenes, homeId);
+    publishRingDevices(ring, homeId);
+    if (goveeInstance) publishGoveeDevices(goveeInstance, homeId);
+    publishHeartbeat(homeId);
+  });
+
+  // -------------------------------------------------------------------------
+  // 5. Clean up stale retained messages from previous server instances
   // -------------------------------------------------------------------------
   cleanupStaleRetained(homeId, { stateMachine, ring, goveeInstance });
 

@@ -20,7 +20,10 @@ export async function sendDeviceCommand(
   if (isRemoteMode()) {
     const config = getMqttConfig();
     const topic = `wc4/${config.homeId}/cmd/${system}/${deviceId}/set`;
-    publish(topic, { ...command, ts: new Date().toISOString() });
+    const published = publish(topic, { ...command, ts: new Date().toISOString() });
+    if (!published) {
+      throw new Error("MQTT client is not connected");
+    }
   } else {
     // Local mode — use existing REST API
     if (system === "control4" && directorOpts) {

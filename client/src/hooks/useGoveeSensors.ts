@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
 import { getGoveeLeakStatus } from "../api/settings";
+import { isRemoteMode } from "../config/transport";
 import type { GoveeSensor, GoveeLeakStatus } from "../types/api";
 
 // ---------------------------------------------------------------------------
@@ -25,7 +26,7 @@ function setState(next: GoveeLeakStatus) {
 }
 
 async function fetchStatus() {
-  if (fetchInFlight) return;
+  if (fetchInFlight || isRemoteMode()) return;
   fetchInFlight = true;
   try {
     const status = await getGoveeLeakStatus();
@@ -37,7 +38,7 @@ async function fetchStatus() {
 }
 
 function ensureSSE() {
-  if (es) return;
+  if (es || isRemoteMode()) return;
   es = new EventSource("/api/events");
 
   // Full refresh when Govee connects/disconnects/discovers devices
