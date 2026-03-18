@@ -97,10 +97,14 @@ export function LightCard({ device }: LightCardProps) {
           await sendCommand(directorOpts, parseInt(c4Id), "SET_LEVEL", { LEVEL: value });
         }
       } catch {
-        // ignore
+        // Revert to last known state on failure
+        dispatch({
+          type: "UPDATE_DEVICE",
+          payload: { id: device.id, state: lightState },
+        });
       }
     }, 300);
-  }, [device.id, c4Id, directorOpts, dispatch, remote]);
+  }, [device.id, c4Id, directorOpts, dispatch, remote, lightState]);
 
   return (
     <Card className={styles.card}>

@@ -107,6 +107,20 @@ export function MqttProvider({ children }: { children: React.ReactNode }) {
       // Device state: state/{system}/{deviceId}
       const parts = remainder.split("/");
       if (parts.length === 2) {
+        // Empty/null payload = server deleted the retained message (device removed)
+        if (!payload || payload === "" || (typeof payload === "object" && !Object.keys(payload as object).length)) {
+          const system = parts[0];
+          const deviceId = parts[1];
+          const removedId = `${system === "control4" ? "control4" : system}:${deviceId}`;
+          if (devicesRef.current.has(removedId)) {
+            devicesRef.current.delete(removedId);
+            if (initializedRef.current) {
+              dispatch({ type: "SET_DEVICES", payload: Array.from(devicesRef.current.values()) });
+            }
+          }
+          return;
+        }
+
         const mqttPayload = payload as MqttDevicePayload;
         if (!mqttPayload?.id || !mqttPayload?.type || !mqttPayload?.state) return;
 

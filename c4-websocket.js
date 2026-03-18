@@ -313,9 +313,30 @@ class C4WebSocket extends EventEmitter {
         );
       } catch (err) {
         this._logger("ws-token-refresh-error", err.message);
-        // Try again in 5 minutes — clear existing timer first to prevent leaks
+        // Try the refresh again in 5 minutes (not _scheduleTokenRefresh which recomputes 23h delay)
         if (this._tokenRefreshTimer) clearTimeout(this._tokenRefreshTimer);
-        this._tokenRefreshTimer = setTimeout(() => this._scheduleTokenRefresh(), 5 * 60 * 1000);
+        this._tokenRefreshTimer = setTimeout(async () => {
+          try {
+            this._logger("ws-token-refresh-retry");
+            const { token } = await this._refreshTokenFn();
+            this._token = token;
+            this._logger("ws-token-refreshed", "reconnecting with new token (retry)");
+            if (this._socket) {
+              this._socket.disconnect();
+              this._socket.removeAllListeners();
+              this._socket = null;
+            }
+            this._connected = false;
+            this._setupSocket(
+              () => this.emit("reconnected"),
+              (retryErr) => this._logger("ws-token-refresh-reconnect-error", retryErr.message)
+            );
+          } catch (retryErr) {
+            this._logger("ws-token-refresh-retry-failed", retryErr.message);
+            // Fall back to full re-schedule (another ~23h) as last resort
+            this._scheduleTokenRefresh();
+          }
+        }, 5 * 60 * 1000);
       }
     }, delay);
 

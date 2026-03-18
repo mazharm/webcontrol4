@@ -35,6 +35,10 @@ export function rpcCall<T = unknown>(method: string, params: Record<string, unkn
       clearTimeout(timeout);
       unsubscribe();
 
+      if (!payload || typeof payload !== "object") {
+        reject(new Error(`RPC response malformed (method: ${method})`));
+        return;
+      }
       const response = payload as { id: string; result?: T; error?: string };
       if (response.error) {
         reject(new Error(response.error));

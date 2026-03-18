@@ -552,6 +552,11 @@ if (oauth.isConfigured()) {
 
   // --- Protect /api/* routes (session cookie or bearer token) ---
   app.use("/api", (req, res, next) => {
+    // Allow loopback requests from the StateMachine's internal apiFn
+    const remoteIp = req.ip || req.connection?.remoteAddress || "";
+    if (remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "::ffff:127.0.0.1") {
+      if (req.headers["x-director-ip"] && req.headers["x-director-token"]) return next();
+    }
     if (oauth.getSessionFromReq(req)) return next();
     if (oauth.getTokenFromReq(req)) return next();
     res.status(401).json({ error: "Authentication required" });
@@ -2059,6 +2064,11 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
   const mqttUser = process.env.MQTT_USERNAME || appSettings.mqttUsername;
   const mqttPass = process.env.MQTT_PASSWORD || appSettings.mqttPassword;
   if (mqttUrl && mqttUser && mqttPass) {
+    // Disconnect existing MQTT connection to prevent orphaned connections/timers
+    if (mqttModule) {
+      try { await mqttModule.disconnect(); } catch {}
+      mqttModule = null;
+    }
     try {
       const mqttBridge = require("./mqtt");
       mqttModule = await mqttBridge.init({
