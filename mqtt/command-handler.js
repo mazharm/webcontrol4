@@ -93,11 +93,13 @@ async function handleControl4Command(deviceId, payload) {
   // Apply state change optimistically BEFORE sending to Director so that
   // SSE listeners (local web client) update instantly.
   if (payload.level !== undefined) {
+    applyStateChange(itemId, "LIGHT_STATE", payload.level > 0 ? "1" : "0");
     applyStateChange(itemId, "LIGHT_LEVEL", String(payload.level));
     await executeScheduledCommand(itemId, "SET_LEVEL", { LEVEL: payload.level });
   }
   if (payload.on !== undefined) {
     const level = payload.on ? 100 : 0;
+    applyStateChange(itemId, "LIGHT_STATE", payload.on ? "1" : "0");
     applyStateChange(itemId, "LIGHT_LEVEL", String(level));
     await executeScheduledCommand(itemId, "SET_LEVEL", { LEVEL: level });
   }

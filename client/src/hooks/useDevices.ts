@@ -18,7 +18,7 @@ export function useDevicesByType(type: UnifiedDevice["type"]): UnifiedDevice[] {
 export function useDevicesByRoom(roomId: number): UnifiedDevice[] {
   const { state } = useDeviceContext();
   return useMemo(
-    () => Array.from(state.devices.values()).filter((d) => d.roomId === roomId),
+    () => Array.from(state.devices.values()).filter((d) => (d.roomId ?? 0) === roomId),
     [state.devices, roomId]
   );
 }

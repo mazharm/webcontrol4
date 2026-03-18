@@ -46,7 +46,7 @@ function deviceToMqttPayload(device) {
     source: "control4",
     type: device.type,
     name: device.name,
-    roomId: device.roomId || null,
+    roomId: device.roomId ?? null,
     roomName: device.room || "",
     floorName: device.floor || "",
     state,
@@ -63,11 +63,8 @@ function buildDeviceState(device) {
   switch (device.type) {
     case "light": {
       const level = parseInt(vars.LIGHT_LEVEL, 10) || 0;
-      const lightState = vars.LIGHT_STATE;
-      const on = lightState !== undefined
-        ? (lightState === "1" || lightState === "true" || lightState === "on" || lightState === "On")
-        : level > 0;
-      return { type: "light", on, level };
+      // Derive on from level – consistent with SSE-path logic in DeviceContext
+      return { type: "light", on: level > 0, level };
     }
     case "thermostat":
       return {
