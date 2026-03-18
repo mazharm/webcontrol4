@@ -313,7 +313,8 @@ class C4WebSocket extends EventEmitter {
         );
       } catch (err) {
         this._logger("ws-token-refresh-error", err.message);
-        // Try again in 5 minutes
+        // Try again in 5 minutes — clear existing timer first to prevent leaks
+        if (this._tokenRefreshTimer) clearTimeout(this._tokenRefreshTimer);
         this._tokenRefreshTimer = setTimeout(() => this._scheduleTokenRefresh(), 5 * 60 * 1000);
       }
     }, delay);

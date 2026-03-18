@@ -43,7 +43,12 @@ export function rpcCall<T = unknown>(method: string, params: Record<string, unkn
       }
     });
 
-    publish(requestTopic, { id: requestId, method, params });
+    const published = publish(requestTopic, { id: requestId, method, params });
+    if (!published) {
+      clearTimeout(timeout);
+      unsubscribe();
+      reject(new Error(`RPC call failed: MQTT client not connected (method: ${method})`));
+    }
   });
 }
 

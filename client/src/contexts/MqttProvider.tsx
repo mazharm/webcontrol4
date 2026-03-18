@@ -51,6 +51,7 @@ export function MqttProvider({ children }: { children: React.ReactNode }) {
   const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initializedRef = useRef(false);
   const bridgeGraceRef = useRef(false);
+  const epochRef = useRef(0);
 
   useEffect(() => {
     const config = getMqttConfig();
@@ -67,6 +68,7 @@ export function MqttProvider({ children }: { children: React.ReactNode }) {
         // If we were already initialized, this is a reconnect —
         // reset so incoming retained messages are re-batched into SET_DEVICES
         if (initializedRef.current) {
+          epochRef.current++;
           initializedRef.current = false;
           devicesRef.current.clear();
         }
@@ -107,6 +109,10 @@ export function MqttProvider({ children }: { children: React.ReactNode }) {
       if (parts.length === 2) {
         const mqttPayload = payload as MqttDevicePayload;
         if (!mqttPayload?.id || !mqttPayload?.type || !mqttPayload?.state) return;
+
+        // Capture epoch to detect stale messages from a previous connection cycle
+        const msgEpoch = epochRef.current;
+
         const roomName = mqttPayload.roomName || "";
         const floorName = mqttPayload.floorName || "";
 
@@ -122,6 +128,9 @@ export function MqttProvider({ children }: { children: React.ReactNode }) {
           state: mqttPayload.state,
           lastUpdated: Date.now(),
         };
+
+        // Discard if a reconnect happened since we started processing
+        if (msgEpoch !== epochRef.current) return;
 
         const existing = devicesRef.current.get(device.id);
         const mergedDevice = existing

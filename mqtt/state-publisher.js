@@ -296,13 +296,21 @@ async function cleanupStaleRetained(homeId, { stateMachine, ring, goveeInstance 
 
   mqttClient.unsubscribe(`wc4/${homeId}/state/#`, handler);
 
+  // Re-collect valid topics to account for devices added during the wait window
+  if (stateMachine) {
+    for (const [itemId] of stateMachine.getAllDeviceStates()) {
+      validTopics.add(`wc4/${homeId}/state/control4/${itemId}`);
+    }
+  }
+
   // Clear stale retained messages (empty payload + retain = delete)
-  for (const topic of staleTopics) {
+  const confirmedStale = staleTopics.filter((t) => !validTopics.has(t));
+  for (const topic of confirmedStale) {
     mqttClient.publish(topic, "", { retain: true });
   }
 
-  if (staleTopics.length > 0) {
-    console.log(`[mqtt-state] Cleared ${staleTopics.length} stale retained messages`);
+  if (confirmedStale.length > 0) {
+    console.log(`[mqtt-state] Cleared ${confirmedStale.length} stale retained messages`);
   }
 }
 

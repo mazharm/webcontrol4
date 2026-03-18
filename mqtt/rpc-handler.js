@@ -52,13 +52,17 @@ async function handleRpcRequest(payload, topic) {
 
   const responseTopic = `wc4/${homeId}/rpc/response/${id}`;
 
+  let responded = false;
+  function respond(payload) {
+    if (responded) return;
+    responded = true;
+    mqttClient.publish(responseTopic, payload);
+  }
+
   // Use longer timeout for LLM calls
   const timeoutMs = method === "llmChat" ? LLM_TIMEOUT_MS : RPC_TIMEOUT_MS;
   const timer = setTimeout(() => {
-    mqttClient.publish(responseTopic, {
-      id,
-      error: "RPC timeout — request took too long",
-    });
+    respond({ id, error: "RPC timeout — request took too long" });
   }, timeoutMs);
 
   try {
@@ -88,7 +92,7 @@ async function handleRpcRequest(payload, topic) {
         break;
       default:
         clearTimeout(timer);
-        mqttClient.publish(responseTopic, { id, error: `Unknown method: ${method}` });
+        respond({ id, error: `Unknown method: ${method}` });
         return;
     }
 
@@ -97,7 +101,7 @@ async function handleRpcRequest(payload, topic) {
     // Check response size (skip for snapshots — they're inherently large)
     const responseStr = JSON.stringify({ id, result });
     if (method !== "getSnapshot" && responseStr.length > MAX_RESPONSE_BYTES) {
-      mqttClient.publish(responseTopic, {
+      respond({
         id,
         error: `Response too large (${Math.round(responseStr.length / 1024)}KB > ${MAX_RESPONSE_BYTES / 1024}KB limit)`,
       });
@@ -107,10 +111,10 @@ async function handleRpcRequest(payload, topic) {
       console.warn(`[mqtt-rpc] Large response for ${method}: ${Math.round(responseStr.length / 1024)}KB`);
     }
 
-    mqttClient.publish(responseTopic, { id, result });
+    respond({ id, result });
   } catch (err) {
     clearTimeout(timer);
-    mqttClient.publish(responseTopic, { id, error: err.message });
+    respond({ id, error: err.message });
     console.error(`[mqtt-rpc] RPC ${method} failed:`, err.message);
   }
 }
