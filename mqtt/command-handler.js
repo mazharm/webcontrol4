@@ -48,6 +48,15 @@ async function handleCommand(payload, topic) {
 
   if (!topic.startsWith(prefix)) return;
 
+  // Reject stale commands (replay protection)
+  if (payload && payload.ts) {
+    const age = Date.now() - new Date(payload.ts).getTime();
+    if (age > 30_000 || age < -5_000) {
+      console.warn(`[mqtt-cmd] Rejected stale command (age=${Math.round(age / 1000)}s): ${topic}`);
+      return;
+    }
+  }
+
   const remainder = topic.slice(prefix.length); // e.g. "control4/42/set" or "routines/morning/execute"
   const parts = remainder.split("/");
 
@@ -93,29 +102,52 @@ async function handleControl4Command(deviceId, payload) {
   // Apply state change optimistically BEFORE sending to Director so that
   // SSE listeners (local web client) update instantly.
   if (payload.level !== undefined) {
-    applyStateChange(itemId, "LIGHT_STATE", payload.level > 0 ? "1" : "0");
-    applyStateChange(itemId, "LIGHT_LEVEL", String(payload.level));
-    await executeScheduledCommand(itemId, "SET_LEVEL", { LEVEL: payload.level });
+    const level = Number(payload.level);
+    if (!Number.isFinite(level) || level < 0 || level > 100) {
+      throw new Error(`Invalid light level: ${payload.level}`);
+    }
+    applyStateChange(itemId, "LIGHT_STATE", level > 0 ? "1" : "0");
+    applyStateChange(itemId, "LIGHT_LEVEL", String(level));
+    await executeScheduledCommand(itemId, "SET_LEVEL", { LEVEL: level });
   }
   if (payload.on !== undefined) {
+    if (typeof payload.on !== "boolean") {
+      throw new Error(`Invalid on value: ${payload.on}`);
+    }
     const level = payload.on ? 100 : 0;
     applyStateChange(itemId, "LIGHT_STATE", payload.on ? "1" : "0");
     applyStateChange(itemId, "LIGHT_LEVEL", String(level));
     await executeScheduledCommand(itemId, "SET_LEVEL", { LEVEL: level });
   }
   if (payload.hvacMode !== undefined) {
+    const allowedModes = ["Off", "Heat", "Cool", "Auto"];
+    if (!allowedModes.includes(payload.hvacMode)) {
+      throw new Error(`Invalid hvacMode: ${payload.hvacMode}`);
+    }
     applyStateChange(itemId, "HVAC_MODE", String(payload.hvacMode));
     await executeScheduledCommand(itemId, "SET_MODE_HVAC", { MODE: payload.hvacMode });
   }
   if (payload.heatSetpointF !== undefined) {
-    applyStateChange(itemId, "HEAT_SETPOINT_F", String(payload.heatSetpointF));
-    await executeScheduledCommand(itemId, "SET_SETPOINT_HEAT", { FAHRENHEIT: payload.heatSetpointF });
+    const temp = Number(payload.heatSetpointF);
+    if (!Number.isFinite(temp) || temp < 32 || temp > 120) {
+      throw new Error(`Invalid heatSetpointF: ${payload.heatSetpointF}`);
+    }
+    applyStateChange(itemId, "HEAT_SETPOINT_F", String(temp));
+    await executeScheduledCommand(itemId, "SET_SETPOINT_HEAT", { FAHRENHEIT: temp });
   }
   if (payload.coolSetpointF !== undefined) {
-    applyStateChange(itemId, "COOL_SETPOINT_F", String(payload.coolSetpointF));
-    await executeScheduledCommand(itemId, "SET_SETPOINT_COOL", { FAHRENHEIT: payload.coolSetpointF });
+    const temp = Number(payload.coolSetpointF);
+    if (!Number.isFinite(temp) || temp < 32 || temp > 120) {
+      throw new Error(`Invalid coolSetpointF: ${payload.coolSetpointF}`);
+    }
+    applyStateChange(itemId, "COOL_SETPOINT_F", String(temp));
+    await executeScheduledCommand(itemId, "SET_SETPOINT_COOL", { FAHRENHEIT: temp });
   }
   if (payload.fanMode !== undefined) {
+    const allowedFanModes = ["Auto", "Low", "Medium", "High", "On", "Off"];
+    if (typeof payload.fanMode !== "string" || payload.fanMode.length > 20) {
+      throw new Error(`Invalid fanMode: ${payload.fanMode}`);
+    }
     applyStateChange(itemId, "FAN_MODE", String(payload.fanMode));
     await executeScheduledCommand(itemId, "SET_FAN_MODE", { MODE: payload.fanMode });
   }

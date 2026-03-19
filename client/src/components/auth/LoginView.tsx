@@ -14,7 +14,6 @@ import { useAuth } from "../../contexts/AuthContext";
 import { login, getControllers, getAuthStatus, googleAuthUrl } from "../../api/auth";
 
 const USERNAME_STORAGE_KEY = "webcontrol4:login:username";
-const PASSWORD_STORAGE_KEY = "webcontrol4:login:password";
 
 const useStyles = makeStyles({
   root: {
@@ -58,9 +57,7 @@ export function LoginView() {
   const [username, setUsername] = useState(() =>
     typeof window === "undefined" ? "" : (window.localStorage.getItem(USERNAME_STORAGE_KEY) || "")
   );
-  const [password, setPassword] = useState(() =>
-    typeof window === "undefined" ? "" : (window.localStorage.getItem(PASSWORD_STORAGE_KEY) || "")
-  );
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [hasGoogle, setHasGoogle] = useState(false);
 
@@ -72,16 +69,11 @@ export function LoginView() {
     }
   }, [username]);
 
-  useEffect(() => {
-    if (password) {
-      window.localStorage.setItem(PASSWORD_STORAGE_KEY, password);
-    } else {
-      window.localStorage.removeItem(PASSWORD_STORAGE_KEY);
-    }
-  }, [password]);
-
   // Check if Google auth is available and check initial auth status
   useEffect(() => {
+    // Clean up any previously stored password (security fix)
+    try { window.localStorage.removeItem("webcontrol4:login:password"); } catch {}
+
     (async () => {
       try {
         const status = await getAuthStatus();

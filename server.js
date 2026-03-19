@@ -551,16 +551,22 @@ if (oauth.isConfigured()) {
   });
 
   // --- Protect /api/* routes (session cookie or bearer token) ---
-  app.use("/api", (req, res, next) => {
+  const requireAuth = (req, res, next) => {
     // Allow loopback requests from the StateMachine's internal apiFn
+    // (only for Director proxy paths, with required headers)
     const remoteIp = req.ip || req.connection?.remoteAddress || "";
-    if (remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "::ffff:127.0.0.1") {
-      if (req.headers["x-director-ip"] && req.headers["x-director-token"]) return next();
+    const isLoopback = remoteIp === "127.0.0.1" || remoteIp === "::1" || remoteIp === "::ffff:127.0.0.1";
+    if (isLoopback && req.path.startsWith("/director/") && req.headers["x-director-ip"] && req.headers["x-director-token"]) {
+      return next();
     }
     if (oauth.getSessionFromReq(req)) return next();
     if (oauth.getTokenFromReq(req)) return next();
     res.status(401).json({ error: "Authentication required" });
-  });
+  };
+
+  app.use("/api", requireAuth);
+  app.use("/ring", requireAuth);
+  app.use("/notify", requireAuth);
 }
 
 // ---------------------------------------------------------------------------

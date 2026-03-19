@@ -73,6 +73,11 @@ function requestText(url, options = {}, redirectCount = 0) {
       (res) => {
         if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
           const redirectUrl = new URL(res.headers.location, parsed);
+          // Prevent SSRF: only follow redirects to private/local hosts
+          if (!isPrivateOrLocalHost(redirectUrl.hostname)) {
+            res.resume();
+            return resolve({ statusCode: 403, body: "Redirect to non-private host blocked" });
+          }
           res.resume();
           return resolve(
             requestText(
