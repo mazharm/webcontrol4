@@ -2019,6 +2019,9 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
   }
 
   // 2. State machine — always re-create on new connection
+  if (stateMachine) {
+    stateMachine.removeAllListeners();
+  }
   stateMachine = new StateMachine({
     apiFn: async (apiPath) => {
       const url = `${LOCAL_APP_ORIGIN}/api/director/${apiPath}`;
@@ -2581,6 +2584,7 @@ startScheduler();
 
 async function shutdown() {
   console.log("[shutdown] Cleaning up...");
+  stopHistoryRecording();
   if (mqttModule) {
     try { await mqttModule.disconnect(); } catch {}
   }
@@ -2592,3 +2596,6 @@ async function shutdown() {
 }
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
+process.on("unhandledRejection", (err) => {
+  console.error("[unhandledRejection]", err);
+});

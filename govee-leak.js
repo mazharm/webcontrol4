@@ -422,13 +422,14 @@ class GoveeLeak {
 
   async start() {
     this._running = true;
+    this._retryTimer = null;
 
     const tryDiscover = async () => {
       try {
         const count = await this.discoverDevices();
         if (count === 0) {
           this.log.warn("[govee] No leak sensors found, retrying in 5 minutes");
-          setTimeout(() => {
+          this._retryTimer = setTimeout(() => {
             if (this._running) tryDiscover();
           }, 5 * 60 * 1000);
           return;
@@ -446,7 +447,7 @@ class GoveeLeak {
           return;
         }
         this.log.error(`[govee] Discovery failed: ${err.message}, retrying in 30s`);
-        setTimeout(() => {
+        this._retryTimer = setTimeout(() => {
           if (this._running) tryDiscover();
         }, 30000);
       }
@@ -457,6 +458,10 @@ class GoveeLeak {
 
   async stop() {
     this._running = false;
+    if (this._retryTimer) {
+      clearTimeout(this._retryTimer);
+      this._retryTimer = null;
+    }
     this._stopPollTimer();
   }
 

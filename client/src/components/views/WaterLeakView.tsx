@@ -227,12 +227,13 @@ export function WaterLeakView() {
 
   const handleRoomChange = useCallback(
     async (sensorId: string, room: string) => {
+      const prev = rooms;
       const updated = { ...rooms, [sensorId]: room };
       setRooms(updated);
       try {
         await saveGoveeSensorRooms(updated);
       } catch {
-        // revert on failure
+        setRooms(prev);
       }
     },
     [rooms]

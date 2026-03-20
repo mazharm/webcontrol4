@@ -9,6 +9,7 @@ const mqttClient = require("./mqtt-client");
 const { deviceToMqttPayload, ringCameraToMqttPayload, ringAlarmToMqttPayload, ringSensorToMqttPayload, goveeSensorToMqttPayload } = require("./device-map");
 
 let heartbeatTimer = null;
+let unsubReconnect = null;
 
 /**
  * Initialize the state publisher.
@@ -64,7 +65,8 @@ function init({ stateMachine, ring, goveeInstance, getRoutines, getScenes }) {
   // -------------------------------------------------------------------------
   // 4. Re-publish all retained state after broker reconnect
   // -------------------------------------------------------------------------
-  mqttClient.onReconnect(() => {
+  if (unsubReconnect) unsubReconnect();
+  unsubReconnect = mqttClient.onReconnect(() => {
     console.log("[mqtt-state] Broker reconnected — re-publishing all state");
     if (stateMachine) {
       publishAllDevices(stateMachine, homeId);
@@ -318,6 +320,10 @@ async function cleanupStaleRetained(homeId, { stateMachine, ring, goveeInstance 
  * Clean up timers.
  */
 function stop() {
+  if (unsubReconnect) {
+    unsubReconnect();
+    unsubReconnect = null;
+  }
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;

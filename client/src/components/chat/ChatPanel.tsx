@@ -145,6 +145,8 @@ export function ChatPanel({ overlay, mobile }: ChatPanelProps) {
           timestamp: Date.now(),
         },
       });
+    } finally {
+      dispatch({ type: "SET_PENDING", payload: false });
     }
   }, [buildLlmContext, dispatch]);
 
