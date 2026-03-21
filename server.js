@@ -7,6 +7,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const { execSync } = require("child_process");
 const path = require("path");
+const os = require("os");
 const dgram = require("dgram");
 const oauth = require("./oauth");
 const { isPrivateOrLocalHost, requestText } = require("./http-client");
@@ -824,54 +825,78 @@ app.get("/api/discover", (_req, res) => {
   const searchMsg =
     'SEARCH * SDDP/1.0\r\nHost: 239.255.255.250:1902\r\nMan: "sddp:discover"\r\nType: sddp:all\r\n\r\n';
 
-  const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
-  const found = [];
+  const found = new Map();
   let responded = false;
+  const sockets = [];
 
   function finish() {
     if (responded) return;
     responded = true;
-    try { sock.close(); } catch {}
-    res.json(found);
+    for (const s of sockets) {
+      try { s.close(); } catch {}
+    }
+    console.log(`[SDDP] Discovery complete: ${found.size} device(s) found`);
+    res.json(Array.from(found.values()));
   }
 
-  sock.on("error", (err) => {
-    console.error("SDDP socket error:", err.message);
-    finish();
-  });
-
-  sock.on("message", (msg, rinfo) => {
-    if (found.length >= 100) return; // cap responses to prevent flooding
-    const text = msg.toString().slice(0, 4096); // limit response size
-    const entry = Object.create(null);
-    entry.ip = rinfo.address;
-    entry.port = rinfo.port;
-    // Parse SDDP headers — only extract known fields
-    const knownFields = new Set(["type", "model", "manufacturer", "primary-proxy", "host-name", "uuid", "driver", "make"]);
-    for (const line of text.split("\r\n")) {
-      const idx = line.indexOf(":");
-      if (idx > 0) {
-        const key = line.slice(0, idx).trim().toLowerCase();
-        if (!knownFields.has(key)) continue;
-        entry[key] = line
-          .slice(idx + 1)
-          .trim()
-          .slice(0, 256);
+  // Send SDDP multicast from every non-internal IPv4 interface so discovery
+  // works regardless of which adapter the OS would pick by default.
+  const interfaces = os.networkInterfaces();
+  const validInterfaces = [];
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === "IPv4" && !iface.internal) {
+        validInterfaces.push(iface.address);
       }
     }
-    found.push(entry);
-  });
+  }
+  if (validInterfaces.length === 0) validInterfaces.push("0.0.0.0");
 
-  sock.bind(() => {
-    try {
-      sock.addMembership(SDDP_ADDR);
-    } catch (err) {
-      console.error("SDDP addMembership error:", err.message);
-    }
-    sock.send(Buffer.from(searchMsg), SDDP_PORT, SDDP_ADDR, (err) => {
-      if (err) console.error("SDDP send error:", err.message);
+  for (const ip of validInterfaces) {
+    const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
+    sockets.push(sock);
+
+    sock.on("error", (err) => {
+      console.error(`[SDDP] socket error on ${ip}:`, err.message);
     });
-  });
+
+    sock.on("message", (msg, rinfo) => {
+      if (found.size >= 100) return;
+      
+      const key = `${rinfo.address}:${rinfo.port}`;
+      if (found.has(key)) return;
+
+      const text = msg.toString().slice(0, 4096);
+      const entry = Object.create(null);
+      entry.ip = rinfo.address;
+      entry.port = rinfo.port;
+      
+      const knownFields = new Set(["type", "model", "manufacturer", "primary-proxy", "host-name", "host", "uuid", "driver", "make"]);
+      for (const line of text.split("\r\n")) {
+        const idx = line.indexOf(":");
+        if (idx > 0) {
+          const k = line.slice(0, idx).trim().toLowerCase();
+          if (!knownFields.has(k)) continue;
+          // Strip surrounding quotes that SDDP values may have
+          entry[k] = line.slice(idx + 1).trim().replace(/^"|"$/g, "").slice(0, 256);
+        }
+      }
+      found.set(key, entry);
+    });
+
+    sock.bind(0, ip === "0.0.0.0" ? undefined : ip, () => {
+      try {
+        sock.setBroadcast(true);
+        sock.setMulticastTTL(4);
+        sock.addMembership(SDDP_ADDR, ip === "0.0.0.0" ? undefined : ip);
+      } catch (err) {
+        console.error(`[SDDP] setup error on ${ip}:`, err.message);
+      }
+      sock.send(Buffer.from(searchMsg), SDDP_PORT, SDDP_ADDR, (err) => {
+        if (err) console.error(`[SDDP] send error on ${ip}:`, err.message);
+      });
+    });
+  }
 
   setTimeout(finish, 4000);
 });
