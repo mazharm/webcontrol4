@@ -421,6 +421,9 @@ class GoveeLeak {
   // -----------------------------------------------------------------------
 
   async start() {
+    if (this._running) {
+      await this.stop();
+    }
     this._running = true;
     this._retryTimer = null;
 

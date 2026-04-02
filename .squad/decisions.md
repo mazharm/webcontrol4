@@ -2,30 +2,74 @@
 
 ## Active Decisions
 
-### Decision: Post-Audit Fix Priorities
+### Decision: Security Vulnerability Fixes (5 Issues)
 
-**Author:** Keyser (Lead/Architect)  
-**Date:** 2026-04-02  
-**Context:** Comprehensive codebase audit completed
+**Author:** McManus (Security Analyst)  
+**Date:** 2025-07-09  
+**Status:** Implemented  
 
-#### Decision
+#### Context
 
-The following fixes should be prioritized in order:
+Post-audit fix priorities identified 5 security vulnerabilities ranging from CRITICAL to MEDIUM severity.
 
-1. **Trending flush() data loss** — Splice buffer AFTER successful write, not before. Immediate fix, ~5 lines.
-2. **OAuth state CSRF** — Add random nonce to web app OAuth state parameter and validate on callback. ~20 lines.
-3. **MQTT command replay bypass** — Require `ts` field on commands, reject if missing. ~3 lines.
-4. **Ring route handler error safety** — Add try-catch to `/ring/login` and `/ring/verify` handlers. ~10 lines.
-5. **Ring subscription cleanup** — Store and unsubscribe `onRefreshTokenUpdated` in `disconnect()`. ~5 lines.
+#### Fixes Applied
 
-Lower priority (medium/nice-to-have):
-- CSP unsafe-inline removal (requires build tooling changes)
-- Rate limiting on auth/LLM endpoints (new middleware)
-- Ring API retry logic (wrap operations with retry helper)
+1. **OAuth CSRF — Predictable state** (CRITICAL)
+   - **File:** `server.js`
+   - State is now a 64-char hex nonce from `crypto.randomBytes(32)`, stored server-side in `oauthStateStore` Map with 10-min TTL. Callback validates nonce, rejects expired/missing, deletes after use. Cleanup runs every 5 minutes.
+
+2. **MQTT command replay bypass** (HIGH)
+   - **File:** `mqtt/command-handler.js`
+   - `ts` field is now required. Missing `payload` or `payload.ts` triggers immediate rejection with warning log.
+
+3. **Ring password held in memory** (MEDIUM)
+   - **File:** `ring-client.js`
+   - `pendingLogin` (containing plaintext password) is auto-cleared after 10 minutes via `setTimeout`. Timer cleared on successful verification or new login attempt.
+
+4. **CSP unsafe-inline in script-src** (MEDIUM)
+   - **File:** `server.js`
+   - Changed from `script-src 'self' 'unsafe-inline'` to `script-src 'self'` — inline scripts blocked. `style-src 'unsafe-inline'` retained for Fluent UI.
+
+5. **Rate limiting on sensitive endpoints** (MEDIUM)
+   - **File:** `server.js`
+   - In-memory sliding-window rate limiter using Map of timestamp arrays per IP.
+   - Limits: `/api/auth/login` and `/ring/login` at 5 req/60s; `/api/llm/chat` at 20 req/60s.
+   - 429 responses with recovery guidance. Expired entries pruned every 60 seconds.
+
+#### Trade-offs
+
+- In-memory stores (oauth nonces, rate limits) reset on server restart — acceptable for this deployment model.
+- Rate limiting by `req.ip` may be too aggressive behind shared proxies — monitor and adjust.
+- No npm packages added per project convention.
 
 #### Rationale
 
-Focused on data-loss and security gaps that can be fixed surgically without architectural changes.
+Focused on security gaps that can be fixed surgically without architectural changes. All critical and high-severity issues resolved.
+
+---
+
+### Decision: Backend Resilience Fixes
+
+**Author:** Fenster (Backend Reviewer)  
+**Date:** 2025-01-22
+
+#### Scope
+
+Error handling, retry logic, resource leak prevention.
+
+#### Decisions Made
+
+1. **Trending flush() — write-then-drain**: Buffer is now copied with `.slice(0)` before DB write, and only `.splice()`d after success. On failure, events remain in buffer for next flush retry.
+
+2. **Ring subscription lifecycle**: Token subscription is stored in module-level `tokenSubscription` and `.unsubscribe()`d in `disconnect()`. Prevents accumulation on reconnect cycles.
+
+3. **Ring retry policy**: Read operations (`getAlarmMode`, `getDevices`, `getSensorStatus`) retry up to 3 attempts with 2s delay. Write operations (`setAlarmMode`, `controlSiren`) are NOT retried — fail fast to avoid double arm/disarm. Auth errors are never retried.
+
+4. **Express async error handling**: All async routes without try-catch now have them. Error responses use generic "Internal server error" message to avoid leaking internals. Real errors logged server-side with `[Server]` tag.
+
+5. **Timer cleanup**: `withTimeout` now clears its `setTimeout` via `.finally()` when the original promise wins the race.
+
+6. **Govee start() idempotency**: Concurrent `start()` calls now stop existing timers first via `await this.stop()` before re-initializing.
 
 ## Governance
 

@@ -137,7 +137,7 @@ class TrendingEngine {
   flush() {
     if (!this._db || this._buffer.length === 0) return;
 
-    const events = this._buffer.splice(0);
+    const events = this._buffer.slice(0);
 
     const insertMany = this._db.transaction((rows) => {
       for (const e of rows) {
@@ -148,6 +148,7 @@ class TrendingEngine {
 
     try {
       insertMany(events);
+      this._buffer.splice(0, events.length);
     } catch (err) {
       this._logger("trending-flush-error", err.message);
     }

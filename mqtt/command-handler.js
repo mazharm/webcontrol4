@@ -48,13 +48,15 @@ async function handleCommand(payload, topic) {
 
   if (!topic.startsWith(prefix)) return;
 
-  // Reject stale commands (replay protection)
-  if (payload && payload.ts) {
-    const age = Date.now() - new Date(payload.ts).getTime();
-    if (age > 30_000 || age < -5_000) {
-      console.warn(`[mqtt-cmd] Rejected stale command (age=${Math.round(age / 1000)}s): ${topic}`);
-      return;
-    }
+  // Reject commands without timestamp (replay protection)
+  if (!payload || !payload.ts) {
+    console.warn(`[mqtt-cmd] Rejected command without timestamp: ${topic}`);
+    return;
+  }
+  const age = Date.now() - new Date(payload.ts).getTime();
+  if (age > 30_000 || age < -5_000) {
+    console.warn(`[mqtt-cmd] Rejected stale command (age=${Math.round(age / 1000)}s): ${topic}`);
+    return;
   }
 
   const remainder = topic.slice(prefix.length); // e.g. "control4/42/set" or "routines/morning/execute"

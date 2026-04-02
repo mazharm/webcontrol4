@@ -11,6 +11,7 @@ const crypto = require("crypto");
 let ringApi = null;
 let locations = [];
 let connectionStatus = "disconnected"; // disconnected | connecting | connected | error
+let tokenSubscription = null;
 
 // Snapshot cache: cameraId -> { buffer, ts }
 const snapshotCache = new Map();
@@ -18,6 +19,8 @@ const SNAPSHOT_CACHE_TTL = 10_000; // 10 seconds
 
 // Pending login state for email/password + 2FA flow
 let pendingLogin = null; // { email, password, hardwareId }
+let pendingLoginTimer = null;
+const PENDING_LOGIN_TTL = 10 * 60 * 1000; // 10 minutes
 
 // ---------------------------------------------------------------------------
 // Ring OAuth token request (direct HTTP, no library internals needed)
@@ -95,13 +98,16 @@ async function loginWithEmail(email, password) {
 
   if (result.requires2FA) {
     // Store credentials for the 2FA verification step
+    if (pendingLoginTimer) clearTimeout(pendingLoginTimer);
     pendingLogin = { email, password, hardwareId };
+    pendingLoginTimer = setTimeout(() => { pendingLogin = null; pendingLoginTimer = null; }, PENDING_LOGIN_TTL);
     return result;
   }
 
   if (!result.success) return result;
 
   // Got a refresh token directly (no 2FA)
+  if (pendingLoginTimer) { clearTimeout(pendingLoginTimer); pendingLoginTimer = null; }
   pendingLogin = null;
   const refreshToken = buildRefreshToken(result.data.refresh_token, hardwareId);
   persistToken(refreshToken);
@@ -125,6 +131,7 @@ async function verify2FA(code) {
   if (!result.success) return result;
 
   pendingLogin = null;
+  if (pendingLoginTimer) { clearTimeout(pendingLoginTimer); pendingLoginTimer = null; }
   const refreshToken = buildRefreshToken(result.data.refresh_token, hardwareId);
   persistToken(refreshToken);
   return initialize(refreshToken);
@@ -149,7 +156,7 @@ async function initialize(refreshToken) {
     });
 
     // Persist rotated refresh tokens
-    ringApi.onRefreshTokenUpdated.subscribe({
+    tokenSubscription = ringApi.onRefreshTokenUpdated.subscribe({
       next: ({ newRefreshToken }) => {
         persistToken(newRefreshToken);
       },
@@ -183,6 +190,10 @@ function persistToken(token) {
 }
 
 function disconnect() {
+  if (tokenSubscription) {
+    tokenSubscription.unsubscribe();
+    tokenSubscription = null;
+  }
   if (ringApi) {
     ringApi.disconnect();
     ringApi = null;
@@ -201,12 +212,26 @@ function getLocation(locationIndex = 0) {
 }
 
 function withTimeout(promise, ms, label) {
+  let timer;
   return Promise.race([
     promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)
-    ),
-  ]);
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+async function withRetry(fn, label, maxAttempts = 3, delay = 2000) {
+  const nonRetryable = /auth|unauthorized|401|403|not initialized/i;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt === maxAttempts || nonRetryable.test(err.message)) throw err;
+      console.warn(`[Ring] ${label} failed (attempt ${attempt}/${maxAttempts}): ${err.message}, retrying in ${delay}ms`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
 }
 
 const HUB_TIMEOUT = 15_000; // 15s timeout for alarm hub operations
@@ -216,14 +241,16 @@ const HUB_TIMEOUT = 15_000; // 15s timeout for alarm hub operations
 // ---------------------------------------------------------------------------
 
 async function getAlarmMode(locationIndex = 0) {
-  const loc = getLocation(locationIndex);
-  const devices = await withTimeout(loc.getDevices(), HUB_TIMEOUT, "getDevices");
-  const panel = devices.find((d) => d.data.deviceType === RingDeviceType.SecurityPanel);
-  if (!panel) throw new Error("No security panel found");
-  return {
-    mode: panel.data.mode, // 'all' (away) | 'some' (home) | 'none' (disarmed)
-    alarmInfo: panel.data.alarmInfo,
-  };
+  return withRetry(async () => {
+    const loc = getLocation(locationIndex);
+    const devices = await withTimeout(loc.getDevices(), HUB_TIMEOUT, "getDevices");
+    const panel = devices.find((d) => d.data.deviceType === RingDeviceType.SecurityPanel);
+    if (!panel) throw new Error("No security panel found");
+    return {
+      mode: panel.data.mode, // 'all' (away) | 'some' (home) | 'none' (disarmed)
+      alarmInfo: panel.data.alarmInfo,
+    };
+  }, "getAlarmMode");
 }
 
 async function setAlarmMode(mode, bypassZids = [], locationIndex = 0) {
@@ -260,34 +287,38 @@ async function controlSiren(action, locationIndex = 0) {
 // ---------------------------------------------------------------------------
 
 async function getDevices(locationIndex = 0) {
-  const loc = getLocation(locationIndex);
-  const devices = await withTimeout(loc.getDevices(), HUB_TIMEOUT, "getDevices");
-  return devices.map((d) => ({
-    zid: d.data.zid,
-    name: d.data.name,
-    type: d.data.deviceType,
-    roomId: d.data.roomId,
-    faulted: d.data.faulted,
-    tamperStatus: d.data.tamperStatus,
-    batteryLevel: d.data.batteryLevel,
-    batteryStatus: d.data.batteryStatus,
-    mode: d.data.mode,
-  }));
+  return withRetry(async () => {
+    const loc = getLocation(locationIndex);
+    const devices = await withTimeout(loc.getDevices(), HUB_TIMEOUT, "getDevices");
+    return devices.map((d) => ({
+      zid: d.data.zid,
+      name: d.data.name,
+      type: d.data.deviceType,
+      roomId: d.data.roomId,
+      faulted: d.data.faulted,
+      tamperStatus: d.data.tamperStatus,
+      batteryLevel: d.data.batteryLevel,
+      batteryStatus: d.data.batteryStatus,
+      mode: d.data.mode,
+    }));
+  }, "getDevices");
 }
 
 async function getSensorStatus(locationIndex = 0) {
-  const devices = await getDevices(locationIndex);
-  const sensorTypes = [
-    RingDeviceType.ContactSensor,
-    RingDeviceType.MotionSensor,
-    RingDeviceType.FloodFreezeSensor,
-    RingDeviceType.FreezeSensor,
-    RingDeviceType.TemperatureSensor,
-    RingDeviceType.WaterSensor,
-    RingDeviceType.TiltSensor,
-    RingDeviceType.GlassbreakSensor,
-  ];
-  return devices.filter((d) => sensorTypes.includes(d.type));
+  return withRetry(async () => {
+    const devices = await getDevices(locationIndex);
+    const sensorTypes = [
+      RingDeviceType.ContactSensor,
+      RingDeviceType.MotionSensor,
+      RingDeviceType.FloodFreezeSensor,
+      RingDeviceType.FreezeSensor,
+      RingDeviceType.TemperatureSensor,
+      RingDeviceType.WaterSensor,
+      RingDeviceType.TiltSensor,
+      RingDeviceType.GlassbreakSensor,
+    ];
+    return devices.filter((d) => sensorTypes.includes(d.type));
+  }, "getSensorStatus");
 }
 
 // ---------------------------------------------------------------------------

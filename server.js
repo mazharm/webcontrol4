@@ -5,6 +5,14 @@ const https = require("https");
 const http = require("http");
 const fs = require("fs");
 const crypto = require("crypto");
+const oauthStateStore = new Map();
+const OAUTH_STATE_TTL = 10 * 60 * 1000; // 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [nonce, entry] of oauthStateStore) {
+    if (now - entry.ts > OAUTH_STATE_TTL) oauthStateStore.delete(nonce);
+  }
+}, 5 * 60 * 1000);
 const { execSync } = require("child_process");
 const path = require("path");
 const os = require("os");
@@ -457,12 +465,46 @@ app.use((_req, res, next) => {
   }
   res.setHeader(
     "Content-Security-Policy",
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://accounts.google.com"
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://accounts.google.com"
   );
   next();
 });
 
 app.use(express.json({ limit: "1mb" }));
+
+// ---------------------------------------------------------------------------
+// Rate limiter (in-memory, per-IP sliding window)
+// ---------------------------------------------------------------------------
+const _rateLimitStores = [];
+function rateLimit(maxRequests, windowMs) {
+  const store = new Map();
+  _rateLimitStores.push({ store, windowMs });
+  return (req, res, next) => {
+    const ip = req.ip;
+    const now = Date.now();
+    let timestamps = store.get(ip);
+    if (!timestamps) { timestamps = []; store.set(ip, timestamps); }
+    const windowStart = now - windowMs;
+    while (timestamps.length && timestamps[0] <= windowStart) timestamps.shift();
+    if (timestamps.length >= maxRequests) {
+      return res.status(429).json({ error: "Too many requests. Try again later." });
+    }
+    timestamps.push(now);
+    next();
+  };
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const { store, windowMs } of _rateLimitStores) {
+    for (const [ip, timestamps] of store) {
+      const windowStart = now - windowMs;
+      while (timestamps.length && timestamps[0] <= windowStart) timestamps.shift();
+      if (!timestamps.length) store.delete(ip);
+    }
+  }
+}, 60_000);
+const authRateLimit = rateLimit(5, 60_000);
+const llmRateLimit = rateLimit(20, 60_000);
 
 // Serve React build from public-react/ (new UI), fall back to public/ (legacy)
 const reactDir = path.join(__dirname, "public-react");
@@ -510,8 +552,9 @@ if (oauth.isConfigured()) {
     const proto = req.headers["x-forwarded-proto"] || req.protocol;
     const host = req.headers.host;
     const callbackUrl = `${proto}://${host}/auth/google/callback`;
-    const state = `web:${sanitizeNextPath(req.query.next)}`;
-    res.redirect(oauth.googleAuthUrl(callbackUrl, state));
+    const nonce = crypto.randomBytes(32).toString("hex");
+    oauthStateStore.set(nonce, { nextPath: sanitizeNextPath(req.query.next), ts: Date.now() });
+    res.redirect(oauth.googleAuthUrl(callbackUrl, nonce));
   });
 
   // --- Google OAuth callback ---
@@ -535,7 +578,13 @@ if (oauth.isConfigured()) {
       const isSecure = proto === "https";
       oauth.setSessionCookie(res, sessionId, isSecure);
 
-      const next = sanitizeNextPath((state || "").replace(/^web:/, "") || "/");
+      const storedState = oauthStateStore.get(state);
+      if (!storedState || Date.now() - storedState.ts > OAUTH_STATE_TTL) {
+        oauthStateStore.delete(state);
+        return res.status(403).send("Invalid or expired OAuth state. Please try again.");
+      }
+      oauthStateStore.delete(state);
+      const next = sanitizeNextPath(storedState.nextPath || "/");
       res.redirect(next);
     } catch (err) {
       console.error("Google OAuth callback error:", err);
@@ -905,7 +954,7 @@ app.get("/api/discover", (_req, res) => {
 // Auth: get account bearer token
 // ---------------------------------------------------------------------------
 
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", authRateLimit, async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) {
     return res.status(400).json({ error: "username and password required" });
@@ -1796,7 +1845,7 @@ async function handleLlmChat(body) {
   return parsed;
 }
 
-app.post("/api/llm/chat", async (req, res) => {
+app.post("/api/llm/chat", llmRateLimit, async (req, res) => {
   try {
     const result = await handleLlmChat(req.body);
     res.json(result);
@@ -1825,10 +1874,15 @@ if (process.env.RING_REFRESH_TOKEN) {
 }
 
 app.get("/ring/status", async (_req, res) => {
-  res.json(ring.getStatus());
+  try {
+    res.json(ring.getStatus());
+  } catch (err) {
+    console.error("[Server] /ring/status error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
-app.post("/ring/login", async (req, res) => {
+app.post("/ring/login", authRateLimit, async (req, res) => {
   // Support both email/password and raw refresh token
   const { email, password, refreshToken } = req.body;
 
@@ -1836,8 +1890,13 @@ app.post("/ring/login", async (req, res) => {
     if (refreshToken.length > 1000) {
       return res.status(400).json({ error: "refreshToken too long" });
     }
-    const result = await ring.initialize(refreshToken);
-    return res.status(result.success ? 200 : 401).json(result);
+    try {
+      const result = await ring.initialize(refreshToken);
+      return res.status(result.success ? 200 : 401).json(result);
+    } catch (err) {
+      console.error("[Server] /ring/login error:", err.message);
+      return res.status(500).json({ error: "Internal server error" });
+    }
   }
 
   if (!email || typeof email !== "string" || !password || typeof password !== "string") {
@@ -1847,11 +1906,16 @@ app.post("/ring/login", async (req, res) => {
     return res.status(400).json({ error: "credentials too long" });
   }
 
-  const result = await ring.loginWithEmail(email, password);
-  if (result.requires2FA) {
-    return res.json(result);
+  try {
+    const result = await ring.loginWithEmail(email, password);
+    if (result.requires2FA) {
+      return res.json(result);
+    }
+    res.status(result.success ? 200 : 401).json(result);
+  } catch (err) {
+    console.error("[Server] /ring/login error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
   }
-  res.status(result.success ? 200 : 401).json(result);
 });
 
 app.post("/ring/verify", async (req, res) => {
@@ -1859,11 +1923,16 @@ app.post("/ring/verify", async (req, res) => {
   if (!code || typeof code !== "string" || code.length > 10) {
     return res.status(400).json({ error: "code required (string, max 10 chars)" });
   }
-  const result = await ring.verify2FA(code);
-  if (result.requires2FA) {
-    return res.json(result);
+  try {
+    const result = await ring.verify2FA(code);
+    if (result.requires2FA) {
+      return res.json(result);
+    }
+    res.status(result.success ? 200 : 401).json(result);
+  } catch (err) {
+    console.error("[Server] /ring/verify error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
   }
-  res.status(result.success ? 200 : 401).json(result);
 });
 
 app.get("/ring/alarm/mode", async (_req, res) => {
@@ -1994,8 +2063,13 @@ app.post("/notify/test", async (req, res) => {
   const title = (req.body.title && typeof req.body.title === "string")
     ? req.body.title.slice(0, 250)
     : "WebControl4 Test";
-  const result = await notify.send({ title, message, priority: notify.Priority.NORMAL });
-  res.json(result);
+  try {
+    const result = await notify.send({ title, message, priority: notify.Priority.NORMAL });
+    res.json(result);
+  } catch (err) {
+    console.error("[Server] /notify/test error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 app.post("/notify/send", async (req, res) => {
@@ -2011,8 +2085,13 @@ app.post("/notify/send", async (req, res) => {
   if (req.body.url && typeof req.body.url === "string") opts.url = req.body.url.slice(0, 512);
   if (req.body.urlTitle && typeof req.body.urlTitle === "string") opts.urlTitle = req.body.urlTitle.slice(0, 100);
   if (Number.isFinite(req.body.ttl) && req.body.ttl > 0) opts.ttl = req.body.ttl;
-  const result = await notify.send(opts);
-  res.json(result);
+  try {
+    const result = await notify.send(opts);
+    res.json(result);
+  } catch (err) {
+    console.error("[Server] /notify/send error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // ---------------------------------------------------------------------------
