@@ -166,7 +166,9 @@ class StateMachine extends EventEmitter {
     }
 
     // Compute initial derived state
-    this._deriveHomeState();
+    try { this._deriveHomeState(); } catch (err) {
+      this._logger("derive-home-state-error", err.message);
+    }
     this._logger("init-state-complete", { devices: devices.length });
   }
 
@@ -197,7 +199,9 @@ class StateMachine extends EventEmitter {
     this._home.lastActivityTime = Date.now();
 
     // Re-derive global state
-    this._deriveHomeState();
+    try { this._deriveHomeState(); } catch (err) {
+      this._logger("derive-home-state-error", err.message);
+    }
 
     // Notify listeners
     const change = {
