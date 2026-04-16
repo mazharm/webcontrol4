@@ -23,6 +23,7 @@ const ring = require("./ring-client");
 const notify = require("./notify");
 const { C4WebSocket } = require("./c4-websocket");
 const { StateMachine } = require("./state-machine");
+const { createLogger } = require("./logger");
 const { initGoveeLeak, registerGoveeRoutes } = require("./govee-leak-integration");
 const GoveeLeak = require("./govee-leak");
 let TrendingEngine = null;
@@ -153,29 +154,39 @@ const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 let lastScheduleCheck = "";  // "YYYY-MM-DD HH:MM" to avoid double-firing
 
 function startScheduler() {
+  // The scheduler tick body is wrapped in a try/catch so a single malformed
+  // routine or condition cannot escape to uncaughtException and take the
+  // process down.  Per-routine errors are already caught; this guards the
+  // outer loop logic (iteration, date math, condition-engine entry).
   const schedulerInterval = setInterval(() => {
-    const now = new Date();
-    const minuteKey = now.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:MM"
-    if (minuteKey === lastScheduleCheck) return;
-    lastScheduleCheck = minuteKey;
+    try {
+      const now = new Date();
+      const minuteKey = now.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:MM"
+      if (minuteKey === lastScheduleCheck) return;
+      lastScheduleCheck = minuteKey;
 
-    const currentDay = now.getDay(); // 0=Sunday
-    const currentTime = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      const currentDay = now.getDay(); // 0=Sunday
+      const currentTime = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
-    for (const routine of routinesStore) {
-      const sched = routine.schedule;
-      if (!sched || !sched.enabled) continue;
-      if (sched.time !== currentTime) continue;
-      if (Array.isArray(sched.days) && sched.days.length > 0 && !sched.days.includes(currentDay)) continue;
+      for (const routine of routinesStore) {
+        const sched = routine.schedule;
+        if (!sched || !sched.enabled) continue;
+        if (sched.time !== currentTime) continue;
+        if (Array.isArray(sched.days) && sched.days.length > 0 && !sched.days.includes(currentDay)) continue;
 
-      console.log(`[Scheduler] Running routine "${routine.name}" (${currentTime} ${DAY_NAMES[currentDay]})`);
-      executeRoutineSteps(routine).catch((err) => {
-        console.error(`[Scheduler] Routine "${routine.name}" (id=${routine.id}) failed:`, err?.stack || err?.message || err);
-      });
+        console.log(`[Scheduler] Running routine "${routine.name}" (${currentTime} ${DAY_NAMES[currentDay]})`);
+        executeRoutineSteps(routine).catch((err) => {
+          console.error(`[Scheduler] Routine "${routine.name}" (id=${routine.id}) failed:`, err?.stack || err?.message || err);
+        });
+      }
+
+      // Also evaluate condition-based routines on the scheduler tick
+      try { evaluateConditionRoutines(); } catch (err) {
+        console.error("[Scheduler] evaluateConditionRoutines threw:", err?.stack || err);
+      }
+    } catch (err) {
+      console.error("[Scheduler] tick error:", err?.stack || err);
     }
-
-    // Also evaluate condition-based routines on the scheduler tick
-    evaluateConditionRoutines();
   }, 15_000); // check every 15 seconds for responsive scheduling
   schedulerInterval.unref();
 }
@@ -269,7 +280,11 @@ function evaluateConditionRoutines() {
 
 // Also evaluate on every state change for responsive triggering
 function onStateChangeForConditions() {
-  evaluateConditionRoutines();
+  // Invoked synchronously from a StateMachine event listener — a throw here
+  // would propagate up through the event emitter and trip uncaughtException.
+  try { evaluateConditionRoutines(); } catch (err) {
+    console.error("[Conditions] evaluateConditionRoutines threw on state change:", err?.stack || err);
+  }
 }
 
 async function executeRoutineSteps(routine) {
@@ -1133,20 +1148,27 @@ app.get("/api/director/{*path}", async (req, res) => {
 // When a command arrives during a C4 WebSocket reconnect, the Director token
 // we hold may already be stale (refresh happens on reconnect) — firing the
 // command immediately often results in a silent 401/forbidden.  Wait briefly
-// for reconnect to complete before forwarding.  We only wait if we have an
-// active c4ws that's mid-reconnect; if c4ws is null (MCP-only mode, pre-
-// connect, or user never hit /api/realtime/connect) we forward immediately.
+// for reconnect to complete before forwarding.  If the websocket has been
+// down so long that reconnect attempts have piled up, fast-fail instead of
+// burning a full 30s HTTP timeout on a Director that is almost certainly
+// offline.
 const COMMAND_RECONNECT_WAIT_MS = 5000;
+const FAST_FAIL_AFTER_RECONNECT_ATTEMPTS = 5;   // ~30s+ of failed reconnects
 async function waitForDirectorReady() {
-  if (!c4ws) return;                     // no live session — nothing to wait for
-  if (c4ws.isConnected()) return;        // already good
+  if (!c4ws) return { ok: true };                    // no live session — nothing to wait for
+  if (c4ws.isConnected()) return { ok: true };       // already good
+  const stats = c4ws.getStats();
+  if (stats.reconnectAttempts >= FAST_FAIL_AFTER_RECONNECT_ATTEMPTS) {
+    return { ok: false, reason: "director-unreachable", reconnectAttempts: stats.reconnectAttempts };
+  }
   const deadline = Date.now() + COMMAND_RECONNECT_WAIT_MS;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 100));
-    if (!c4ws || c4ws.isConnected()) return;
+    if (!c4ws || c4ws.isConnected()) return { ok: true };
   }
-  // Deadline passed — proceed anyway (fallback polling may be in effect and
-  // the Director is still reachable via REST even if the websocket is down).
+  // Deadline passed but reconnect count still below threshold — proceed and
+  // let the per-request HTTP timeout decide.
+  return { ok: true, reason: "reconnect-pending" };
 }
 
 app.post("/api/director/{*path}", async (req, res) => {
@@ -1171,7 +1193,14 @@ app.post("/api/director/{*path}", async (req, res) => {
   const qs = new URLSearchParams(rest).toString();
   const fullUrl = `https://${ip}${apiPath}${qs ? "?" + qs : ""}`;
   try {
-    await waitForDirectorReady();
+    const ready = await waitForDirectorReady();
+    if (!ready.ok) {
+      return res.status(503).json({
+        error: "Director unreachable",
+        reason: ready.reason,
+        reconnectAttempts: ready.reconnectAttempts,
+      });
+    }
     const data = await request(fullUrl, {
       method: "POST",
       headers: {
@@ -1218,7 +1247,14 @@ app.put("/api/director/{*path}", async (req, res) => {
   const qs = new URLSearchParams(rest).toString();
   const fullUrl = `https://${ip}${apiPath}${qs ? "?" + qs : ""}`;
   try {
-    await waitForDirectorReady();
+    const ready = await waitForDirectorReady();
+    if (!ready.ok) {
+      return res.status(503).json({
+        error: "Director unreachable",
+        reason: ready.reason,
+        reconnectAttempts: ready.reconnectAttempts,
+      });
+    }
     const data = await request(fullUrl, {
       method: "PUT",
       headers: {
@@ -2250,33 +2286,45 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
       return { token: json.authToken.token, validSeconds: json.authToken.validSeconds };
     };
 
+    // Each realtime session gets a short ID so an operator can grep a full
+    // reconnect / token-refresh / stall cycle from the logs.
+    const connectionId = crypto.randomBytes(3).toString("hex");
+    const wsLog = createLogger("ws", { connectionId });
+
     c4ws = new C4WebSocket({
       directorIp: controllerIp,
       directorToken,
       refreshTokenFn,
-      logger: (...args) => console.log("[ws]", ...args),
+      logger: wsLog,
     });
 
     c4ws.onAnyChange((payload) => {
       stateMachine.handleDeviceEvent(payload);
     });
 
-    c4ws.on("disconnected", () => startFallbackPolling(controllerIp, directorToken));
+    c4ws.on("disconnected", ({ reason } = {}) => {
+      wsLog.warn("session-disconnected", { reason });
+      startFallbackPolling(controllerIp, directorToken);
+    });
     c4ws.on("reconnected", async () => {
+      wsLog.info("session-reconnected");
       stopFallbackPolling();
       try {
         // After a reconnect the Director may have updated many devices
         // while we were offline — do a full re-read once.
         await stateMachine.readInitialState();
       } catch (err) {
-        console.error("[ws] readInitialState after reconnect failed:", err?.message || err);
+        wsLog.error("reconnect-catchup-failed", { error: err?.message || String(err) });
         // Keep fallback polling on if the catch-up read failed.
         startFallbackPolling(controllerIp, directorToken);
       }
     });
     c4ws.on("reconnectFailed", (info) => {
-      console.warn("[ws] Reconnect still failing:", info);
+      wsLog.error("reconnect-persistent-failure", info || {});
       startFallbackPolling(controllerIp, directorToken);
+    });
+    c4ws.on("tokenRefreshFailed", () => {
+      wsLog.error("token-refresh-gave-up");
     });
 
     // Connect with retry
