@@ -170,7 +170,7 @@ function startScheduler() {
 
       console.log(`[Scheduler] Running routine "${routine.name}" (${currentTime} ${DAY_NAMES[currentDay]})`);
       executeRoutineSteps(routine).catch((err) => {
-        console.error(`[Scheduler] Routine "${routine.name}" failed:`, err.message);
+        console.error(`[Scheduler] Routine "${routine.name}" (id=${routine.id}) failed:`, err?.stack || err?.message || err);
       });
     }
 
@@ -261,7 +261,7 @@ function evaluateConditionRoutines() {
       lastTriggered.set(routine.id, now);
       metMap.clear(); // reset so duration tracking restarts after cooldown
       executeRoutineSteps(routine).catch((err) => {
-        console.error(`[Conditions] Routine "${routine.name}" failed:`, err.message);
+        console.error(`[Conditions] Routine "${routine.name}" (id=${routine.id}) failed:`, err?.stack || err?.message || err);
       });
     }
   }
@@ -1130,6 +1130,25 @@ app.get("/api/director/{*path}", async (req, res) => {
 // Proxy: POST command to Director REST API
 // ---------------------------------------------------------------------------
 
+// When a command arrives during a C4 WebSocket reconnect, the Director token
+// we hold may already be stale (refresh happens on reconnect) — firing the
+// command immediately often results in a silent 401/forbidden.  Wait briefly
+// for reconnect to complete before forwarding.  We only wait if we have an
+// active c4ws that's mid-reconnect; if c4ws is null (MCP-only mode, pre-
+// connect, or user never hit /api/realtime/connect) we forward immediately.
+const COMMAND_RECONNECT_WAIT_MS = 5000;
+async function waitForDirectorReady() {
+  if (!c4ws) return;                     // no live session — nothing to wait for
+  if (c4ws.isConnected()) return;        // already good
+  const deadline = Date.now() + COMMAND_RECONNECT_WAIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+    if (!c4ws || c4ws.isConnected()) return;
+  }
+  // Deadline passed — proceed anyway (fallback polling may be in effect and
+  // the Director is still reachable via REST even if the websocket is down).
+}
+
 app.post("/api/director/{*path}", async (req, res) => {
   const ip = req.headers["x-director-ip"];
   const token = req.headers["x-director-token"];
@@ -1152,6 +1171,7 @@ app.post("/api/director/{*path}", async (req, res) => {
   const qs = new URLSearchParams(rest).toString();
   const fullUrl = `https://${ip}${apiPath}${qs ? "?" + qs : ""}`;
   try {
+    await waitForDirectorReady();
     const data = await request(fullUrl, {
       method: "POST",
       headers: {
@@ -1198,6 +1218,7 @@ app.put("/api/director/{*path}", async (req, res) => {
   const qs = new URLSearchParams(rest).toString();
   const fullUrl = `https://${ip}${apiPath}${qs ? "?" + qs : ""}`;
   try {
+    await waitForDirectorReady();
     const data = await request(fullUrl, {
       method: "PUT",
       headers: {
@@ -2243,9 +2264,20 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
     c4ws.on("disconnected", () => startFallbackPolling(controllerIp, directorToken));
     c4ws.on("reconnected", async () => {
       stopFallbackPolling();
-      try { await stateMachine.readInitialState(); } catch {}
+      try {
+        // After a reconnect the Director may have updated many devices
+        // while we were offline — do a full re-read once.
+        await stateMachine.readInitialState();
+      } catch (err) {
+        console.error("[ws] readInitialState after reconnect failed:", err?.message || err);
+        // Keep fallback polling on if the catch-up read failed.
+        startFallbackPolling(controllerIp, directorToken);
+      }
     });
-    c4ws.on("reconnectFailed", () => startFallbackPolling(controllerIp, directorToken));
+    c4ws.on("reconnectFailed", (info) => {
+      console.warn("[ws] Reconnect still failing:", info);
+      startFallbackPolling(controllerIp, directorToken);
+    });
 
     // Connect with retry
     try {
@@ -2278,18 +2310,39 @@ async function connectWithRetry(wsInstance, maxAttempts = 5) {
   throw new Error(`Failed after ${maxAttempts} attempts`);
 }
 
+// Incremental fallback polling.  Full-state readInitialState() fetches every
+// device's variables — wasteful and hits the Director hard exactly when it's
+// already struggling.  Instead we refresh only devices whose last-known state
+// is stale (default: >2 min old) and do a full catch-up read only
+// occasionally, as a safety net.
+const FALLBACK_POLL_INTERVAL_MS = 15_000;
+const FALLBACK_STALE_AGE_MS = 120_000;
+const FALLBACK_FULL_REFRESH_EVERY_N = 20;   // every ~5m (20 * 15s) do a full pass
+let _fallbackPollTicks = 0;
+let _fallbackPollInFlight = false;
+
 function startFallbackPolling(controllerIp, directorToken) {
   if (fallbackPollTimer) return;
   if (!stateMachine) return;
-  console.log("[resilience] Starting fallback polling (15s interval)");
+  console.log("[resilience] Starting fallback polling (15s interval, incremental)");
+  _fallbackPollTicks = 0;
 
   fallbackPollTimer = setInterval(async () => {
+    if (_fallbackPollInFlight) return;   // don't overlap if Director is slow
+    _fallbackPollInFlight = true;
     try {
-      await stateMachine.readInitialState();
+      _fallbackPollTicks++;
+      if (_fallbackPollTicks % FALLBACK_FULL_REFRESH_EVERY_N === 1) {
+        await stateMachine.readInitialState();
+      } else {
+        await stateMachine.readStaleDeviceStates(FALLBACK_STALE_AGE_MS);
+      }
     } catch (err) {
       console.error("[resilience] Fallback poll error:", err.message);
+    } finally {
+      _fallbackPollInFlight = false;
     }
-  }, 15000);
+  }, FALLBACK_POLL_INTERVAL_MS);
   if (fallbackPollTimer.unref) fallbackPollTimer.unref();
 }
 
@@ -2482,6 +2535,7 @@ app.get("/api/alerts", (_req, res) => {
 // ---------------------------------------------------------------------------
 
 app.get("/api/health", (_req, res) => {
+  const wsStats = c4ws ? c4ws.getStats() : null;
   const health = {
     status: "ok",
     uptime: Math.round(process.uptime()),
@@ -2489,6 +2543,11 @@ app.get("/api/health", (_req, res) => {
     websocket: {
       connected: c4ws ? c4ws.isConnected() : false,
       mode: c4ws ? "websocket" : (stateMachine ? (fallbackPollTimer ? "polling" : "mock") : "disconnected"),
+      ...(wsStats || {}),
+    },
+    fallbackPolling: {
+      active: !!fallbackPollTimer,
+      ticks: _fallbackPollTicks,
     },
     stateMachine: {
       initialized: !!stateMachine,
@@ -2505,6 +2564,11 @@ app.get("/api/health", (_req, res) => {
 
   if (!stateMachine || (!c4ws?.isConnected() && !fallbackPollTimer && !mockEventTimer)) {
     health.status = "degraded";
+  }
+  // Websocket present but stale traffic → degraded even if socket reports connected.
+  if (wsStats && wsStats.connected && wsStats.lastEventAgoMs !== null && wsStats.lastEventAgoMs > 5 * 60_000) {
+    health.status = "degraded";
+    health.websocket.stale = true;
   }
 
   res.json(health);
@@ -2686,20 +2750,41 @@ function startServer() {
 startServer();
 startScheduler();
 
-async function shutdown() {
+async function cleanup() {
   console.log("[shutdown] Cleaning up...");
   stopHistoryRecording();
+  stopFallbackPolling();
   if (mqttModule) {
     try { await mqttModule.disconnect(); } catch {}
   }
-  if (goveeInstance) goveeInstance.stop();
-  if (trending) trending.close();
-  if (c4ws) c4ws.disconnect();
-  ring.disconnect();
-  process.exit(0);
+  if (goveeInstance) { try { goveeInstance.stop(); } catch {} }
+  if (trending) { try { trending.close(); } catch {} }
+  if (c4ws) { try { c4ws.disconnect(); } catch {} }
+  try { ring.disconnect(); } catch {}
 }
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+
+let _shuttingDown = false;
+async function shutdown(code = 0) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  // Hard deadline: a hung shutdown must not prevent the process dying.
+  const hardKill = setTimeout(() => process.exit(code || 1), 5000);
+  hardKill.unref();
+  try { await cleanup(); } catch (err) { console.error("[shutdown] cleanup error:", err); }
+  process.exit(code);
+}
+
+process.on("SIGTERM", () => shutdown(0));
+process.on("SIGINT", () => shutdown(0));
 process.on("unhandledRejection", (err) => {
   console.error("[unhandledRejection]", err);
+});
+// A synchronous throw anywhere in the event loop (bad Director JSON,
+// assertion failure, etc.) would otherwise kill the process with zero
+// cleanup — leaking the SQLite lock, the MQTT connection, and the Ring
+// session.  Clean up then exit with a non-zero code so a supervisor can
+// restart us.
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err);
+  shutdown(1);
 });

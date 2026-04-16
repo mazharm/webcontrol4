@@ -15,11 +15,31 @@ const EventEmitter = require("events");
 // Default token lifetime from Director is 86400s (24h).
 // We refresh ~1h before expiry to be safe.
 const TOKEN_REFRESH_BUFFER_S = 3600;
+const TOKEN_REFRESH_RETRY_BASE_MS = 60_000;        // 1m
+const TOKEN_REFRESH_RETRY_MAX_MS = 10 * 60_000;    // 10m
+const TOKEN_REFRESH_MAX_RETRIES = 6;               // ~18m of retries before giving up
 
-// Reconnect backoff: 1s, 2s, 4s, 8s, 16s, 30s (cap)
+// Reconnect backoff: 1s, 2s, 4s, 8s, 16s, 30s (cap) with ±25% jitter.
+// We never permanently give up — the Director may reboot for firmware
+// upgrades that take longer than any finite retry budget.  Instead we raise
+// `reconnectFailed` every RECONNECT_ALERT_EVERY attempts so an operator /
+// health check can alert without the process abandoning recovery.
 const BACKOFF_BASE_MS = 1000;
-const BACKOFF_MAX_MS = 30000;
-const MAX_RECONNECT_ATTEMPTS = 20;
+const BACKOFF_MAX_MS = 30_000;
+const RECONNECT_ALERT_EVERY = 20;
+
+// Application-level heartbeat.  socket.io's transport ping detects broken
+// TCP, but cannot detect a Director that silently stopped publishing (e.g.
+// hung process behind a working socket).  We emit a no-op ping on our own
+// schedule and force a reconnect if we haven't seen ANY traffic in the
+// stall window.
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const STALL_TIMEOUT_MS = 90_000;   // 3x heartbeat — tolerates one missed beat
+
+// Event deduplication — Director occasionally retransmits.  Key by
+// itemId:varName:value within a short window.
+const DEDUP_WINDOW_MS = 2_000;
+const DEDUP_MAX_ENTRIES = 512;
 
 class C4WebSocket extends EventEmitter {
   /**
@@ -44,6 +64,15 @@ class C4WebSocket extends EventEmitter {
     this._reconnectAttempts = 0;
     this._reconnectTimer = null;
     this._tokenRefreshTimer = null;
+    this._tokenRefreshRetryCount = 0;
+    this._heartbeatTimer = null;
+    this._lastEventAt = 0;
+    this._lastTokenRefreshAt = 0;
+    this._connectingPromise = null;   // in-flight connect()
+    this._replacingSocket = false;    // guard against concurrent _setupSocket
+
+    // Event dedup: array of { key, ts } ordered by ts, size-capped.
+    this._dedup = [];
 
     // Callback registries
     this._deviceCallbacks = new Map(); // itemId -> Set<Function>
@@ -54,31 +83,35 @@ class C4WebSocket extends EventEmitter {
   // Public API
   // -------------------------------------------------------------------------
 
-  /** Establish Socket.IO connection to the Director. */
+  /** Establish Socket.IO connection to the Director.  Idempotent: if a
+   *  connect is already in flight, the same promise is returned. */
   connect() {
-    return new Promise((resolve, reject) => {
-      this._userDisconnected = false;
-      this._reconnectAttempts = 0;
+    if (this._connectingPromise) return this._connectingPromise;
+    if (this._connected) return Promise.resolve();
 
+    this._userDisconnected = false;
+    this._reconnectAttempts = 0;
+
+    this._connectingPromise = new Promise((resolve, reject) => {
       try {
         this._setupSocket(resolve, reject);
       } catch (err) {
         reject(err);
       }
+    }).finally(() => {
+      this._connectingPromise = null;
     });
+    return this._connectingPromise;
   }
 
-  /** Graceful disconnect. */
+  /** Graceful disconnect.  Idempotent. */
   disconnect() {
     this._userDisconnected = true;
     this._clearTimers();
-    if (this._socket) {
-      this._socket.disconnect();
-      this._socket.removeAllListeners();
-      this._socket = null;
-    }
+    this._teardownSocket();
+    const wasConnected = this._connected;
     this._connected = false;
-    this.emit("disconnected", { reason: "user" });
+    if (wasConnected) this.emit("disconnected", { reason: "user" });
     this._logger("ws-disconnected", "user-initiated");
   }
 
@@ -112,99 +145,197 @@ class C4WebSocket extends EventEmitter {
     return this._connected;
   }
 
+  /** Diagnostic snapshot — suitable for /api/health. */
+  getStats() {
+    return {
+      connected: this._connected,
+      reconnectAttempts: this._reconnectAttempts,
+      lastEventAt: this._lastEventAt || null,
+      lastEventAgoMs: this._lastEventAt ? Date.now() - this._lastEventAt : null,
+      lastTokenRefreshAt: this._lastTokenRefreshAt || null,
+      tokenRefreshRetryCount: this._tokenRefreshRetryCount,
+      deviceCallbacks: this._deviceCallbacks.size,
+      anyCallbacks: this._anyCallbacks.size,
+    };
+  }
+
   // -------------------------------------------------------------------------
-  // Internal
+  // Internal: socket lifecycle
   // -------------------------------------------------------------------------
+
+  _teardownSocket() {
+    if (this._heartbeatTimer) { clearInterval(this._heartbeatTimer); this._heartbeatTimer = null; }
+    if (this._socket) {
+      try { this._socket.removeAllListeners(); } catch {}
+      try { this._socket.disconnect(); } catch {}
+      this._socket = null;
+    }
+  }
 
   _setupSocket(resolveFn, rejectFn) {
-    if (this._socket) {
-      this._socket.removeAllListeners();
-      this._socket.disconnect();
+    // Guard against concurrent socket replacement (token refresh racing a
+    // scheduled reconnect).  The second caller loses; the first will emit
+    // `reconnected`/`connected` once settled.
+    if (this._replacingSocket) {
+      this._logger("ws-setup-skipped", "replacement already in progress");
+      if (rejectFn) rejectFn(new Error("connect already in progress"));
+      return;
     }
+    this._replacingSocket = true;
+    try {
+      this._teardownSocket();
 
-    const url = `https://${this._directorIp}`;
-    this._logger("ws-connecting", url);
+      const url = `https://${this._directorIp}`;
+      this._logger("ws-connecting", url);
 
-    this._socket = io(url, {
-      transports: ["websocket"],
-      extraHeaders: { JWT: this._token },
-      rejectUnauthorized: this._rejectUnauthorized,
-      reconnection: false, // we manage reconnection ourselves
-      timeout: 10000,
-    });
-
-    let resolved = false;
-
-    this._socket.on("connect", () => {
-      this._connected = true;
-      this._reconnectAttempts = 0;
-      this._logger("ws-connected", url);
-      this.emit("connected");
-      this._scheduleTokenRefresh();
-
-      if (!resolved) {
-        resolved = true;
-        resolveFn?.();
-      }
-    });
-
-    // The Director pushes events on the default namespace.
-    // Listen for all possible event names the Director might use.
-    const eventNames = [
-      "N",           // pyControl4 uses this namespace message
-      "event",
-      "message",
-      "data",
-      "deviceChange",
-      "variableChange",
-    ];
-
-    for (const name of eventNames) {
-      this._socket.on(name, (data) => {
-        this._logger("ws-raw-event", { event: name, data });
-        this._handleEvent(data);
+      this._socket = io(url, {
+        transports: ["websocket"],
+        extraHeaders: { JWT: this._token },
+        rejectUnauthorized: this._rejectUnauthorized,
+        reconnection: false, // we manage reconnection ourselves
+        timeout: 10000,
       });
+
+      let settled = false;
+      const settleOk = () => {
+        if (settled) return;
+        settled = true;
+        resolveFn?.();
+      };
+      const settleErr = (err) => {
+        if (settled) return;
+        settled = true;
+        rejectFn?.(err);
+      };
+
+      this._socket.on("connect", () => {
+        this._connected = true;
+        this._reconnectAttempts = 0;
+        this._lastEventAt = Date.now();
+        this._logger("ws-connected", url);
+        this.emit("connected");
+        this._startHeartbeat();
+        this._scheduleTokenRefresh();
+        settleOk();
+      });
+
+      // The Director pushes events on the default namespace.
+      // Listen for all possible event names the Director might use.
+      const eventNames = [
+        "N",           // pyControl4 uses this namespace message
+        "event",
+        "message",
+        "data",
+        "deviceChange",
+        "variableChange",
+      ];
+
+      for (const name of eventNames) {
+        this._socket.on(name, (data) => {
+          this._lastEventAt = Date.now();
+          this._logger("ws-raw-event", { event: name, data });
+          this._handleEvent(data);
+        });
+      }
+
+      // Catch-all for unknown events (helps discover Director's event format)
+      this._socket.onAny((eventName, ...args) => {
+        this._lastEventAt = Date.now();
+        if (!eventNames.includes(eventName) && eventName !== "connect" && eventName !== "disconnect") {
+          this._logger("ws-unknown-event", { event: eventName, args });
+          // Attempt to parse as device event anyway
+          if (args[0] && typeof args[0] === "object") {
+            this._handleEvent(args[0]);
+          }
+        }
+      });
+
+      this._socket.on("disconnect", (reason) => {
+        this._connected = false;
+        this._stopHeartbeat();
+        this._logger("ws-disconnected", reason);
+        this.emit("disconnected", { reason });
+
+        if (!this._userDisconnected) {
+          this._scheduleReconnect();
+        }
+      });
+
+      this._socket.on("connect_error", (err) => {
+        this._connected = false;
+        this._stopHeartbeat();
+        this._logger("ws-connect-error", err.message);
+        this.emit("error", err);
+
+        // Only reject the caller's promise on the very first attempt.
+        // Subsequent errors trigger reconnect; rejecting would leak an
+        // unhandled rejection into the caller's already-resolved context.
+        if (this._reconnectAttempts === 0) {
+          settleErr(err);
+        }
+
+        if (!this._userDisconnected) {
+          this._scheduleReconnect();
+        }
+      });
+    } finally {
+      this._replacingSocket = false;
     }
+  }
 
-    // Catch-all for unknown events (helps discover Director's event format)
-    this._socket.onAny((eventName, ...args) => {
-      if (!eventNames.includes(eventName) && eventName !== "connect" && eventName !== "disconnect") {
-        this._logger("ws-unknown-event", { event: eventName, args });
-        // Attempt to parse as device event anyway
-        if (args[0] && typeof args[0] === "object") {
-          this._handleEvent(args[0]);
-        }
-      }
-    });
+  // -------------------------------------------------------------------------
+  // Internal: heartbeat / stall detection
+  // -------------------------------------------------------------------------
 
-    this._socket.on("disconnect", (reason) => {
-      this._connected = false;
-      this._logger("ws-disconnected", reason);
-      this.emit("disconnected", { reason });
+  _startHeartbeat() {
+    this._stopHeartbeat();
+    this._heartbeatTimer = setInterval(() => {
+      if (!this._connected || !this._socket) return;
 
-      if (!this._userDisconnected) {
-        this._scheduleReconnect();
-      }
-    });
-
-    this._socket.on("connect_error", (err) => {
-      this._connected = false;
-      this._logger("ws-connect-error", err.message);
-      this.emit("error", err);
-
-      if (!resolved) {
-        resolved = true;
-        // Don't reject on first connect — schedule reconnect instead
-        // Only reject if we've never connected
-        if (this._reconnectAttempts === 0 && rejectFn) {
-          rejectFn(err);
-        }
+      // Fire a ping with ack-timeout.  If the Director doesn't respond
+      // *and* we've seen no other traffic for STALL_TIMEOUT_MS, force a
+      // reconnect — the connection is dead but has not surfaced as such.
+      try {
+        this._socket.timeout(HEARTBEAT_INTERVAL_MS).emit("ping", () => {
+          this._lastEventAt = Date.now();
+        });
+      } catch (err) {
+        this._logger("ws-heartbeat-emit-error", err.message);
       }
 
-      if (!this._userDisconnected) {
-        this._scheduleReconnect();
+      const stale = Date.now() - (this._lastEventAt || 0);
+      if (stale > STALL_TIMEOUT_MS) {
+        this._logger("ws-stall-detected", `${Math.round(stale / 1000)}s without traffic`);
+        this._stopHeartbeat();
+        // Force-close the socket; the `disconnect` handler will reconnect.
+        try { this._socket && this._socket.disconnect(); } catch {}
       }
-    });
+    }, HEARTBEAT_INTERVAL_MS);
+    if (this._heartbeatTimer.unref) this._heartbeatTimer.unref();
+  }
+
+  _stopHeartbeat() {
+    if (this._heartbeatTimer) { clearInterval(this._heartbeatTimer); this._heartbeatTimer = null; }
+  }
+
+  // -------------------------------------------------------------------------
+  // Internal: event handling + dedup
+  // -------------------------------------------------------------------------
+
+  _isDuplicate(payload) {
+    const key = `${payload.itemId}:${payload.varName}:${payload.value}`;
+    const now = payload.timestamp;
+
+    // Evict expired entries from the front (array is oldest-first).
+    while (this._dedup.length && now - this._dedup[0].ts > DEDUP_WINDOW_MS) {
+      this._dedup.shift();
+    }
+    for (const entry of this._dedup) {
+      if (entry.key === key) return true;
+    }
+    this._dedup.push({ key, ts: now });
+    if (this._dedup.length > DEDUP_MAX_ENTRIES) this._dedup.shift();
+    return false;
   }
 
   _handleEvent(data) {
@@ -257,6 +388,11 @@ class C4WebSocket extends EventEmitter {
           raw: evt,
         };
 
+        if (this._isDuplicate(payload)) {
+          this._logger("ws-event-duplicate", { itemId, varName });
+          continue;
+        }
+
         // Per-device callbacks
         const cbs = this._deviceCallbacks.get(itemId);
         if (cbs) {
@@ -280,99 +416,110 @@ class C4WebSocket extends EventEmitter {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Internal: token refresh
+  // -------------------------------------------------------------------------
+
   _scheduleTokenRefresh() {
     if (this._tokenRefreshTimer) clearTimeout(this._tokenRefreshTimer);
     if (!this._refreshTokenFn) return;
 
     // Refresh ~1h before expiry.  Default Director token = 86400s → refresh at ~82800s (23h)
     const refreshMs = (86400 - TOKEN_REFRESH_BUFFER_S) * 1000;
-    // Add jitter: ±5 minutes
+    // Add jitter: ±5 minutes (reduces correlated refresh storms across replicas)
     const jitter = (Math.random() - 0.5) * 10 * 60 * 1000;
-    const delay = Math.max(60000, refreshMs + jitter); // at least 1 minute
+    const delay = Math.max(60_000, refreshMs + jitter); // at least 1 minute
 
+    this._tokenRefreshRetryCount = 0;
     this._logger("ws-token-refresh-scheduled", `in ${Math.round(delay / 60000)}m`);
 
-    this._tokenRefreshTimer = setTimeout(async () => {
-      try {
-        this._logger("ws-token-refreshing");
-        const { token } = await this._refreshTokenFn();
-        this._token = token;
-        this._logger("ws-token-refreshed", "reconnecting with new token");
-
-        // Disconnect and reconnect with new token
-        if (this._socket) {
-          this._socket.disconnect();
-          this._socket.removeAllListeners();
-          this._socket = null;
-        }
-        this._connected = false;
-
-        this._setupSocket(
-          () => this.emit("reconnected"),
-          (err) => this._logger("ws-token-refresh-reconnect-error", err.message)
-        );
-      } catch (err) {
-        this._logger("ws-token-refresh-error", err.message);
-        // Try the refresh again in 5 minutes (not _scheduleTokenRefresh which recomputes 23h delay)
-        if (this._tokenRefreshTimer) clearTimeout(this._tokenRefreshTimer);
-        this._tokenRefreshTimer = setTimeout(async () => {
-          try {
-            this._logger("ws-token-refresh-retry");
-            const { token } = await this._refreshTokenFn();
-            this._token = token;
-            this._logger("ws-token-refreshed", "reconnecting with new token (retry)");
-            if (this._socket) {
-              this._socket.disconnect();
-              this._socket.removeAllListeners();
-              this._socket = null;
-            }
-            this._connected = false;
-            this._setupSocket(
-              () => this.emit("reconnected"),
-              (retryErr) => this._logger("ws-token-refresh-reconnect-error", retryErr.message)
-            );
-          } catch (retryErr) {
-            this._logger("ws-token-refresh-retry-failed", retryErr.message);
-            // Fall back to full re-schedule (another ~23h) as last resort
-            this._scheduleTokenRefresh();
-          }
-        }, 5 * 60 * 1000);
-      }
-    }, delay);
-
+    this._tokenRefreshTimer = setTimeout(() => this._refreshToken(), delay);
     if (this._tokenRefreshTimer.unref) this._tokenRefreshTimer.unref();
   }
 
+  async _refreshToken() {
+    try {
+      this._logger("ws-token-refreshing");
+      const { token } = await this._refreshTokenFn();
+      this._token = token;
+      this._lastTokenRefreshAt = Date.now();
+      this._tokenRefreshRetryCount = 0;
+      this._logger("ws-token-refreshed", "reconnecting with new token");
+
+      // Reconnect with the new token.  Use the reconnect path so
+      // replacement goes through the same guard as regular reconnects.
+      this._setupSocket(
+        () => this.emit("reconnected"),
+        (err) => this._logger("ws-token-refresh-reconnect-error", err.message)
+      );
+
+      // Schedule the next refresh at the full 23h interval.
+      this._scheduleTokenRefresh();
+    } catch (err) {
+      this._tokenRefreshRetryCount++;
+      this._logger("ws-token-refresh-error", {
+        error: err.message,
+        retry: this._tokenRefreshRetryCount,
+      });
+
+      if (this._tokenRefreshRetryCount >= TOKEN_REFRESH_MAX_RETRIES) {
+        this._logger("ws-token-refresh-gave-up", "falling back to full 23h reschedule");
+        this._tokenRefreshRetryCount = 0;
+        this.emit("tokenRefreshFailed");
+        this._scheduleTokenRefresh();
+        return;
+      }
+
+      // Bounded exponential backoff for retries.
+      const delay = Math.min(
+        TOKEN_REFRESH_RETRY_BASE_MS * Math.pow(2, this._tokenRefreshRetryCount - 1),
+        TOKEN_REFRESH_RETRY_MAX_MS
+      );
+      if (this._tokenRefreshTimer) clearTimeout(this._tokenRefreshTimer);
+      this._tokenRefreshTimer = setTimeout(() => this._refreshToken(), delay);
+      if (this._tokenRefreshTimer.unref) this._tokenRefreshTimer.unref();
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Internal: reconnect
+  // -------------------------------------------------------------------------
+
   _scheduleReconnect() {
     if (this._userDisconnected) return;
-    if (this._reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      this._logger("ws-reconnect-exhausted", `gave up after ${MAX_RECONNECT_ATTEMPTS} attempts`);
-      this.emit("reconnectFailed");
-      return;
-    }
+    if (this._reconnectTimer) return; // already scheduled
 
-    const delay = Math.min(
-      BACKOFF_BASE_MS * Math.pow(2, this._reconnectAttempts),
-      BACKOFF_MAX_MS
-    );
     this._reconnectAttempts++;
+
+    // Bounded exponential backoff with ±25% jitter.  Never give up — a
+    // Director firmware upgrade can take longer than any finite budget.
+    const n = Math.min(this._reconnectAttempts - 1, 10);
+    const base = Math.min(BACKOFF_BASE_MS * Math.pow(2, n), BACKOFF_MAX_MS);
+    const delay = Math.floor(base * (0.75 + Math.random() * 0.5));
+
+    // Surface a persistent outage via a periodic event for alerting.
+    if (this._reconnectAttempts % RECONNECT_ALERT_EVERY === 0) {
+      this._logger("ws-reconnect-still-failing", { attempts: this._reconnectAttempts });
+      this.emit("reconnectFailed", { attempts: this._reconnectAttempts });
+    }
 
     this._logger("ws-reconnecting", { attempt: this._reconnectAttempts, delayMs: delay });
     this.emit("reconnecting", { attempt: this._reconnectAttempts, delay });
 
     this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
       this._setupSocket(
         () => this.emit("reconnected"),
-        () => {} // swallow reject, _scheduleReconnect will be called again on error
+        () => {} // swallow reject; `connect_error` will re-schedule
       );
     }, delay);
-
     if (this._reconnectTimer.unref) this._reconnectTimer.unref();
   }
 
   _clearTimers() {
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
     if (this._tokenRefreshTimer) { clearTimeout(this._tokenRefreshTimer); this._tokenRefreshTimer = null; }
+    this._stopHeartbeat();
   }
 }
 
