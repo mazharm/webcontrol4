@@ -54,8 +54,16 @@ CREATE INDEX IF NOT EXISTS idx_mode_started ON home_mode_log(started_at);
 
 const FLUSH_INTERVAL_MS = 5000;
 const BUFFER_MAX = 1000;
+// Hard cap on in-memory buffer.  If the DB is closed or throwing on every
+// flush, recordEvent() would otherwise grow the buffer forever and leak
+// memory.  When we hit this limit we drop oldest events — losing data is
+// preferable to OOM'ing the bridge process.
+const BUFFER_HARD_CAP = 10_000;
 const RAW_RETENTION_DAYS = 30;
 const BASELINE_DAYS = 14;
+// If midnight rollup scheduling somehow fails (system clock jump, malformed
+// date), retry an hour later rather than silently giving up forever.
+const ROLLUP_RETRY_DELAY_MS = 60 * 60 * 1000;
 
 class TrendingEngine {
   /**
@@ -128,8 +136,21 @@ class TrendingEngine {
       timestamp: timestamp || Date.now(),
     });
 
+    // If flush is failing repeatedly (DB locked, closed, etc.) the buffer
+    // would otherwise grow without bound.  Protect memory by shedding
+    // oldest events once we exceed the hard cap.
+    if (this._buffer.length > BUFFER_HARD_CAP) {
+      const dropped = this._buffer.length - BUFFER_HARD_CAP;
+      this._buffer.splice(0, dropped);
+      this._logger("trending-buffer-dropped", { dropped, bufferSize: this._buffer.length });
+    }
+
     if (this._buffer.length >= BUFFER_MAX) {
-      this.flush();
+      try { this.flush(); } catch (err) {
+        // flush() already logs; catch here so a throwing flush never
+        // propagates back into the state-machine event listener.
+        this._logger("trending-flush-unhandled", err?.message || String(err));
+      }
     }
   }
 
@@ -337,25 +358,50 @@ class TrendingEngine {
   // -----------------------------------------------------------------------
 
   _startBufferTimer() {
-    this._bufferTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+    // A thrown flush() (e.g. DB temporarily locked) must never escape the
+    // interval callback — uncaughtException would kill the whole process.
+    this._bufferTimer = setInterval(() => {
+      try { this.flush(); } catch (err) {
+        this._logger("trending-flush-timer-error", err?.message || String(err));
+      }
+    }, FLUSH_INTERVAL_MS);
     if (this._bufferTimer.unref) this._bufferTimer.unref();
   }
 
   _scheduleDailyRollup() {
     const scheduleNext = () => {
-      const now = new Date();
-      const midnight = new Date(now);
-      midnight.setHours(24, 0, 5, 0); // 5 seconds past midnight
-      const msUntilMidnight = midnight.getTime() - now.getTime();
+      try {
+        const now = new Date();
+        const midnight = new Date(now);
+        midnight.setHours(24, 0, 5, 0); // 5 seconds past midnight
+        let msUntilMidnight = midnight.getTime() - now.getTime();
+        // Defensive clamp against clock skew / DST jumps.
+        if (!Number.isFinite(msUntilMidnight) || msUntilMidnight < 0 || msUntilMidnight > 26 * 3600_000) {
+          this._logger("trending-rollup-clamp", { msUntilMidnight });
+          msUntilMidnight = 24 * 3600_000;
+        }
 
-      this._rollupTimer = setTimeout(() => {
-        this._rollupDaily();
-        this._pruneOldEvents();
-        scheduleNext(); // re-schedule based on next midnight to avoid drift
-      }, msUntilMidnight);
+        this._rollupTimer = setTimeout(() => {
+          try {
+            this._rollupDaily();
+            this._pruneOldEvents();
+          } catch (err) {
+            this._logger("trending-rollup-tick-error", err?.message || String(err));
+          } finally {
+            scheduleNext(); // always re-schedule, even if this tick threw
+          }
+        }, msUntilMidnight);
 
-      if (this._rollupTimer.unref) this._rollupTimer.unref();
-      this._logger("trending-rollup-scheduled", `in ${Math.round(msUntilMidnight / 60000)}m`);
+        if (this._rollupTimer.unref) this._rollupTimer.unref();
+        this._logger("trending-rollup-scheduled", `in ${Math.round(msUntilMidnight / 60000)}m`);
+      } catch (err) {
+        // If the scheduling math itself failed (shouldn't happen, but a
+        // bad system clock could trip something), retry in an hour so we
+        // don't silently stop rolling up forever.
+        this._logger("trending-rollup-schedule-error", err?.message || String(err));
+        this._rollupTimer = setTimeout(scheduleNext, ROLLUP_RETRY_DELAY_MS);
+        if (this._rollupTimer.unref) this._rollupTimer.unref();
+      }
     };
 
     scheduleNext();

@@ -23,6 +23,7 @@ const ring = require("./ring-client");
 const notify = require("./notify");
 const { C4WebSocket } = require("./c4-websocket");
 const { StateMachine } = require("./state-machine");
+const { createLogger } = require("./logger");
 const { initGoveeLeak, registerGoveeRoutes } = require("./govee-leak-integration");
 const GoveeLeak = require("./govee-leak");
 let TrendingEngine = null;
@@ -82,12 +83,42 @@ try {
   console.error("Failed to load settings:", err.message);
 }
 
-// Apply persisted Pushover keys to process.env (notify.js reads from env)
+// Apply persisted Pushover keys to process.env (notify.js reads from env).
+// If the setting is populated it wins; if it's blank we leave any env value
+// intact so the original Docker-style env-only configuration keeps working
+// on startup.  The explicit-clear path (user blanks the field in the UI)
+// is handled in POST /api/settings.
 function applyPushoverEnv() {
   if (appSettings.pushoverAppToken) process.env.PUSHOVER_APP_TOKEN = appSettings.pushoverAppToken;
   if (appSettings.pushoverUserKey) process.env.PUSHOVER_USER_KEY = appSettings.pushoverUserKey;
 }
 applyPushoverEnv();
+
+// ---------------------------------------------------------------------------
+// Config precedence helper
+// ---------------------------------------------------------------------------
+// Single source of truth for "should we use the UI-saved value or the env
+// default?".  Rule: persisted settings win when non-empty; env is the
+// fallback.  This fixes a previous inconsistency where MQTT init read env
+// first (`process.env.X || appSettings.X`) while the GET /api/settings
+// endpoint read settings first, so a user saving MQTT creds in the UI would
+// see their values come back but the actual connection would silently keep
+// using the env value.
+
+function cfg(settingsKey, envKey, fallback = "") {
+  const s = appSettings[settingsKey];
+  if (s !== undefined && s !== null && s !== "") return s;
+  const e = envKey ? process.env[envKey] : undefined;
+  if (e !== undefined && e !== null && e !== "") return e;
+  return fallback;
+}
+
+// Clear an env var so a subsequent getConfig() cannot silently resurrect a
+// stale value after the operator has intentionally cleared the setting in
+// the UI.  (Used on MQTT disable, etc.)
+function clearEnvVar(name) {
+  if (name) delete process.env[name];
+}
 
 function persistSettings() {
   try {
@@ -153,29 +184,39 @@ const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 let lastScheduleCheck = "";  // "YYYY-MM-DD HH:MM" to avoid double-firing
 
 function startScheduler() {
+  // The scheduler tick body is wrapped in a try/catch so a single malformed
+  // routine or condition cannot escape to uncaughtException and take the
+  // process down.  Per-routine errors are already caught; this guards the
+  // outer loop logic (iteration, date math, condition-engine entry).
   const schedulerInterval = setInterval(() => {
-    const now = new Date();
-    const minuteKey = now.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:MM"
-    if (minuteKey === lastScheduleCheck) return;
-    lastScheduleCheck = minuteKey;
+    try {
+      const now = new Date();
+      const minuteKey = now.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:MM"
+      if (minuteKey === lastScheduleCheck) return;
+      lastScheduleCheck = minuteKey;
 
-    const currentDay = now.getDay(); // 0=Sunday
-    const currentTime = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      const currentDay = now.getDay(); // 0=Sunday
+      const currentTime = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
-    for (const routine of routinesStore) {
-      const sched = routine.schedule;
-      if (!sched || !sched.enabled) continue;
-      if (sched.time !== currentTime) continue;
-      if (Array.isArray(sched.days) && sched.days.length > 0 && !sched.days.includes(currentDay)) continue;
+      for (const routine of routinesStore) {
+        const sched = routine.schedule;
+        if (!sched || !sched.enabled) continue;
+        if (sched.time !== currentTime) continue;
+        if (Array.isArray(sched.days) && sched.days.length > 0 && !sched.days.includes(currentDay)) continue;
 
-      console.log(`[Scheduler] Running routine "${routine.name}" (${currentTime} ${DAY_NAMES[currentDay]})`);
-      executeRoutineSteps(routine).catch((err) => {
-        console.error(`[Scheduler] Routine "${routine.name}" failed:`, err.message);
-      });
+        console.log(`[Scheduler] Running routine "${routine.name}" (${currentTime} ${DAY_NAMES[currentDay]})`);
+        executeRoutineSteps(routine).catch((err) => {
+          console.error(`[Scheduler] Routine "${routine.name}" (id=${routine.id}) failed:`, err?.stack || err?.message || err);
+        });
+      }
+
+      // Also evaluate condition-based routines on the scheduler tick
+      try { evaluateConditionRoutines(); } catch (err) {
+        console.error("[Scheduler] evaluateConditionRoutines threw:", err?.stack || err);
+      }
+    } catch (err) {
+      console.error("[Scheduler] tick error:", err?.stack || err);
     }
-
-    // Also evaluate condition-based routines on the scheduler tick
-    evaluateConditionRoutines();
   }, 15_000); // check every 15 seconds for responsive scheduling
   schedulerInterval.unref();
 }
@@ -261,7 +302,7 @@ function evaluateConditionRoutines() {
       lastTriggered.set(routine.id, now);
       metMap.clear(); // reset so duration tracking restarts after cooldown
       executeRoutineSteps(routine).catch((err) => {
-        console.error(`[Conditions] Routine "${routine.name}" failed:`, err.message);
+        console.error(`[Conditions] Routine "${routine.name}" (id=${routine.id}) failed:`, err?.stack || err?.message || err);
       });
     }
   }
@@ -269,7 +310,11 @@ function evaluateConditionRoutines() {
 
 // Also evaluate on every state change for responsive triggering
 function onStateChangeForConditions() {
-  evaluateConditionRoutines();
+  // Invoked synchronously from a StateMachine event listener — a throw here
+  // would propagate up through the event emitter and trip uncaughtException.
+  try { evaluateConditionRoutines(); } catch (err) {
+    console.error("[Conditions] evaluateConditionRoutines threw on state change:", err?.stack || err);
+  }
 }
 
 async function executeRoutineSteps(routine) {
@@ -1130,6 +1175,32 @@ app.get("/api/director/{*path}", async (req, res) => {
 // Proxy: POST command to Director REST API
 // ---------------------------------------------------------------------------
 
+// When a command arrives during a C4 WebSocket reconnect, the Director token
+// we hold may already be stale (refresh happens on reconnect) — firing the
+// command immediately often results in a silent 401/forbidden.  Wait briefly
+// for reconnect to complete before forwarding.  If the websocket has been
+// down so long that reconnect attempts have piled up, fast-fail instead of
+// burning a full 30s HTTP timeout on a Director that is almost certainly
+// offline.
+const COMMAND_RECONNECT_WAIT_MS = 5000;
+const FAST_FAIL_AFTER_RECONNECT_ATTEMPTS = 5;   // ~30s+ of failed reconnects
+async function waitForDirectorReady() {
+  if (!c4ws) return { ok: true };                    // no live session — nothing to wait for
+  if (c4ws.isConnected()) return { ok: true };       // already good
+  const stats = c4ws.getStats();
+  if (stats.reconnectAttempts >= FAST_FAIL_AFTER_RECONNECT_ATTEMPTS) {
+    return { ok: false, reason: "director-unreachable", reconnectAttempts: stats.reconnectAttempts };
+  }
+  const deadline = Date.now() + COMMAND_RECONNECT_WAIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+    if (!c4ws || c4ws.isConnected()) return { ok: true };
+  }
+  // Deadline passed but reconnect count still below threshold — proceed and
+  // let the per-request HTTP timeout decide.
+  return { ok: true, reason: "reconnect-pending" };
+}
+
 app.post("/api/director/{*path}", async (req, res) => {
   const ip = req.headers["x-director-ip"];
   const token = req.headers["x-director-token"];
@@ -1152,6 +1223,14 @@ app.post("/api/director/{*path}", async (req, res) => {
   const qs = new URLSearchParams(rest).toString();
   const fullUrl = `https://${ip}${apiPath}${qs ? "?" + qs : ""}`;
   try {
+    const ready = await waitForDirectorReady();
+    if (!ready.ok) {
+      return res.status(503).json({
+        error: "Director unreachable",
+        reason: ready.reason,
+        reconnectAttempts: ready.reconnectAttempts,
+      });
+    }
     const data = await request(fullUrl, {
       method: "POST",
       headers: {
@@ -1198,6 +1277,14 @@ app.put("/api/director/{*path}", async (req, res) => {
   const qs = new URLSearchParams(rest).toString();
   const fullUrl = `https://${ip}${apiPath}${qs ? "?" + qs : ""}`;
   try {
+    const ready = await waitForDirectorReady();
+    if (!ready.ok) {
+      return res.status(503).json({
+        error: "Director unreachable",
+        reason: ready.reason,
+        reconnectAttempts: ready.reconnectAttempts,
+      });
+    }
     const data = await request(fullUrl, {
       method: "PUT",
       headers: {
@@ -1313,8 +1400,8 @@ app.get("/api/settings", (_req, res) => {
   res.json({
     anthropicModel: appSettings.anthropicModel,
     hasAnthropicKey: !!appSettings.anthropicKey,
-    hasPushoverAppToken: !!appSettings.pushoverAppToken || !!process.env.PUSHOVER_APP_TOKEN,
-    hasPushoverUserKey: !!appSettings.pushoverUserKey || !!process.env.PUSHOVER_USER_KEY,
+    hasPushoverAppToken: !!cfg("pushoverAppToken", "PUSHOVER_APP_TOKEN"),
+    hasPushoverUserKey: !!cfg("pushoverUserKey", "PUSHOVER_USER_KEY"),
     deviceMappings: appSettings.deviceMappings || {},
     goveeEmail: appSettings.goveeEmail || "",
     goveeConnected: !!goveeInstance && !!appSettings.goveeToken && !goveeInstance.needsReauth,
@@ -1322,10 +1409,10 @@ app.get("/api/settings", (_req, res) => {
     goveeNeedsReauth: goveeInstance ? goveeInstance.needsReauth : false,
     goveeSensorRooms: appSettings.goveeSensorRooms || {},
     mqttConnected: mqttClient ? mqttClient.isConnected() : false,
-    mqttBrokerUrl: appSettings.mqttBrokerUrl || process.env.MQTT_BROKER_URL || "",
-    mqttUsername: appSettings.mqttUsername || process.env.MQTT_USERNAME || "",
-    mqttHomeId: appSettings.mqttHomeId || process.env.MQTT_HOME_ID || "",
-    hasMqttPassword: !!(appSettings.mqttPassword || process.env.MQTT_PASSWORD),
+    mqttBrokerUrl: cfg("mqttBrokerUrl", "MQTT_BROKER_URL"),
+    mqttUsername: cfg("mqttUsername", "MQTT_USERNAME"),
+    mqttHomeId: cfg("mqttHomeId", "MQTT_HOME_ID"),
+    hasMqttPassword: !!cfg("mqttPassword", "MQTT_PASSWORD"),
   });
 });
 
@@ -1353,6 +1440,9 @@ app.post("/api/settings", (req, res) => {
       return res.status(400).json({ error: "pushoverAppToken is too long" });
     }
     appSettings.pushoverAppToken = tokenStr;
+    // If the user explicitly blanked the field, also drop any env override
+    // so the change actually takes effect.
+    if (!tokenStr) clearEnvVar("PUSHOVER_APP_TOKEN");
   }
   if (pushoverUserKey !== undefined) {
     const keyStr = String(pushoverUserKey).trim();
@@ -1360,6 +1450,7 @@ app.post("/api/settings", (req, res) => {
       return res.status(400).json({ error: "pushoverUserKey is too long" });
     }
     appSettings.pushoverUserKey = keyStr;
+    if (!keyStr) clearEnvVar("PUSHOVER_USER_KEY");
   }
   if (req.body.deviceMappings !== undefined) {
     const dm = req.body.deviceMappings;
@@ -1446,6 +1537,13 @@ app.post("/api/mqtt/disconnect", async (_req, res) => {
   appSettings.mqttUsername = "";
   appSettings.mqttPassword = "";
   appSettings.mqttHomeId = "";
+  // Also clear env — otherwise a subsequent realtime init would resurrect
+  // the old env values and reconnect to the broker the operator just
+  // disabled.
+  clearEnvVar("MQTT_BROKER_URL");
+  clearEnvVar("MQTT_USERNAME");
+  clearEnvVar("MQTT_PASSWORD");
+  clearEnvVar("MQTT_HOME_ID");
   persistSettings();
   res.json({ ok: true });
 });
@@ -1454,8 +1552,8 @@ app.get("/api/mqtt/status", (_req, res) => {
   const mqttClient = mqttModule ? require("./mqtt/mqtt-client") : null;
   res.json({
     connected: mqttClient ? mqttClient.isConnected() : false,
-    brokerUrl: appSettings.mqttBrokerUrl || process.env.MQTT_BROKER_URL || "",
-    homeId: appSettings.mqttHomeId || process.env.MQTT_HOME_ID || "",
+    brokerUrl: cfg("mqttBrokerUrl", "MQTT_BROKER_URL"),
+    homeId: cfg("mqttHomeId", "MQTT_HOME_ID"),
     uptime: mqttClient ? mqttClient.getUptime() : 0,
   });
 });
@@ -1868,9 +1966,19 @@ app.post("/api/llm/chat", llmRateLimit, async (req, res) => {
 // Ring Integration
 // ---------------------------------------------------------------------------
 
-// Auto-connect on startup if token exists
-if (process.env.RING_REFRESH_TOKEN) {
-  ring.initialize(process.env.RING_REFRESH_TOKEN);
+// Auto-connect on startup.  Prefer the secure, chmod-600 persisted token
+// over the env var — the env value is only used on first boot or when the
+// persisted file hasn't been written yet.  If we load from env and there's
+// no persisted file, write one (one-time migration off .env).
+{
+  const persisted = ring.loadPersistedToken();
+  const envToken = process.env.RING_REFRESH_TOKEN;
+  const initialToken = persisted || envToken;
+  if (initialToken) {
+    ring.initialize(initialToken).catch((err) => {
+      console.error("[Ring] Auto-connect failed:", err?.message || err);
+    });
+  }
 }
 
 app.get("/ring/status", async (_req, res) => {
@@ -2173,9 +2281,9 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
   });
 
   // 3b. MQTT cloud bridge (optional — env vars or persisted settings)
-  const mqttUrl = process.env.MQTT_BROKER_URL || appSettings.mqttBrokerUrl;
-  const mqttUser = process.env.MQTT_USERNAME || appSettings.mqttUsername;
-  const mqttPass = process.env.MQTT_PASSWORD || appSettings.mqttPassword;
+  const mqttUrl = cfg("mqttBrokerUrl", "MQTT_BROKER_URL");
+  const mqttUser = cfg("mqttUsername", "MQTT_USERNAME");
+  const mqttPass = cfg("mqttPassword", "MQTT_PASSWORD");
   if (mqttUrl && mqttUser && mqttPass) {
     // Disconnect existing MQTT connection to prevent orphaned connections/timers
     if (mqttModule) {
@@ -2188,7 +2296,7 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
         brokerUrl: mqttUrl,
         username: mqttUser,
         password: mqttPass,
-        homeId: process.env.MQTT_HOME_ID || appSettings.mqttHomeId || "home1",
+        homeId: cfg("mqttHomeId", "MQTT_HOME_ID", "home1"),
         stateMachine,
         ring,
         goveeInstance,
@@ -2229,23 +2337,46 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
       return { token: json.authToken.token, validSeconds: json.authToken.validSeconds };
     };
 
+    // Each realtime session gets a short ID so an operator can grep a full
+    // reconnect / token-refresh / stall cycle from the logs.
+    const connectionId = crypto.randomBytes(3).toString("hex");
+    const wsLog = createLogger("ws", { connectionId });
+
     c4ws = new C4WebSocket({
       directorIp: controllerIp,
       directorToken,
       refreshTokenFn,
-      logger: (...args) => console.log("[ws]", ...args),
+      logger: wsLog,
     });
 
     c4ws.onAnyChange((payload) => {
       stateMachine.handleDeviceEvent(payload);
     });
 
-    c4ws.on("disconnected", () => startFallbackPolling(controllerIp, directorToken));
-    c4ws.on("reconnected", async () => {
-      stopFallbackPolling();
-      try { await stateMachine.readInitialState(); } catch {}
+    c4ws.on("disconnected", ({ reason } = {}) => {
+      wsLog.warn("session-disconnected", { reason });
+      startFallbackPolling(controllerIp, directorToken);
     });
-    c4ws.on("reconnectFailed", () => startFallbackPolling(controllerIp, directorToken));
+    c4ws.on("reconnected", async () => {
+      wsLog.info("session-reconnected");
+      stopFallbackPolling();
+      try {
+        // After a reconnect the Director may have updated many devices
+        // while we were offline — do a full re-read once.
+        await stateMachine.readInitialState();
+      } catch (err) {
+        wsLog.error("reconnect-catchup-failed", { error: err?.message || String(err) });
+        // Keep fallback polling on if the catch-up read failed.
+        startFallbackPolling(controllerIp, directorToken);
+      }
+    });
+    c4ws.on("reconnectFailed", (info) => {
+      wsLog.error("reconnect-persistent-failure", info || {});
+      startFallbackPolling(controllerIp, directorToken);
+    });
+    c4ws.on("tokenRefreshFailed", () => {
+      wsLog.error("token-refresh-gave-up");
+    });
 
     // Connect with retry
     try {
@@ -2278,18 +2409,39 @@ async function connectWithRetry(wsInstance, maxAttempts = 5) {
   throw new Error(`Failed after ${maxAttempts} attempts`);
 }
 
+// Incremental fallback polling.  Full-state readInitialState() fetches every
+// device's variables — wasteful and hits the Director hard exactly when it's
+// already struggling.  Instead we refresh only devices whose last-known state
+// is stale (default: >2 min old) and do a full catch-up read only
+// occasionally, as a safety net.
+const FALLBACK_POLL_INTERVAL_MS = 15_000;
+const FALLBACK_STALE_AGE_MS = 120_000;
+const FALLBACK_FULL_REFRESH_EVERY_N = 20;   // every ~5m (20 * 15s) do a full pass
+let _fallbackPollTicks = 0;
+let _fallbackPollInFlight = false;
+
 function startFallbackPolling(controllerIp, directorToken) {
   if (fallbackPollTimer) return;
   if (!stateMachine) return;
-  console.log("[resilience] Starting fallback polling (15s interval)");
+  console.log("[resilience] Starting fallback polling (15s interval, incremental)");
+  _fallbackPollTicks = 0;
 
   fallbackPollTimer = setInterval(async () => {
+    if (_fallbackPollInFlight) return;   // don't overlap if Director is slow
+    _fallbackPollInFlight = true;
     try {
-      await stateMachine.readInitialState();
+      _fallbackPollTicks++;
+      if (_fallbackPollTicks % FALLBACK_FULL_REFRESH_EVERY_N === 1) {
+        await stateMachine.readInitialState();
+      } else {
+        await stateMachine.readStaleDeviceStates(FALLBACK_STALE_AGE_MS);
+      }
     } catch (err) {
       console.error("[resilience] Fallback poll error:", err.message);
+    } finally {
+      _fallbackPollInFlight = false;
     }
-  }, 15000);
+  }, FALLBACK_POLL_INTERVAL_MS);
   if (fallbackPollTimer.unref) fallbackPollTimer.unref();
 }
 
@@ -2482,6 +2634,7 @@ app.get("/api/alerts", (_req, res) => {
 // ---------------------------------------------------------------------------
 
 app.get("/api/health", (_req, res) => {
+  const wsStats = c4ws ? c4ws.getStats() : null;
   const health = {
     status: "ok",
     uptime: Math.round(process.uptime()),
@@ -2489,6 +2642,11 @@ app.get("/api/health", (_req, res) => {
     websocket: {
       connected: c4ws ? c4ws.isConnected() : false,
       mode: c4ws ? "websocket" : (stateMachine ? (fallbackPollTimer ? "polling" : "mock") : "disconnected"),
+      ...(wsStats || {}),
+    },
+    fallbackPolling: {
+      active: !!fallbackPollTimer,
+      ticks: _fallbackPollTicks,
     },
     stateMachine: {
       initialized: !!stateMachine,
@@ -2505,6 +2663,11 @@ app.get("/api/health", (_req, res) => {
 
   if (!stateMachine || (!c4ws?.isConnected() && !fallbackPollTimer && !mockEventTimer)) {
     health.status = "degraded";
+  }
+  // Websocket present but stale traffic → degraded even if socket reports connected.
+  if (wsStats && wsStats.connected && wsStats.lastEventAgoMs !== null && wsStats.lastEventAgoMs > 5 * 60_000) {
+    health.status = "degraded";
+    health.websocket.stale = true;
   }
 
   res.json(health);
@@ -2686,20 +2849,41 @@ function startServer() {
 startServer();
 startScheduler();
 
-async function shutdown() {
+async function cleanup() {
   console.log("[shutdown] Cleaning up...");
   stopHistoryRecording();
+  stopFallbackPolling();
   if (mqttModule) {
     try { await mqttModule.disconnect(); } catch {}
   }
-  if (goveeInstance) goveeInstance.stop();
-  if (trending) trending.close();
-  if (c4ws) c4ws.disconnect();
-  ring.disconnect();
-  process.exit(0);
+  if (goveeInstance) { try { goveeInstance.stop(); } catch {} }
+  if (trending) { try { trending.close(); } catch {} }
+  if (c4ws) { try { c4ws.disconnect(); } catch {} }
+  try { ring.disconnect(); } catch {}
 }
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+
+let _shuttingDown = false;
+async function shutdown(code = 0) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  // Hard deadline: a hung shutdown must not prevent the process dying.
+  const hardKill = setTimeout(() => process.exit(code || 1), 5000);
+  hardKill.unref();
+  try { await cleanup(); } catch (err) { console.error("[shutdown] cleanup error:", err); }
+  process.exit(code);
+}
+
+process.on("SIGTERM", () => shutdown(0));
+process.on("SIGINT", () => shutdown(0));
 process.on("unhandledRejection", (err) => {
   console.error("[unhandledRejection]", err);
+});
+// A synchronous throw anywhere in the event loop (bad Director JSON,
+// assertion failure, etc.) would otherwise kill the process with zero
+// cleanup — leaking the SQLite lock, the MQTT connection, and the Ring
+// session.  Clean up then exit with a non-zero code so a supervisor can
+// restart us.
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err);
+  shutdown(1);
 });

@@ -141,9 +141,27 @@ class StateMachine extends EventEmitter {
 
   /** Read initial variable state for every discovered device. */
   async readInitialState() {
-    const devices = [...this._devices.values()];
-    const BATCH = 10;
+    await this._readStateForDevices([...this._devices.values()]);
+    this._logger("init-state-complete", { devices: this._devices.size });
+  }
 
+  /** Refresh only devices whose lastChanged is older than maxAgeMs (or never
+   *  changed).  Cheap substitute for readInitialState() when running the
+   *  fallback polling loop — avoids re-fetching hundreds of idle devices. */
+  async readStaleDeviceStates(maxAgeMs = 120_000) {
+    const now = Date.now();
+    const stale = [...this._devices.values()].filter((d) => {
+      if (!d.lastChanged) return true;
+      return now - d.lastChanged > maxAgeMs;
+    });
+    if (stale.length === 0) return 0;
+    await this._readStateForDevices(stale);
+    this._logger("stale-refresh", { devices: stale.length });
+    return stale.length;
+  }
+
+  async _readStateForDevices(devices) {
+    const BATCH = 10;
     for (let i = 0; i < devices.length; i += BATCH) {
       const batch = devices.slice(i, i + BATCH);
       await Promise.all(batch.map(async (device) => {
@@ -160,16 +178,15 @@ class StateMachine extends EventEmitter {
             }
           }
         } catch (err) {
-          this._logger("init-state-error", { itemId: device.itemId, error: err.message });
+          this._logger("read-state-error", { itemId: device.itemId, error: err.message });
         }
       }));
     }
 
-    // Compute initial derived state
+    // Recompute derived state after a batch refresh.
     try { this._deriveHomeState(); } catch (err) {
       this._logger("derive-home-state-error", err.message);
     }
-    this._logger("init-state-complete", { devices: devices.length });
   }
 
   // -----------------------------------------------------------------------
