@@ -83,12 +83,42 @@ try {
   console.error("Failed to load settings:", err.message);
 }
 
-// Apply persisted Pushover keys to process.env (notify.js reads from env)
+// Apply persisted Pushover keys to process.env (notify.js reads from env).
+// If the setting is populated it wins; if it's blank we leave any env value
+// intact so the original Docker-style env-only configuration keeps working
+// on startup.  The explicit-clear path (user blanks the field in the UI)
+// is handled in POST /api/settings.
 function applyPushoverEnv() {
   if (appSettings.pushoverAppToken) process.env.PUSHOVER_APP_TOKEN = appSettings.pushoverAppToken;
   if (appSettings.pushoverUserKey) process.env.PUSHOVER_USER_KEY = appSettings.pushoverUserKey;
 }
 applyPushoverEnv();
+
+// ---------------------------------------------------------------------------
+// Config precedence helper
+// ---------------------------------------------------------------------------
+// Single source of truth for "should we use the UI-saved value or the env
+// default?".  Rule: persisted settings win when non-empty; env is the
+// fallback.  This fixes a previous inconsistency where MQTT init read env
+// first (`process.env.X || appSettings.X`) while the GET /api/settings
+// endpoint read settings first, so a user saving MQTT creds in the UI would
+// see their values come back but the actual connection would silently keep
+// using the env value.
+
+function cfg(settingsKey, envKey, fallback = "") {
+  const s = appSettings[settingsKey];
+  if (s !== undefined && s !== null && s !== "") return s;
+  const e = envKey ? process.env[envKey] : undefined;
+  if (e !== undefined && e !== null && e !== "") return e;
+  return fallback;
+}
+
+// Clear an env var so a subsequent getConfig() cannot silently resurrect a
+// stale value after the operator has intentionally cleared the setting in
+// the UI.  (Used on MQTT disable, etc.)
+function clearEnvVar(name) {
+  if (name) delete process.env[name];
+}
 
 function persistSettings() {
   try {
@@ -1370,8 +1400,8 @@ app.get("/api/settings", (_req, res) => {
   res.json({
     anthropicModel: appSettings.anthropicModel,
     hasAnthropicKey: !!appSettings.anthropicKey,
-    hasPushoverAppToken: !!appSettings.pushoverAppToken || !!process.env.PUSHOVER_APP_TOKEN,
-    hasPushoverUserKey: !!appSettings.pushoverUserKey || !!process.env.PUSHOVER_USER_KEY,
+    hasPushoverAppToken: !!cfg("pushoverAppToken", "PUSHOVER_APP_TOKEN"),
+    hasPushoverUserKey: !!cfg("pushoverUserKey", "PUSHOVER_USER_KEY"),
     deviceMappings: appSettings.deviceMappings || {},
     goveeEmail: appSettings.goveeEmail || "",
     goveeConnected: !!goveeInstance && !!appSettings.goveeToken && !goveeInstance.needsReauth,
@@ -1379,10 +1409,10 @@ app.get("/api/settings", (_req, res) => {
     goveeNeedsReauth: goveeInstance ? goveeInstance.needsReauth : false,
     goveeSensorRooms: appSettings.goveeSensorRooms || {},
     mqttConnected: mqttClient ? mqttClient.isConnected() : false,
-    mqttBrokerUrl: appSettings.mqttBrokerUrl || process.env.MQTT_BROKER_URL || "",
-    mqttUsername: appSettings.mqttUsername || process.env.MQTT_USERNAME || "",
-    mqttHomeId: appSettings.mqttHomeId || process.env.MQTT_HOME_ID || "",
-    hasMqttPassword: !!(appSettings.mqttPassword || process.env.MQTT_PASSWORD),
+    mqttBrokerUrl: cfg("mqttBrokerUrl", "MQTT_BROKER_URL"),
+    mqttUsername: cfg("mqttUsername", "MQTT_USERNAME"),
+    mqttHomeId: cfg("mqttHomeId", "MQTT_HOME_ID"),
+    hasMqttPassword: !!cfg("mqttPassword", "MQTT_PASSWORD"),
   });
 });
 
@@ -1410,6 +1440,9 @@ app.post("/api/settings", (req, res) => {
       return res.status(400).json({ error: "pushoverAppToken is too long" });
     }
     appSettings.pushoverAppToken = tokenStr;
+    // If the user explicitly blanked the field, also drop any env override
+    // so the change actually takes effect.
+    if (!tokenStr) clearEnvVar("PUSHOVER_APP_TOKEN");
   }
   if (pushoverUserKey !== undefined) {
     const keyStr = String(pushoverUserKey).trim();
@@ -1417,6 +1450,7 @@ app.post("/api/settings", (req, res) => {
       return res.status(400).json({ error: "pushoverUserKey is too long" });
     }
     appSettings.pushoverUserKey = keyStr;
+    if (!keyStr) clearEnvVar("PUSHOVER_USER_KEY");
   }
   if (req.body.deviceMappings !== undefined) {
     const dm = req.body.deviceMappings;
@@ -1503,6 +1537,13 @@ app.post("/api/mqtt/disconnect", async (_req, res) => {
   appSettings.mqttUsername = "";
   appSettings.mqttPassword = "";
   appSettings.mqttHomeId = "";
+  // Also clear env — otherwise a subsequent realtime init would resurrect
+  // the old env values and reconnect to the broker the operator just
+  // disabled.
+  clearEnvVar("MQTT_BROKER_URL");
+  clearEnvVar("MQTT_USERNAME");
+  clearEnvVar("MQTT_PASSWORD");
+  clearEnvVar("MQTT_HOME_ID");
   persistSettings();
   res.json({ ok: true });
 });
@@ -1511,8 +1552,8 @@ app.get("/api/mqtt/status", (_req, res) => {
   const mqttClient = mqttModule ? require("./mqtt/mqtt-client") : null;
   res.json({
     connected: mqttClient ? mqttClient.isConnected() : false,
-    brokerUrl: appSettings.mqttBrokerUrl || process.env.MQTT_BROKER_URL || "",
-    homeId: appSettings.mqttHomeId || process.env.MQTT_HOME_ID || "",
+    brokerUrl: cfg("mqttBrokerUrl", "MQTT_BROKER_URL"),
+    homeId: cfg("mqttHomeId", "MQTT_HOME_ID"),
     uptime: mqttClient ? mqttClient.getUptime() : 0,
   });
 });
@@ -1925,9 +1966,19 @@ app.post("/api/llm/chat", llmRateLimit, async (req, res) => {
 // Ring Integration
 // ---------------------------------------------------------------------------
 
-// Auto-connect on startup if token exists
-if (process.env.RING_REFRESH_TOKEN) {
-  ring.initialize(process.env.RING_REFRESH_TOKEN);
+// Auto-connect on startup.  Prefer the secure, chmod-600 persisted token
+// over the env var — the env value is only used on first boot or when the
+// persisted file hasn't been written yet.  If we load from env and there's
+// no persisted file, write one (one-time migration off .env).
+{
+  const persisted = ring.loadPersistedToken();
+  const envToken = process.env.RING_REFRESH_TOKEN;
+  const initialToken = persisted || envToken;
+  if (initialToken) {
+    ring.initialize(initialToken).catch((err) => {
+      console.error("[Ring] Auto-connect failed:", err?.message || err);
+    });
+  }
 }
 
 app.get("/ring/status", async (_req, res) => {
@@ -2230,9 +2281,9 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
   });
 
   // 3b. MQTT cloud bridge (optional — env vars or persisted settings)
-  const mqttUrl = process.env.MQTT_BROKER_URL || appSettings.mqttBrokerUrl;
-  const mqttUser = process.env.MQTT_USERNAME || appSettings.mqttUsername;
-  const mqttPass = process.env.MQTT_PASSWORD || appSettings.mqttPassword;
+  const mqttUrl = cfg("mqttBrokerUrl", "MQTT_BROKER_URL");
+  const mqttUser = cfg("mqttUsername", "MQTT_USERNAME");
+  const mqttPass = cfg("mqttPassword", "MQTT_PASSWORD");
   if (mqttUrl && mqttUser && mqttPass) {
     // Disconnect existing MQTT connection to prevent orphaned connections/timers
     if (mqttModule) {
@@ -2245,7 +2296,7 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
         brokerUrl: mqttUrl,
         username: mqttUser,
         password: mqttPass,
-        homeId: process.env.MQTT_HOME_ID || appSettings.mqttHomeId || "home1",
+        homeId: cfg("mqttHomeId", "MQTT_HOME_ID", "home1"),
         stateMachine,
         ring,
         goveeInstance,

@@ -173,16 +173,34 @@ async function initialize(refreshToken) {
   }
 }
 
-function persistToken(token) {
-  const envPath = path.resolve(__dirname, ".env");
+// Persisted refresh-token path.  We deliberately keep this separate from
+// `.env` because:
+//   1. .env is a user-managed config file, often mounted or templated —
+//      rewriting it mixes operator and application concerns and can
+//      clobber operator edits.
+//   2. secrets should live in a chmod-600 file, not alongside other config.
+const RING_TOKEN_FILE = path.resolve(__dirname, "data", "ring-token");
+
+function loadPersistedToken() {
   try {
-    let content = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "";
-    if (content.includes("RING_REFRESH_TOKEN=")) {
-      content = content.replace(/RING_REFRESH_TOKEN=.*/, `RING_REFRESH_TOKEN=${token}`);
-    } else {
-      content += `\nRING_REFRESH_TOKEN=${token}\n`;
+    if (fs.existsSync(RING_TOKEN_FILE)) {
+      return fs.readFileSync(RING_TOKEN_FILE, "utf8").trim() || null;
     }
-    fs.writeFileSync(envPath, content);
+  } catch (err) {
+    console.error("[Ring] Failed to read persisted token:", err.message);
+  }
+  return null;
+}
+
+function persistToken(token) {
+  try {
+    const dir = path.dirname(RING_TOKEN_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Write+chmod atomically via a tmp file so an interrupted write cannot
+    // leave a partial token or a default-permissions file on disk.
+    const tmp = `${RING_TOKEN_FILE}.tmp`;
+    fs.writeFileSync(tmp, token, { mode: 0o600 });
+    fs.renameSync(tmp, RING_TOKEN_FILE);
     process.env.RING_REFRESH_TOKEN = token;
   } catch (err) {
     console.error("[Ring] Failed to persist token:", err.message);
@@ -408,4 +426,5 @@ module.exports = {
   getCameraSnapshot,
   setCameraLight,
   setCameraSiren,
+  loadPersistedToken,
 };
