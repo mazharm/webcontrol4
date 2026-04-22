@@ -1,9 +1,10 @@
 import type { RingCamera, RingSensor, RingStatusResponse } from "../types/api";
+import { safeJson } from "./safeJson";
 
 export async function getRingStatus(): Promise<RingStatusResponse> {
   const res = await fetch("/ring/status");
   if (!res.ok) throw new Error("Failed to get Ring status");
-  return res.json();
+  return safeJson<RingStatusResponse>(res, "Failed to get Ring status");
 }
 
 export async function ringLogin({
@@ -39,7 +40,7 @@ export async function ringVerify(code: string): Promise<{ success: boolean; requ
 export async function getAlarmMode(): Promise<{ mode: string }> {
   const res = await fetch("/ring/alarm/mode");
   if (!res.ok) throw new Error("Failed to get alarm mode");
-  return res.json();
+  return safeJson<{ mode: string }>(res, "Failed to get alarm mode");
 }
 
 export async function setAlarmMode(mode: string): Promise<{ mode: string }> {
@@ -49,19 +50,19 @@ export async function setAlarmMode(mode: string): Promise<{ mode: string }> {
     body: JSON.stringify({ mode }),
   });
   if (!res.ok) throw new Error("Failed to set alarm mode");
-  return res.json();
+  return safeJson<{ mode: string }>(res, "Failed to set alarm mode");
 }
 
 export async function getCameras(): Promise<RingCamera[]> {
   const res = await fetch("/ring/cameras");
   if (!res.ok) throw new Error("Failed to get cameras");
-  return res.json();
+  return safeJson<RingCamera[]>(res, "Failed to get cameras");
 }
 
 export async function getSensors(): Promise<RingSensor[]> {
   const res = await fetch("/ring/sensors");
   if (!res.ok) throw new Error("Failed to get sensors");
-  return res.json();
+  return safeJson<RingSensor[]>(res, "Failed to get sensors");
 }
 
 export function getSnapshotUrl(cameraId: string): string {

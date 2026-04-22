@@ -150,6 +150,9 @@ async function handleControl4Command(deviceId, payload) {
     if (typeof payload.fanMode !== "string" || payload.fanMode.length > 20) {
       throw new Error(`Invalid fanMode: ${payload.fanMode}`);
     }
+    if (!allowedFanModes.includes(payload.fanMode)) {
+      throw new Error(`Invalid fanMode: "${payload.fanMode}". Allowed: ${allowedFanModes.join(", ")}`);
+    }
     applyStateChange(itemId, "FAN_MODE", String(payload.fanMode));
     await executeScheduledCommand(itemId, "SET_FAN_MODE", { MODE: payload.fanMode });
   }

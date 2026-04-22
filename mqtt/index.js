@@ -73,7 +73,7 @@ async function init(opts) {
     onGoveeUpdate: () => statePublisher.onGoveeUpdate(opts.goveeInstance),
     onRoutinesChanged: () => statePublisher.onRoutinesChanged(opts.getRoutines),
     disconnect: async () => {
-      statePublisher.stop();
+      statePublisher.stop(opts.stateMachine);
       await mqttClient.disconnect();
     },
   };

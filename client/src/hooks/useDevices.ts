@@ -49,7 +49,7 @@ export function useFloorTree(): FloorNode[] {
         if ((device.state as { on: boolean }).on) room.lightsOn++;
       }
       if (device.type === "thermostat") {
-        room.tempF = (device.state as { currentTempF: number }).currentTempF;
+        room.tempF = (device.state as { currentTempF: number | null }).currentTempF;
       }
       if (device.type === "camera") {
         room.hasCamera = true;
@@ -93,8 +93,8 @@ export function useDeviceSummary(): string {
           const s = d.state as { on: boolean; level: number };
           parts.push(`${d.name}: ${s.on ? `ON ${s.level}%` : "OFF"}`);
         } else if (d.type === "thermostat") {
-          const s = d.state as { currentTempF: number; hvacMode: string };
-          parts.push(`${d.name}: ${s.currentTempF}°F ${s.hvacMode}`);
+          const s = d.state as { currentTempF: number | null; hvacMode: string };
+          parts.push(`${d.name}: ${s.currentTempF != null ? `${s.currentTempF}°F` : "N/A"} ${s.hvacMode}`);
         } else if (d.type === "lock") {
           const s = d.state as { locked: boolean };
           parts.push(`${d.name}: ${s.locked ? "Locked" : "Unlocked"}`);

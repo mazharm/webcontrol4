@@ -121,7 +121,7 @@ export function ThermostatCard({ device }: ThermostatCardProps) {
         <Temperature24Regular />
         <Text className={styles.name} truncate wrap={false}>{device.name}</Text>
       </div>
-      <div className={styles.currentTemp}>{Math.round(ts.currentTempF)}°F</div>
+      <div className={styles.currentTemp}>{ts.currentTempF != null ? `${Math.round(ts.currentTempF)}°F` : "--"}</div>
       <div className={styles.row}>
         <span className={styles.label}>Heat</span>
         <div className={styles.setpoint}>

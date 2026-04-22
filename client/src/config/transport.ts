@@ -36,9 +36,9 @@ export function getMqttConfig(): MqttConfig {
     return _mqttConfig;
   }
 
-  // Fall back to localStorage (for remote mode without baked-in secrets)
+  // Fall back to sessionStorage (for remote mode without baked-in secrets)
   try {
-    const stored = localStorage.getItem(MQTT_STORAGE_KEY);
+    const stored = sessionStorage.getItem(MQTT_STORAGE_KEY);
     if (stored) {
       const parsed = JSON.parse(stored) as MqttConfig;
       if (parsed.brokerWsUrl && parsed.username && parsed.password) {
@@ -62,10 +62,10 @@ export function hasMqttConfig(): boolean {
 
 export function saveMqttConfig(config: MqttConfig): void {
   _mqttConfig = config;
-  localStorage.setItem(MQTT_STORAGE_KEY, JSON.stringify(config));
+  sessionStorage.setItem(MQTT_STORAGE_KEY, JSON.stringify(config));
 }
 
 export function clearMqttConfig(): void {
   _mqttConfig = null;
-  localStorage.removeItem(MQTT_STORAGE_KEY);
+  sessionStorage.removeItem(MQTT_STORAGE_KEY);
 }

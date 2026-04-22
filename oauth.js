@@ -28,6 +28,7 @@ const MAX_CLIENTS  = 100;              // max registered OAuth clients
 const sessions          = new Map(); // sessionId → { email, name, expiresAt }
 const authCodes         = new Map(); // code → { clientId, redirectUri, codeChallenge, codeChallengeMethod, email, expiresAt }
 const accessTokens      = new Map(); // token → { clientId, email, expiresAt }
+const refreshTokens     = new Map(); // refreshToken → { clientId, email, accessToken }
 const registeredClients = new Map(); // clientId → { clientSecret, redirectUris, clientName, ... }
 const pendingAuths      = new Map(); // stateId → { clientId, redirectUri, codeChallenge, codeChallengeMethod, state, expiresAt }
 
@@ -183,6 +184,10 @@ function cleanupExpired() {
   for (const [id, p] of Array.from(pendingAuths)) { if (now > p.expiresAt)  pendingAuths.delete(id); }
   for (const [id, c] of Array.from(authCodes))    { if (now > c.expiresAt)  authCodes.delete(id); }
   for (const [id, t] of Array.from(accessTokens)) { if (now > t.expiresAt)  accessTokens.delete(id); }
+  // Clean up refresh tokens whose access tokens no longer exist
+  for (const [id, rt] of Array.from(refreshTokens)) {
+    if (!accessTokens.has(rt.accessToken)) refreshTokens.delete(id);
+  }
 }
 
 // Run cleanup every 15 minutes
@@ -317,16 +322,58 @@ function exchangeAuthCode(code, codeVerifier, clientId, redirectUri) {
   authCodes.delete(code); // one-time use
 
   const accessToken = randomId();
+  const refreshToken = randomId();
   accessTokens.set(accessToken, {
     clientId,
     email: c.email,
     expiresAt: Date.now() + TOKEN_TTL,
+  });
+  refreshTokens.set(refreshToken, {
+    clientId,
+    email: c.email,
+    accessToken,
   });
 
   return {
     access_token: accessToken,
     token_type: "Bearer",
     expires_in: Math.floor(TOKEN_TTL / 1000),
+    refresh_token: refreshToken,
+  };
+}
+
+/**
+ * Exchange a refresh token for a new access + refresh token pair.
+ * Revokes the old access token and old refresh token atomically.
+ */
+function refreshAccessToken(oldRefreshToken, clientId) {
+  const rt = refreshTokens.get(oldRefreshToken);
+  if (!rt) return null;
+  if (rt.clientId !== clientId) return null;
+
+  // Revoke old tokens
+  accessTokens.delete(rt.accessToken);
+  refreshTokens.delete(oldRefreshToken);
+
+  // Issue new pair
+  const newAccessToken = randomId();
+  const newRefreshToken = randomId();
+  accessTokens.set(newAccessToken, {
+    clientId,
+    email: rt.email,
+    expiresAt: Date.now() + TOKEN_TTL,
+  });
+  refreshTokens.set(newRefreshToken, {
+    clientId,
+    email: rt.email,
+    accessToken: newAccessToken,
+  });
+
+  return {
+    access_token: newAccessToken,
+    token_type: "Bearer",
+    expires_in: Math.floor(TOKEN_TTL / 1000),
+    refresh_token: newRefreshToken,
   };
 }
 
@@ -366,6 +413,7 @@ module.exports = {
   getPendingAuth,
   createAuthCode,
   exchangeAuthCode,
+  refreshAccessToken,
 
   // Maintenance
   cleanupExpired,

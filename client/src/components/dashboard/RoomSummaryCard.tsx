@@ -48,7 +48,9 @@ export function RoomSummaryCard({ roomId, roomName, devices }: RoomSummaryCardPr
       <Text className={styles.name}>{roomName}</Text>
       {thermostat && (
         <div className={styles.row}>
-          {Math.round((thermostat.state as ThermostatState).currentTempF)}°F
+          {(thermostat.state as ThermostatState).currentTempF != null
+            ? `${Math.round((thermostat.state as ThermostatState).currentTempF!)}°F`
+            : "--"}
           {" | "}
           {(thermostat.state as ThermostatState).hvacMode}
         </div>

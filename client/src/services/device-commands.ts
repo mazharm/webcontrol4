@@ -50,11 +50,12 @@ export async function sendDeviceCommand(
     } else if (system === "ring") {
       // Ring commands in local mode go through ring API endpoints
       if (command.mode !== undefined) {
-        await fetch("/ring/alarm/mode", {
+        const res = await fetch("/ring/alarm/mode", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ mode: command.mode }),
         });
+        if (!res.ok) throw new Error(`Failed to set Ring alarm mode: ${res.statusText}`);
       }
     }
   }

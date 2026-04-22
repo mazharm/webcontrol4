@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useRef, useEffect, useMemo } from "react";
 import {
   makeStyles,
   tokens,
@@ -53,7 +53,10 @@ export function MediaCard({ device }: { device: UnifiedDevice }) {
   const ms = device.state as MediaState;
   const c4Id = parseInt(device.id.replace("control4:", ""));
 
-  const directorOpts = { ip: auth.controllerIp || "", token: auth.directorToken || "" };
+  const directorOpts = useMemo(() => ({ ip: auth.controllerIp || "", token: auth.directorToken || "" }), [auth.controllerIp, auth.directorToken]);
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+
+  useEffect(() => () => clearTimeout(debounceRef.current), []);
 
   const remote = isRemoteMode();
 
@@ -69,6 +72,24 @@ export function MediaCard({ device }: { device: UnifiedDevice }) {
     } catch {
       dispatch({ type: "UPDATE_DEVICE", payload: { id: device.id, state: ms } });
     }
+  }, [ms, device.id, c4Id, directorOpts, dispatch, remote]);
+
+  const onVolumeChange = useCallback((_: unknown, data: { value: number }) => {
+    const newVolume = data.value;
+    const newState = { ...ms, volume: newVolume };
+    dispatch({ type: "UPDATE_DEVICE", payload: { id: device.id, state: newState } });
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      try {
+        if (remote) {
+          await sendDeviceCommand("control4", c4Id, { volume: newVolume });
+        } else {
+          await sendCommand(directorOpts, c4Id, "SET_VOLUME_LEVEL", { LEVEL: newVolume });
+        }
+      } catch {
+        dispatch({ type: "UPDATE_DEVICE", payload: { id: device.id, state: ms } });
+      }
+    }, 300);
   }, [ms, device.id, c4Id, directorOpts, dispatch, remote]);
 
   return (
@@ -87,7 +108,7 @@ export function MediaCard({ device }: { device: UnifiedDevice }) {
       {ms.currentMedia && <div className={styles.media}>{ms.currentMedia}</div>}
       <div className={styles.volumeRow}>
         <Speaker224Regular />
-        <Slider min={0} max={100} value={ms.volume} disabled={!ms.powerOn} style={{ flex: 1 }} />
+        <Slider min={0} max={100} value={ms.volume} disabled={!ms.powerOn} style={{ flex: 1 }} onChange={onVolumeChange} />
         <Text>{ms.volume}%</Text>
       </div>
     </Card>

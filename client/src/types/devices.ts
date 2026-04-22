@@ -31,7 +31,7 @@ export interface LightState {
 
 export interface ThermostatState {
   type: "thermostat";
-  currentTempF: number;
+  currentTempF: number | null;
   heatSetpointF: number;
   coolSetpointF: number;
   hvacMode: "Off" | "Heat" | "Cool" | "Auto";
@@ -49,7 +49,7 @@ export interface LockState {
 
 export interface SensorState {
   type: "sensor";
-  sensorKind: "contact" | "motion" | "flood" | "tilt" | "glassbreak";
+  sensorKind: "contact" | "motion" | "flood" | "tilt" | "glassbreak" | "environmental";
   triggered: boolean;
   lastTriggered: number | null;
   batteryLevel?: number;

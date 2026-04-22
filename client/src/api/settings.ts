@@ -1,9 +1,10 @@
 import type { SettingsResponse, GoveeLoginResponse, GoveeLeakStatus } from "../types/api";
+import { safeJson } from "./safeJson";
 
 export async function getSettings(): Promise<SettingsResponse> {
   const res = await fetch("/api/settings");
   if (!res.ok) throw new Error("Failed to fetch settings");
-  return res.json();
+  return safeJson<SettingsResponse>(res, "Failed to fetch settings");
 }
 
 export async function saveSettings(settings: { anthropicKey?: string; anthropicModel?: string; deviceMappings?: Record<string, number> }): Promise<SettingsResponse> {
@@ -13,7 +14,7 @@ export async function saveSettings(settings: { anthropicKey?: string; anthropicM
     body: JSON.stringify(settings),
   });
   if (!res.ok) throw new Error("Failed to save settings");
-  return res.json();
+  return safeJson<SettingsResponse>(res, "Failed to save settings");
 }
 
 export async function goveeLogin(email: string, password: string): Promise<GoveeLoginResponse> {
@@ -26,7 +27,7 @@ export async function goveeLogin(email: string, password: string): Promise<Govee
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || "Govee login failed");
   }
-  return res.json();
+  return safeJson<GoveeLoginResponse>(res, "Govee login failed");
 }
 
 export async function goveeDisconnect(): Promise<void> {
@@ -37,7 +38,7 @@ export async function goveeDisconnect(): Promise<void> {
 export async function getGoveeLeakStatus(): Promise<GoveeLeakStatus> {
   const res = await fetch("/api/govee/leak/status");
   if (!res.ok) throw new Error("Failed to fetch Govee status");
-  return res.json();
+  return safeJson<GoveeLeakStatus>(res, "Failed to fetch Govee status");
 }
 
 export async function saveGoveeSensorRooms(mapping: Record<string, string>): Promise<void> {
@@ -64,7 +65,7 @@ export async function mqttConnect(config: {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || "MQTT connection failed");
   }
-  return res.json();
+  return safeJson<{ ok: boolean; connected: boolean }>(res, "MQTT connection failed");
 }
 
 export async function mqttDisconnect(): Promise<void> {

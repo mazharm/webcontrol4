@@ -232,23 +232,34 @@ async function main() {
     app.post("/token", (req, res) => {
       const { grant_type, code, code_verifier, client_id, client_secret } = req.body;
 
-      if (grant_type !== "authorization_code") {
-        return res.status(400).json({ error: "unsupported_grant_type" });
-      }
-
-      // Validate client credentials
+      // Validate client credentials (required for all grant types)
       const client = oauth.getClient(client_id);
       if (!client || !oauth.verifyClientSecret(client, client_secret)) {
         return res.status(401).json({ error: "invalid_client" });
       }
 
-      const { redirect_uri } = req.body;
-      const tokenResponse = oauth.exchangeAuthCode(code, code_verifier, client_id, redirect_uri);
-      if (!tokenResponse) {
-        return res.status(400).json({ error: "invalid_grant" });
+      if (grant_type === "authorization_code") {
+        const { redirect_uri } = req.body;
+        const tokenResponse = oauth.exchangeAuthCode(code, code_verifier, client_id, redirect_uri);
+        if (!tokenResponse) {
+          return res.status(400).json({ error: "invalid_grant" });
+        }
+        return res.json(tokenResponse);
       }
 
-      res.json(tokenResponse);
+      if (grant_type === "refresh_token") {
+        const { refresh_token } = req.body;
+        if (!refresh_token) {
+          return res.status(400).json({ error: "invalid_request", error_description: "refresh_token is required" });
+        }
+        const tokenResponse = oauth.refreshAccessToken(refresh_token, client_id);
+        if (!tokenResponse) {
+          return res.status(400).json({ error: "invalid_grant" });
+        }
+        return res.json(tokenResponse);
+      }
+
+      return res.status(400).json({ error: "unsupported_grant_type" });
     });
 
     // --- Protect /mcp with Bearer token ---
@@ -259,6 +270,13 @@ async function main() {
         res.status(401).json({ error: "Bearer token required" });
         return;
       }
+      // Propagate authenticated user identity to downstream handlers.
+      // NOTE: All MCP users share the same Director token established at
+      // startup (via the Control4 WebSocket connection). Per-user Director
+      // tokens are not supported because the Director token comes from a
+      // single persistent WebSocket connection, not per-request auth.
+      // The user identity is attached here for logging/auditing purposes.
+      req.mcpUser = { email: token.email, clientId: token.clientId };
       next();
     });
   }
@@ -269,6 +287,9 @@ async function main() {
 
   // Stateless mode: create a new server + transport per request
   app.post("/mcp", async (req, res) => {
+    if (req.mcpUser) {
+      console.log(`[MCP] Request from user: ${req.mcpUser.email || "unknown"} (client: ${req.mcpUser.clientId || "none"})`);
+    }
     const server = createMcpServer(mcpConfig);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => { transport.close(); });

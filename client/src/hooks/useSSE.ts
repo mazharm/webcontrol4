@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { DeviceAction } from "../contexts/DeviceContext";
+import type { Alert } from "../types/devices";
 
 export function useSSE(dispatch: React.Dispatch<DeviceAction>) {
   const esRef = useRef<EventSource | null>(null);
@@ -9,45 +10,48 @@ export function useSSE(dispatch: React.Dispatch<DeviceAction>) {
     esRef.current = es;
 
     es.addEventListener("state", (e) => {
+      let data: Record<string, unknown>;
       try {
-        const data = JSON.parse(e.data);
-        if (data.itemId && data.varName !== undefined) {
-          dispatch({
-            type: "UPDATE_DEVICE_VAR",
-            payload: {
-              itemId: data.itemId,
-              varName: data.varName,
-              value: data.value,
-              deviceName: data.name,
-              room: data.room,
-              roomId: data.roomId,
-              floor: data.floor,
-              deviceType: data.deviceType,
-            },
-          });
-        }
+        data = JSON.parse(e.data);
       } catch {
-        // ignore parse errors
+        return; // ignore malformed SSE
+      }
+      if (data.itemId && data.varName !== undefined) {
+        dispatch({
+          type: "UPDATE_DEVICE_VAR",
+          payload: {
+            itemId: data.itemId as number,
+            varName: data.varName as string,
+            value: data.value as string,
+            deviceName: data.name as string | undefined,
+            room: data.room as string | undefined,
+            roomId: data.roomId as number | undefined,
+            floor: data.floor as string | undefined,
+            deviceType: data.deviceType as string | undefined,
+          },
+        });
       }
     });
 
     es.addEventListener("alert", (e) => {
+      let data: Record<string, unknown>;
       try {
-        const data = JSON.parse(e.data);
-        dispatch({ type: "SET_ALERTS", payload: data.alerts || [] });
+        data = JSON.parse(e.data);
       } catch {
-        // ignore
+        return;
       }
+      dispatch({ type: "SET_ALERTS", payload: (data.alerts as Alert[]) || [] });
     });
 
     es.addEventListener("homeState", (e) => {
+      let data: Record<string, unknown>;
       try {
-        const data = JSON.parse(e.data);
-        if (data.alerts) {
-          dispatch({ type: "SET_ALERTS", payload: data.alerts });
-        }
+        data = JSON.parse(e.data);
       } catch {
-        // ignore
+        return;
+      }
+      if (data.alerts) {
+        dispatch({ type: "SET_ALERTS", payload: data.alerts as Alert[] });
       }
     });
 

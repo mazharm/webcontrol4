@@ -120,6 +120,7 @@ class TrendingEngine {
       this._db.close();
       this._db = null;
     }
+    this._insertStmt = null;
   }
 
   // -----------------------------------------------------------------------
@@ -156,7 +157,7 @@ class TrendingEngine {
 
   /** Flush buffer to SQLite in a single transaction. */
   flush() {
-    if (!this._db || this._buffer.length === 0) return;
+    if (!this._db || !this._insertStmt || this._buffer.length === 0) return;
 
     const events = this._buffer.slice(0);
 

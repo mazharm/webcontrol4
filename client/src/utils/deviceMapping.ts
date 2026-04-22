@@ -52,7 +52,7 @@ export function mapC4Thermostat(item: C4ThermostatItem, vars: Record<string, str
   const floorName = item.floorName || "Unknown";
   const state: ThermostatState = {
     type: "thermostat",
-    currentTempF: parseFloat(vars["TEMPERATURE_F"] || "0"),
+    currentTempF: vars["TEMPERATURE_F"] ? parseFloat(vars["TEMPERATURE_F"]) : null,
     heatSetpointF: parseFloat(vars["HEAT_SETPOINT_F"] || "68"),
     coolSetpointF: parseFloat(vars["COOL_SETPOINT_F"] || "74"),
     hvacMode: (vars["HVAC_MODE"] as ThermostatState["hvacMode"]) || "Off",
@@ -102,7 +102,7 @@ export function mapC4Sensor(itemId: number, name: string, room: string, roomId: 
   const floorName = floor || "Unknown";
   const hasMotion = "MOTION_STATE" in vars || "MOTION_DETECTED" in vars;
   const hasContact = "CONTACT_STATE" in vars;
-  const sensorKind = hasMotion ? "motion" : hasContact ? "contact" : "contact";
+  const sensorKind = hasMotion ? "motion" : hasContact ? "contact" : "environmental";
   const triggered = hasMotion
     ? vars["MOTION_STATE"] === "1" || vars["MOTION_DETECTED"] === "1"
     : vars["CONTACT_STATE"] === "1" || vars["CONTACT_STATE"] === "Open";

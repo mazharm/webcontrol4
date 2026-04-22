@@ -12,6 +12,7 @@ type MessageHandler = (payload: unknown, topic: string) => void;
 
 let client: MqttClient | null = null;
 let connectionState: MqttConnectionState = "disconnected";
+let beforeUnloadRegistered = false;
 const connectionListeners = new Set<ConnectionListener>();
 const topicHandlers = new Map<string, Set<MessageHandler>>();
 
@@ -81,21 +82,24 @@ export function connectMqtt(): MqttClient {
         for (const handler of handlers) {
           try {
             handler(parsed, topic);
-          } catch {
-            // ignore handler errors
+          } catch (err) {
+            console.error('[MQTT] handler error:', err);
           }
         }
       }
     }
   });
 
-  // Disconnect on page unload
-  window.addEventListener("beforeunload", () => {
-    if (client) {
-      client.end(true);
-      client = null;
-    }
-  });
+  // Disconnect on page unload (register only once)
+  if (!beforeUnloadRegistered) {
+    beforeUnloadRegistered = true;
+    window.addEventListener("beforeunload", () => {
+      if (client) {
+        client.end(true);
+        client = null;
+      }
+    });
+  }
 
   return client;
 }

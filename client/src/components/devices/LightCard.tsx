@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useEffect, useMemo } from "react";
 import {
   makeStyles,
   tokens,
@@ -54,10 +54,12 @@ export function LightCard({ device }: LightCardProps) {
   const lightState = device.state as LightState;
   const c4Id = device.id.replace("control4:", "");
 
-  const directorOpts = {
+  const directorOpts = useMemo(() => ({
     ip: auth.controllerIp || "",
     token: auth.directorToken || "",
-  };
+  }), [auth.controllerIp, auth.directorToken]);
+
+  useEffect(() => () => clearTimeout(debounceRef.current), []);
 
   const remote = isRemoteMode();
 

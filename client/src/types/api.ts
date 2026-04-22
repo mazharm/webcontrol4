@@ -162,7 +162,7 @@ export interface LLMContextDevice {
   room: string;
   on?: boolean;
   level?: number;
-  tempF?: number;
+  tempF?: number | null;
   heatF?: number;
   coolF?: number;
   hvacMode?: string;

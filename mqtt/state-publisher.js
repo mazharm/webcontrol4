@@ -10,6 +10,7 @@ const { deviceToMqttPayload, ringCameraToMqttPayload, ringAlarmToMqttPayload, ri
 
 let heartbeatTimer = null;
 let unsubReconnect = null;
+let stateChangeHandler = null;
 
 /**
  * Initialize the state publisher.
@@ -41,17 +42,20 @@ function init({ stateMachine, ring, goveeInstance, getRoutines, getScenes }) {
   // -------------------------------------------------------------------------
   if (!stateMachine) {
     console.log("[mqtt-state] No stateMachine — skipping state change listener (MQTT connected before controller)");
-  } else stateMachine.on("stateChange", (change) => {
-    const device = stateMachine.getDeviceState(change.itemId);
-    if (!device) return;
+  } else {
+    stateChangeHandler = (change) => {
+      const device = stateMachine.getDeviceState(change.itemId);
+      if (!device) return;
 
-    const payload = deviceToMqttPayload(device);
-    const topic = `wc4/${homeId}/state/control4/${change.itemId}`;
-    mqttClient.publish(topic, payload, { retain: true });
+      const payload = deviceToMqttPayload(device);
+      const topic = `wc4/${homeId}/state/control4/${change.itemId}`;
+      mqttClient.publish(topic, payload, { retain: true });
 
-    // Also publish updated home state
-    publishHomeState(stateMachine, homeId);
-  });
+      // Also publish updated home state
+      publishHomeState(stateMachine, homeId);
+    };
+    stateMachine.on("stateChange", stateChangeHandler);
+  }
 
   // -------------------------------------------------------------------------
   // 3. Heartbeat every 30 seconds
@@ -319,7 +323,11 @@ async function cleanupStaleRetained(homeId, { stateMachine, ring, goveeInstance 
 /**
  * Clean up timers.
  */
-function stop() {
+function stop(stateMachine) {
+  if (stateChangeHandler && stateMachine) {
+    stateMachine.removeListener("stateChange", stateChangeHandler);
+    stateChangeHandler = null;
+  }
   if (unsubReconnect) {
     unsubReconnect();
     unsubReconnect = null;

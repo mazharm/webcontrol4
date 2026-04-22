@@ -1,4 +1,5 @@
 import type { AuthLoginResponse, AuthControllersResponse, AuthDirectorTokenResponse, AuthStatusResponse } from "../types/api";
+import { safeJson } from "./safeJson";
 
 export async function login(username: string, password: string): Promise<AuthLoginResponse> {
   const res = await fetch("/api/auth/login", {
@@ -7,7 +8,7 @@ export async function login(username: string, password: string): Promise<AuthLog
     body: JSON.stringify({ username, password }),
   });
   if (!res.ok) throw new Error(`Login failed: ${res.statusText}`);
-  return res.json();
+  return safeJson<AuthLoginResponse>(res, "Login failed");
 }
 
 export async function getControllers(accountToken: string): Promise<AuthControllersResponse> {
@@ -17,7 +18,7 @@ export async function getControllers(accountToken: string): Promise<AuthControll
     body: JSON.stringify({ accountToken }),
   });
   if (!res.ok) throw new Error(`Failed to get controllers: ${res.statusText}`);
-  const data = await res.json();
+  const data = await safeJson<Record<string, unknown>>(res, "Failed to get controllers");
   const rawList = Array.isArray(data)
     ? data
     : data.controllers ?? data.account ?? data.accounts ?? data;
@@ -40,13 +41,13 @@ export async function getDirectorToken(accountToken: string, controllerCommonNam
     body: JSON.stringify({ accountToken, controllerCommonName }),
   });
   if (!res.ok) throw new Error(`Failed to get director token: ${res.statusText}`);
-  return res.json();
+  return safeJson<AuthDirectorTokenResponse>(res, "Failed to get director token");
 }
 
 export async function getAuthStatus(): Promise<AuthStatusResponse> {
   const res = await fetch("/auth/status");
   if (!res.ok) throw new Error(`Auth status check failed: ${res.statusText}`);
-  return res.json();
+  return safeJson<AuthStatusResponse>(res, "Auth status check failed");
 }
 
 export async function discoverControllers(timeoutMs = 5000): Promise<Array<{ host: string; ip: string }>> {

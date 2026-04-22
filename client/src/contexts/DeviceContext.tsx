@@ -57,7 +57,7 @@ function updateDeviceVar(state: DeviceContextState, payload: DeviceAction & { ty
     updated.state = s;
   } else if (updated.type === "thermostat") {
     const s = { ...(updated.state as import("../types/devices").ThermostatState) };
-    if (varName === "TEMPERATURE_F") s.currentTempF = parseFloat(value) || 0;
+    if (varName === "TEMPERATURE_F") s.currentTempF = value ? parseFloat(value) || null : null;
     else if (varName === "HEAT_SETPOINT_F") s.heatSetpointF = parseFloat(value) || 68;
     else if (varName === "COOL_SETPOINT_F") s.coolSetpointF = parseFloat(value) || 74;
     else if (varName === "HVAC_MODE") s.hvacMode = value as "Off" | "Heat" | "Cool" | "Auto";

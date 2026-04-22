@@ -120,6 +120,8 @@ async function verify2FA(code) {
   }
 
   const { email, password, hardwareId } = pendingLogin;
+  // Clear plaintext password from memory immediately after extracting it
+  pendingLogin.password = null;
   const result = await ringOAuthRequest(
     { grant_type: "password", username: email, password },
     hardwareId,

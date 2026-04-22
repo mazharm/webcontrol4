@@ -1,10 +1,11 @@
 import type { HistoryPoint } from "../types/api";
 import type { UnifiedDevice, LightState, ThermostatState } from "../types/devices";
+import { safeJson } from "./safeJson";
 
 export async function getHistory(type: "light" | "thermo" | "floor", id: string | number): Promise<HistoryPoint[]> {
   const res = await fetch(`/api/history?type=${encodeURIComponent(type)}&id=${encodeURIComponent(id)}`);
   if (!res.ok) throw new Error("Failed to fetch history");
-  return res.json();
+  return safeJson<HistoryPoint[]>(res, "Failed to fetch history");
 }
 
 export async function recordHistory(devices: UnifiedDevice[]): Promise<void> {

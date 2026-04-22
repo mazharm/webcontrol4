@@ -1,4 +1,5 @@
 import type { LLMChatRequest, LLMChatResponse } from "../types/api";
+import { safeJson } from "./safeJson";
 
 export async function chatWithLLM(request: LLMChatRequest): Promise<LLMChatResponse> {
   const res = await fetch("/api/llm/chat", {
@@ -7,11 +8,11 @@ export async function chatWithLLM(request: LLMChatRequest): Promise<LLMChatRespo
     body: JSON.stringify(request),
   });
   if (!res.ok) throw new Error("LLM chat failed");
-  return res.json();
+  return safeJson<LLMChatResponse>(res, "LLM chat failed");
 }
 
 export async function getModels(): Promise<string[]> {
   const res = await fetch("/api/llm/models");
   if (!res.ok) throw new Error("Failed to fetch models");
-  return res.json();
+  return safeJson<string[]>(res, "Failed to fetch models");
 }

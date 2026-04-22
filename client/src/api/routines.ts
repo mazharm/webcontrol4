@@ -1,4 +1,5 @@
 import type { Routine, RoutineStep } from "../types/devices";
+import { safeJson } from "./safeJson";
 
 const ROUTINES_STORAGE_KEY = "wc4_routines";
 
@@ -29,7 +30,7 @@ function serializeRoutine(routine: Routine, useLegacyLightType = false): Routine
 export async function getRoutines(): Promise<Routine[]> {
   const res = await fetch("/api/routines");
   if (!res.ok) throw new Error("Failed to fetch routines");
-  const routines = await res.json();
+  const routines = await safeJson<Routine[]>(res, "Failed to fetch routines").catch(() => []);
   if (Array.isArray(routines) && routines.length > 0) return routines.map((routine) => normalizeRoutine(routine));
 
   if (typeof window === "undefined") return Array.isArray(routines) ? routines : [];

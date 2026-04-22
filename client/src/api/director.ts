@@ -3,6 +3,9 @@ export interface DirectorOptions {
   token: string;
 }
 
+import { safeJson } from "./safeJson";
+import type { StateSnapshot } from "../types/api";
+
 interface RealtimeConnectOptions extends DirectorOptions {
   accountToken?: string;
   controllerCommonName?: string;
@@ -32,7 +35,7 @@ export async function getLights(opts: DirectorOptions) {
     headers: directorHeaders(opts),
   });
   if (!res.ok) throw new Error("Failed to fetch lights");
-  return res.json();
+  return safeJson(res, "Failed to fetch lights");
 }
 
 export async function getThermostats(opts: DirectorOptions) {
@@ -40,7 +43,7 @@ export async function getThermostats(opts: DirectorOptions) {
     headers: directorHeaders(opts),
   });
   if (!res.ok) throw new Error("Failed to fetch thermostats");
-  return res.json();
+  return safeJson(res, "Failed to fetch thermostats");
 }
 
 export async function getScenes(opts: DirectorOptions) {
@@ -48,7 +51,7 @@ export async function getScenes(opts: DirectorOptions) {
     headers: directorHeaders(opts),
   });
   if (!res.ok) throw new Error("Failed to fetch scenes");
-  return res.json();
+  return safeJson(res, "Failed to fetch scenes");
 }
 
 export async function getItemVariables(opts: DirectorOptions, itemId: number) {
@@ -56,7 +59,7 @@ export async function getItemVariables(opts: DirectorOptions, itemId: number) {
     headers: directorHeaders(opts),
   });
   if (!res.ok) throw new Error(`Failed to fetch variables for item ${itemId}`);
-  return res.json();
+  return safeJson(res, `Failed to fetch variables for item ${itemId}`);
 }
 
 export async function sendCommand(opts: DirectorOptions, itemId: number, command: string, tParams: Record<string, unknown> = {}) {
@@ -66,7 +69,7 @@ export async function sendCommand(opts: DirectorOptions, itemId: number, command
     body: JSON.stringify({ command, tParams }),
   });
   if (!res.ok) throw new Error(`Command failed: ${command}`);
-  return res.json();
+  return safeJson(res, `Command failed: ${command}`);
 }
 
 export async function connectRealtime(opts: RealtimeConnectOptions) {
@@ -81,19 +84,19 @@ export async function connectRealtime(opts: RealtimeConnectOptions) {
     }),
   });
   if (!res.ok) throw new Error("Failed to connect realtime");
-  const result = await res.json();
+  const result = await safeJson(res, "Failed to connect realtime");
   await waitForStateReady();
   return result;
 }
 
-export async function getState() {
+export async function getState(): Promise<StateSnapshot> {
   const res = await fetch("/api/state");
   if (!res.ok) throw new Error("Failed to fetch state");
-  return res.json();
+  return safeJson<StateSnapshot>(res, "Failed to fetch state");
 }
 
 export async function getRoomState(roomId: number) {
   const res = await fetch(`/api/state/room/${roomId}`);
   if (!res.ok) throw new Error("Failed to fetch room state");
-  return res.json();
+  return safeJson(res, "Failed to fetch room state");
 }

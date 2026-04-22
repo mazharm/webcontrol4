@@ -40,6 +40,7 @@ export function rpcCall<T = unknown>(method: string, params: Record<string, unkn
         return;
       }
       const response = payload as { id: string; result?: T; error?: string };
+      if (response.id !== requestId) return;
       if (response.error) {
         reject(new Error(response.error));
       } else {

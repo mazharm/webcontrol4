@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@fluentui/react-components";
 import { Play24Regular } from "@fluentui/react-icons";
 import type { Scene } from "../../types/devices";
@@ -14,6 +14,9 @@ interface SceneCardProps {
 export function SceneCard({ scene }: SceneCardProps) {
   const { state: auth } = useAuth();
   const [running, setRunning] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+
+  useEffect(() => () => clearTimeout(timerRef.current), []);
 
   const remote = isRemoteMode();
 
@@ -30,7 +33,7 @@ export function SceneCard({ scene }: SceneCardProps) {
         );
       }
     } catch { /* ignore */ }
-    setTimeout(() => setRunning(false), 1500);
+    timerRef.current = setTimeout(() => setRunning(false), 1500);
   }, [scene.id, auth, remote]);
 
   return (
