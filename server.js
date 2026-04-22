@@ -348,16 +348,19 @@ async function executeRoutineSteps(routine) {
 
 // Execute a command against the mock controller or a real director.
 // Uses the last-known connection info from the most recent web session.
-let schedulerDirectorInfo = { ip: null, token: null };
+let schedulerDirectorInfo = { ip: null, token: null, tokenExpiresAt: null };
 
-function setSchedulerDirectorInfo(ip, token) {
+function setSchedulerDirectorInfo(ip, token, validSeconds) {
   if (ip && token) {
-    schedulerDirectorInfo = { ip, token };
+    const tokenExpiresAt = validSeconds && Number.isFinite(validSeconds)
+      ? Date.now() + validSeconds * 1000
+      : null;
+    schedulerDirectorInfo = { ip, token, tokenExpiresAt };
   }
 }
 
 async function executeScheduledCommand(deviceId, command, tParams) {
-  const { ip, token } = schedulerDirectorInfo;
+  const { ip, token, tokenExpiresAt } = schedulerDirectorInfo;
 
   // Mock mode — execute directly against in-memory mock state
   if (ip === "mock") {
@@ -372,6 +375,11 @@ async function executeScheduledCommand(deviceId, command, tParams) {
 
   if (!ip || !token) {
     throw new Error("No director connection — connect from the web UI first");
+  }
+
+  if (tokenExpiresAt && Date.now() > tokenExpiresAt) {
+    console.warn("[Scheduler] Director token has expired — skipping command. Reconnect from the web UI to refresh.");
+    throw new Error("Director token expired — reconnect from the web UI");
   }
 
   const fullUrl = `https://${ip}/api/v1/items/${deviceId}/commands`;
@@ -391,19 +399,29 @@ async function executeScheduledCommand(deviceId, command, tParams) {
 
 const MAX_HISTORY_POINTS = 8640; // 24 h × 3600 s / 10 s
 const MAX_HISTORY_KEYS = 5000;
-const historyStore = Object.create(null); // key -> array of timestamped data points
-let historyKeyCount = 0;
+const historyStore = Object.create(null); // key -> { buf: Array, head: Number, size: Number }
 
 function addHistoryPoint(key, point) {
   if (!historyStore[key]) {
-    if (historyKeyCount >= MAX_HISTORY_KEYS) return; // reject new keys when at capacity
-    historyStore[key] = [];
-    historyKeyCount++;
+    if (Object.keys(historyStore).length >= MAX_HISTORY_KEYS) return; // reject new keys when at capacity
+    historyStore[key] = { buf: new Array(MAX_HISTORY_POINTS), head: 0, size: 0 };
   }
-  historyStore[key].push(point);
-  if (historyStore[key].length > MAX_HISTORY_POINTS) {
-    historyStore[key].shift();
+  const ring = historyStore[key];
+  ring.buf[ring.head] = point;
+  ring.head = (ring.head + 1) % MAX_HISTORY_POINTS;
+  if (ring.size < MAX_HISTORY_POINTS) ring.size++;
+}
+
+// Read history ring buffer as a chronologically ordered array
+function getHistoryPoints(key) {
+  const ring = historyStore[key];
+  if (!ring) return [];
+  if (ring.size < MAX_HISTORY_POINTS) {
+    // Buffer hasn't wrapped yet — data starts at 0
+    return ring.buf.slice(0, ring.size);
   }
+  // Buffer wrapped — oldest entry is at head
+  return ring.buf.slice(ring.head).concat(ring.buf.slice(0, ring.head));
 }
 
 let historyRecordTimer = null;
@@ -593,10 +611,17 @@ if (oauth.isConfigured()) {
   }
 
   // --- Google OAuth login ---
+  // Build callback URL from PUBLIC_ORIGIN env var if set, otherwise from
+  // req.protocol + req.get('host') which Express normalizes when 'trust proxy'
+  // is configured. This avoids using raw attacker-controlled headers.
+  function buildCallbackUrl(req) {
+    const origin = process.env.PUBLIC_ORIGIN;
+    if (origin) return `${origin.replace(/\/+$/, "")}/auth/google/callback`;
+    return `${req.protocol}://${req.get("host")}/auth/google/callback`;
+  }
+
   app.get("/auth/google", (req, res) => {
-    const proto = req.headers["x-forwarded-proto"] || req.protocol;
-    const host = req.headers.host;
-    const callbackUrl = `${proto}://${host}/auth/google/callback`;
+    const callbackUrl = buildCallbackUrl(req);
     const nonce = crypto.randomBytes(32).toString("hex");
     oauthStateStore.set(nonce, { nextPath: sanitizeNextPath(req.query.next), ts: Date.now() });
     res.redirect(oauth.googleAuthUrl(callbackUrl, nonce));
@@ -608,9 +633,7 @@ if (oauth.isConfigured()) {
       const { code, state } = req.query;
       if (!code) return res.status(400).send("Missing authorization code");
 
-      const proto = req.headers["x-forwarded-proto"] || req.protocol;
-      const host = req.headers.host;
-      const callbackUrl = `${proto}://${host}/auth/google/callback`;
+      const callbackUrl = buildCallbackUrl(req);
 
       const tokens = await oauth.googleExchangeCode(code, callbackUrl);
       const user = await oauth.googleUserInfo(tokens.access_token);
@@ -992,6 +1015,8 @@ app.get("/api/discover", (_req, res) => {
     });
   }
 
+  // Clean up sockets immediately if the client disconnects before the timeout
+  _req.on("close", finish);
   setTimeout(finish, 4000);
 });
 
@@ -1004,8 +1029,11 @@ app.post("/api/auth/login", authRateLimit, async (req, res) => {
   if (!username || !password) {
     return res.status(400).json({ error: "username and password required" });
   }
-  // Demo mode
+  // Demo mode — disabled when DISABLE_DEMO_MODE env var is set
   if (username === "demo@demo.com") {
+    if (process.env.DISABLE_DEMO_MODE) {
+      return res.status(403).json({ error: "Demo mode is disabled" });
+    }
     return res.json({ accountToken: "mock-token" });
   }
   try {
@@ -1388,7 +1416,7 @@ app.get("/api/history", (req, res) => {
     return res.status(400).json({ error: "invalid id" });
   }
   const key = `${type}:${safeId}`;
-  res.json(historyStore[key] || []);
+  res.json(getHistoryPoints(key));
 });
 
 // ---------------------------------------------------------------------------
@@ -1518,7 +1546,7 @@ app.post("/api/mqtt/connect", async (req, res) => {
       routinesFile: ROUTINES_FILE,
       getRoutines: () => routinesStore,
       handleLlmChat,
-      getHistoryStore: (key) => historyStore[key] || [],
+      getHistoryStore: (key) => getHistoryPoints(key),
     });
     res.json({ ok: true, connected: true });
   } catch (err) {
@@ -1642,10 +1670,10 @@ app.post("/api/routines", (req, res) => {
         return res.status(400).json({ error: "each condition must have a numeric deviceId" });
       }
       if (!VALID_CONDITION_VARIABLES.includes(cond.variable)) {
-        return res.status(400).json({ error: `invalid condition variable: ${cond.variable}` });
+        return res.status(400).json({ error: `invalid condition variable — valid values: ${VALID_CONDITION_VARIABLES.join(", ")}` });
       }
       if (!VALID_CONDITION_OPERATORS.includes(cond.operator)) {
-        return res.status(400).json({ error: `invalid condition operator: ${cond.operator}` });
+        return res.status(400).json({ error: `invalid condition operator — valid values: ${VALID_CONDITION_OPERATORS.join(", ")}` });
       }
       if (cond.value === undefined || cond.value === null) {
         return res.status(400).json({ error: "each condition must have a value" });
@@ -2206,9 +2234,9 @@ app.post("/notify/send", async (req, res) => {
 // Real-time: initialise WebSocket + state machine + trending
 // ---------------------------------------------------------------------------
 
-async function initializeRealtime({ controllerIp, directorToken, accountToken, controllerCommonName }) {
+async function initializeRealtime({ controllerIp, directorToken, accountToken, controllerCommonName, validSeconds }) {
   // Store director info for scheduler (only set from explicit connect, not every proxy request)
-  setSchedulerDirectorInfo(controllerIp, directorToken);
+  setSchedulerDirectorInfo(controllerIp, directorToken, validSeconds);
 
   // 1. Trending engine (idempotent — keep existing if already running)
   if (TrendingEngine && !trending) {
@@ -2306,7 +2334,7 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
         routinesFile: ROUTINES_FILE,
         getRoutines: () => routinesStore,
         handleLlmChat,
-        getHistoryStore: (key) => historyStore[key] || [],
+        getHistoryStore: (key) => getHistoryPoints(key),
       });
     } catch (err) {
       console.error("[mqtt] Failed to initialize MQTT bridge:", err.message);
@@ -2471,7 +2499,7 @@ function startMockEventEmitter() {
 }
 
 function broadcastSSE(eventType, data) {
-  const payload = JSON.stringify({ type: eventType, ...data });
+  const payload = JSON.stringify({ ...data, type: eventType });
   for (const client of sseClients) {
     try { client.write(`event: ${eventType}\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
   }
@@ -2519,7 +2547,7 @@ function getStateSnapshot() {
 // ---------------------------------------------------------------------------
 
 app.post("/api/realtime/connect", async (req, res) => {
-  const { controllerIp, directorToken, accountToken, controllerCommonName } = req.body;
+  const { controllerIp, directorToken, accountToken, controllerCommonName, validSeconds } = req.body;
   if (!controllerIp || !directorToken) {
     return res.status(400).json({ error: "controllerIp and directorToken required" });
   }
@@ -2527,7 +2555,7 @@ app.post("/api/realtime/connect", async (req, res) => {
     return res.status(400).json({ error: "invalid controller IP" });
   }
   try {
-    await initializeRealtime({ controllerIp, directorToken, accountToken, controllerCommonName });
+    await initializeRealtime({ controllerIp, directorToken, accountToken, controllerCommonName, validSeconds });
     res.json({
       ok: true,
       mode: controllerIp === "mock" ? "mock" : "websocket",
@@ -2737,7 +2765,12 @@ app.post("/api/govee/leak/disconnect", (_req, res) => {
 // Govee sensor room assignments
 app.post("/api/govee/leak/rooms", (req, res) => {
   const { rooms } = req.body;
-  if (!rooms || typeof rooms !== "object") return res.status(400).json({ error: "rooms object required" });
+  if (!rooms || typeof rooms !== "object" || Array.isArray(rooms)) return res.status(400).json({ error: "rooms must be a plain object" });
+  const entries = Object.entries(rooms);
+  if (entries.length > 100) return res.status(400).json({ error: "maximum of 100 sensor room entries allowed" });
+  for (const [k, v] of entries) {
+    if (typeof k !== "string" || typeof v !== "string") return res.status(400).json({ error: "all keys and values must be strings" });
+  }
   appSettings.goveeSensorRooms = rooms;
   persistSettings();
   res.json({ ok: true });
