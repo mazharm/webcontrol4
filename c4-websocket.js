@@ -71,8 +71,8 @@ class C4WebSocket extends EventEmitter {
     this._connectingPromise = null;   // in-flight connect()
     this._replacingSocket = false;    // guard against concurrent _setupSocket
 
-    // Event dedup: array of { key, ts } ordered by ts, size-capped.
-    this._dedup = [];
+    // Event dedup: Map of key → timestamp, ordered by insertion.
+    this._dedup = new Map();
 
     // Callback registries
     this._deviceCallbacks = new Map(); // itemId -> Set<Function>
@@ -326,15 +326,17 @@ class C4WebSocket extends EventEmitter {
     const key = `${payload.itemId}:${payload.varName}:${payload.value}`;
     const now = payload.timestamp;
 
-    // Evict expired entries from the front (array is oldest-first).
-    while (this._dedup.length && now - this._dedup[0].ts > DEDUP_WINDOW_MS) {
-      this._dedup.shift();
+    // Evict expired entries
+    for (const [k, ts] of this._dedup) {
+      if (now - ts > DEDUP_WINDOW_MS) this._dedup.delete(k);
     }
-    for (const entry of this._dedup) {
-      if (entry.key === key) return true;
+    if (this._dedup.has(key)) return true;
+    this._dedup.set(key, now);
+    // Evict oldest entries when over capacity
+    if (this._dedup.size > DEDUP_MAX_ENTRIES) {
+      const firstKey = this._dedup.keys().next().value;
+      this._dedup.delete(firstKey);
     }
-    this._dedup.push({ key, ts: now });
-    if (this._dedup.length > DEDUP_MAX_ENTRIES) this._dedup.shift();
     return false;
   }
 

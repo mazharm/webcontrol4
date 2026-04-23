@@ -16,10 +16,11 @@ const ALLOWED_EMAILS       = process.env.ALLOWED_EMAILS
   ? process.env.ALLOWED_EMAILS.split(",").map((e) => e.trim().toLowerCase())
   : [];
 
-const SESSION_TTL  = 24 * 3600 * 1000; // 24 hours
-const CODE_TTL     = 10 * 60 * 1000;   // 10 minutes
-const TOKEN_TTL    = 3600 * 1000;      // 1 hour
-const MAX_CLIENTS  = 100;              // max registered OAuth clients
+const SESSION_TTL        = 24 * 3600 * 1000;        // 24 hours
+const CODE_TTL           = 10 * 60 * 1000;          // 10 minutes
+const TOKEN_TTL          = 3600 * 1000;             // 1 hour
+const REFRESH_TOKEN_TTL  = 30 * 24 * 3600 * 1000;  // 30 days
+const MAX_CLIENTS        = 100;                     // max registered OAuth clients
 
 // ---------------------------------------------------------------------------
 // In-memory stores
@@ -28,7 +29,7 @@ const MAX_CLIENTS  = 100;              // max registered OAuth clients
 const sessions          = new Map(); // sessionId → { email, name, expiresAt }
 const authCodes         = new Map(); // code → { clientId, redirectUri, codeChallenge, codeChallengeMethod, email, expiresAt }
 const accessTokens      = new Map(); // token → { clientId, email, expiresAt }
-const refreshTokens     = new Map(); // refreshToken → { clientId, email, accessToken }
+const refreshTokens     = new Map(); // refreshToken → { clientId, email, accessToken, expiresAt }
 const registeredClients = new Map(); // clientId → { clientSecret, redirectUris, clientName, ... }
 const pendingAuths      = new Map(); // stateId → { clientId, redirectUri, codeChallenge, codeChallengeMethod, state, expiresAt }
 
@@ -184,9 +185,9 @@ function cleanupExpired() {
   for (const [id, p] of Array.from(pendingAuths)) { if (now > p.expiresAt)  pendingAuths.delete(id); }
   for (const [id, c] of Array.from(authCodes))    { if (now > c.expiresAt)  authCodes.delete(id); }
   for (const [id, t] of Array.from(accessTokens)) { if (now > t.expiresAt)  accessTokens.delete(id); }
-  // Clean up refresh tokens whose access tokens no longer exist
+  // Clean up refresh tokens that have exceeded their own TTL
   for (const [id, rt] of Array.from(refreshTokens)) {
-    if (!accessTokens.has(rt.accessToken)) refreshTokens.delete(id);
+    if (now > rt.expiresAt) refreshTokens.delete(id);
   }
 }
 
@@ -332,6 +333,7 @@ function exchangeAuthCode(code, codeVerifier, clientId, redirectUri) {
     clientId,
     email: c.email,
     accessToken,
+    expiresAt: Date.now() + REFRESH_TOKEN_TTL,
   });
 
   return {
@@ -367,6 +369,7 @@ function refreshAccessToken(oldRefreshToken, clientId) {
     clientId,
     email: rt.email,
     accessToken: newAccessToken,
+    expiresAt: Date.now() + REFRESH_TOKEN_TTL,
   });
 
   return {

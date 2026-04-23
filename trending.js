@@ -251,11 +251,12 @@ class TrendingEngine {
     const h = Math.max(1, Math.min(Number(hours) || 24, 720));
     const cutoff = Date.now() - h * 3600 * 1000;
 
-    // Get recent daily summaries grouped by device+variable
+    // Get recent daily summaries within the requested time range
+    const cutoffDate = new Date(cutoff).toISOString().slice(0, 10);
     const todayStr = new Date().toISOString().slice(0, 10);
     const recentSummaries = this._db.prepare(
-      "SELECT item_id, var_name, avg_value, event_count FROM daily_summaries WHERE date = ? AND avg_value IS NOT NULL"
-    ).all(todayStr);
+      "SELECT item_id, var_name, AVG(avg_value) as avg_value, SUM(event_count) as event_count FROM daily_summaries WHERE date >= ? AND date <= ? AND avg_value IS NOT NULL GROUP BY item_id, var_name"
+    ).all(cutoffDate, todayStr);
 
     const anomalies = [];
     const baselineCache = new Map();

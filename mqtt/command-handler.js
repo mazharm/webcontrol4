@@ -178,15 +178,27 @@ async function handleRingCommand(deviceId, payload) {
     return;
   }
 
+  // Camera commands require a valid numeric device ID
+  const numericId = Number(deviceId);
+  if (!Number.isFinite(numericId)) {
+    throw new Error(`Invalid Ring device ID: ${deviceId}`);
+  }
+
   // Camera light toggle
   if (payload.light !== undefined && ringModule.setCameraLight) {
-    await ringModule.setCameraLight(Number(deviceId), payload.light);
+    if (typeof payload.light !== "boolean") {
+      throw new Error(`Invalid light value: expected boolean, got ${typeof payload.light}`);
+    }
+    await ringModule.setCameraLight(numericId, payload.light);
     console.log(`[mqtt-cmd] Ring camera ${deviceId} light: ${payload.light}`);
   }
 
   // Camera siren toggle
   if (payload.siren !== undefined && ringModule.setCameraSiren) {
-    await ringModule.setCameraSiren(Number(deviceId), payload.siren);
+    if (typeof payload.siren !== "boolean") {
+      throw new Error(`Invalid siren value: expected boolean, got ${typeof payload.siren}`);
+    }
+    await ringModule.setCameraSiren(numericId, payload.siren);
     console.log(`[mqtt-cmd] Ring camera ${deviceId} siren: ${payload.siren}`);
   }
 }

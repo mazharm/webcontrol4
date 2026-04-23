@@ -4,7 +4,7 @@
 
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
 const { z } = require("zod");
-const { requestText } = require("./http-client");
+const { requestText, requestBinary } = require("./http-client");
 
 
 /**
@@ -329,10 +329,10 @@ function createMcpServer(config) {
           type: z.enum(["light_level", "light_power", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"]).describe("Step type"),
           deviceId: z.number().int().nonnegative().describe("Device ID"),
           deviceName: z.string().optional().describe("Device name for display"),
-          level: z.number().optional().describe("Brightness level (for light_level)"),
+          level: z.number().min(0).max(100).optional().describe("Brightness level 0-100 (for light_level)"),
           on: z.boolean().optional().describe("On/off (for light_power)"),
-          mode: z.string().optional().describe("HVAC mode (for hvac_mode)"),
-          value: z.number().optional().describe("Temperature value (for setpoints)"),
+          mode: z.enum(["Off", "Heat", "Cool", "Auto"]).optional().describe("HVAC mode (for hvac_mode)"),
+          value: z.number().min(32).max(120).optional().describe("Temperature 32-120°F (for setpoints)"),
         })
       ).describe("Array of routine steps"),
       schedule: z.object({
@@ -528,7 +528,7 @@ function createMcpServer(config) {
     { camera_id: z.number().describe("Camera ID from ring_cameras") },
     async ({ camera_id }) => {
       try {
-        const response = await requestText(`${baseUrl}/ring/cameras/${camera_id}/snapshot`, {
+        const response = await requestBinary(`${baseUrl}/ring/cameras/${camera_id}/snapshot`, {
           headers: authHeader ? (authHeader.startsWith("Cookie:")
             ? { Cookie: authHeader.replace("Cookie: ", "") }
             : { Authorization: authHeader }) : {},
@@ -536,7 +536,7 @@ function createMcpServer(config) {
         if (response.statusCode >= 400) {
           return { content: [{ type: "text", text: `Snapshot failed: HTTP ${response.statusCode}` }], isError: true };
         }
-        return { content: [{ type: "image", data: Buffer.from(response.body, "binary").toString("base64"), mimeType: "image/jpeg" }] };
+        return { content: [{ type: "image", data: response.body.toString("base64"), mimeType: "image/jpeg" }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Snapshot error: ${err.message}` }], isError: true };
       }

@@ -43,10 +43,21 @@ function init({ ring, trending, handleLlmChat, getHistoryStore, getRoutines }) {
  */
 async function handleRpcRequest(payload, topic) {
   const homeId = mqttClient.getHomeId();
-  const { id, method, params } = payload || {};
+  const { id, method, params, ts } = payload || {};
 
   if (!id || !method) {
     console.warn("[mqtt-rpc] Invalid RPC request: missing id or method");
+    return;
+  }
+
+  // Replay protection: require timestamp, reject stale/future messages
+  if (!ts) {
+    console.warn(`[mqtt-rpc] Rejected RPC without timestamp: ${method}`);
+    return;
+  }
+  const age = Date.now() - new Date(ts).getTime();
+  if (age > 30_000 || age < -5_000) {
+    console.warn(`[mqtt-rpc] Rejected stale RPC (age=${Math.round(age / 1000)}s): ${method}`);
     return;
   }
 
@@ -213,6 +224,11 @@ function handleGetRoutines() {
 async function handleLlmChat(params) {
   if (!llmChatFn) throw new Error("LLM chat not available");
   const { message, messages, context, mode } = params || {};
+  // Size limit on LLM input to prevent API credit abuse
+  const inputStr = JSON.stringify({ message, messages, context });
+  if (inputStr.length > 10000) {
+    throw new Error(`LLM input too large (${inputStr.length} chars, max 10000)`);
+  }
   return llmChatFn({ message, messages, context, mode });
 }
 

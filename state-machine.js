@@ -102,6 +102,7 @@ class StateMachine extends EventEmitter {
             roomId: item.roomParentId || 0,
             floor: item.floorName || "",
             variables: {},
+            variableTimestamps: {},
             lastChanged: null,
             lastChangedVariable: null,
             previousValue: null,
@@ -206,6 +207,8 @@ class StateMachine extends EventEmitter {
     device.lastChangedVariable = varName;
     device.variables[varName] = value;
     device.lastChanged = Date.now();
+    device.variableTimestamps = device.variableTimestamps || {};
+    device.variableTimestamps[varName] = Date.now();
     device.changeCount++;
 
     // Track motion per room
@@ -475,10 +478,11 @@ class StateMachine extends EventEmitter {
       // Door/window left open > 10 min
       if (device.type === "sensor" && device.variables.CONTACT_STATE) {
         const isOpen = String(device.variables.CONTACT_STATE).toLowerCase().includes("open");
-        if (isOpen && device.lastChanged && (now - device.lastChanged) > ALERT_DOOR_OPEN_MS) {
+        const contactTs = (device.variableTimestamps || {}).CONTACT_STATE;
+        if (isOpen && contactTs && (now - contactTs) > ALERT_DOOR_OPEN_MS) {
           alerts.push({
             type: "door_open",
-            message: `${device.name} open for ${Math.round((now - device.lastChanged) / 60000)}m`,
+            message: `${device.name} open for ${Math.round((now - contactTs) / 60000)}m`,
             deviceId: device.itemId,
             timestamp: now,
           });
@@ -488,10 +492,11 @@ class StateMachine extends EventEmitter {
       // HVAC running > 60 min continuously
       if (device.type === "thermostat") {
         const hvacState = String(device.variables.HVAC_STATE || "").toLowerCase();
-        if (hvacState === "running" && device.lastChanged && (now - device.lastChanged) > ALERT_HVAC_RUNNING_MS) {
+        const hvacTs = (device.variableTimestamps || {}).HVAC_STATE;
+        if (hvacState === "running" && hvacTs && (now - hvacTs) > ALERT_HVAC_RUNNING_MS) {
           alerts.push({
             type: "hvac_long_run",
-            message: `${device.name} HVAC running for ${Math.round((now - device.lastChanged) / 60000)}m`,
+            message: `${device.name} HVAC running for ${Math.round((now - hvacTs) / 60000)}m`,
             deviceId: device.itemId,
             timestamp: now,
           });
