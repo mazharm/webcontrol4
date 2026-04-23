@@ -252,7 +252,8 @@ export function ActionPreview({ actions, onComplete }: ActionPreviewProps) {
 
           await saveRoutine(routine);
         }
-      } catch {
+      } catch (err) {
+        console.error('[ActionPreview] Action failed:', err);
         failedActions.push(describeAction(action));
       }
     }

@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useState } from "react";
+import { useEffect, useCallback, useState, useRef } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { FluentProvider, Spinner, Text, makeStyles, tokens } from "@fluentui/react-components";
 import { useTheme } from "./contexts/ThemeContext";
@@ -155,7 +155,10 @@ function LocalConnectedApp() {
       }
     };
 
+    const fetchingRef = { current: false };
     const refreshDevices = async () => {
+      if (fetchingRef.current) return;
+      fetchingRef.current = true;
       try {
         const c4Devices = await loadC4Snapshot();
         await captureHistory(c4Devices);
@@ -164,6 +167,8 @@ function LocalConnectedApp() {
         dispatch({ type: "SET_DEVICES", payload: [...c4Devices, ...ringDevices] });
       } catch (err) {
         console.error("Failed to refresh devices:", err);
+      } finally {
+        fetchingRef.current = false;
       }
     };
 

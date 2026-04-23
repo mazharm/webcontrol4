@@ -59,6 +59,8 @@ export function BottomTabBar({ onOpenRooms, onOpenChat }: BottomTabBarProps) {
       <button
         className={`${styles.tab} ${isActive("/") ? styles.active : ""}`}
         onClick={() => navigate("/")}
+        aria-label="Home"
+        aria-current={isActive("/") ? "page" : undefined}
       >
         {isActive("/") ? <Home24Filled /> : <Home24Regular />}
         <span>Home</span>
@@ -66,6 +68,7 @@ export function BottomTabBar({ onOpenRooms, onOpenChat }: BottomTabBarProps) {
       <button
         className={styles.tab}
         onClick={onOpenRooms}
+        aria-label="Rooms"
       >
         <Building24Regular />
         <span>Rooms</span>
@@ -73,6 +76,8 @@ export function BottomTabBar({ onOpenRooms, onOpenChat }: BottomTabBarProps) {
       <button
         className={`${styles.tab} ${isActive("/lights") ? styles.active : ""}`}
         onClick={() => navigate("/lights")}
+        aria-label="Lights"
+        aria-current={isActive("/lights") ? "page" : undefined}
       >
         {isActive("/lights") ? <Lightbulb24Filled /> : <Lightbulb24Regular />}
         <span>Lights</span>
@@ -80,6 +85,7 @@ export function BottomTabBar({ onOpenRooms, onOpenChat }: BottomTabBarProps) {
       <button
         className={styles.tab}
         onClick={onOpenChat}
+        aria-label="Chat"
       >
         <Chat24Regular />
         <span>Chat</span>
@@ -87,6 +93,8 @@ export function BottomTabBar({ onOpenRooms, onOpenChat }: BottomTabBarProps) {
       <button
         className={`${styles.tab} ${isActive("/more") ? styles.active : ""}`}
         onClick={() => navigate("/more")}
+        aria-label="More"
+        aria-current={isActive("/more") ? "page" : undefined}
       >
         {isActive("/more") ? <MoreHorizontal24Filled /> : <MoreHorizontal24Regular />}
         <span>More</span>

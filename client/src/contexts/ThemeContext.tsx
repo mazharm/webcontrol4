@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
 
 type ThemeMode = "light" | "dark";
 
@@ -20,10 +20,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     localStorage.setItem("wc4-theme", mode);
   }, [mode]);
 
-  const toggle = () => setMode((m) => (m === "dark" ? "light" : "dark"));
+  const toggle = useCallback(() => setMode((m) => (m === "dark" ? "light" : "dark")), []);
+  const value = useMemo(() => ({ mode, toggle }), [mode, toggle]);
 
   return (
-    <ThemeContext.Provider value={{ mode, toggle }}>
+    <ThemeContext.Provider value={value}>
       {children}
     </ThemeContext.Provider>
   );

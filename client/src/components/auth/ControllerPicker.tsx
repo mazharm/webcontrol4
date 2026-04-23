@@ -224,6 +224,11 @@ export function ControllerPicker() {
                   key={ctrl.commonName}
                   className={`${styles.item} ${selectedCN === ctrl.commonName ? styles.selected : ""}`}
                   onClick={() => setSelectedCN(ctrl.commonName)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedCN(ctrl.commonName); } }}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Select controller ${ctrl.name || ctrl.commonName}`}
+                  aria-pressed={selectedCN === ctrl.commonName}
                 >
                   <div className={styles.name}>{ctrl.name || ctrl.commonName}</div>
                   <div className={styles.address}>{ctrl.localIP || "IP not found"}</div>

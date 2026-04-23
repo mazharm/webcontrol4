@@ -12,7 +12,7 @@ setInterval(() => {
   for (const [nonce, entry] of oauthStateStore) {
     if (now - entry.ts > OAUTH_STATE_TTL) oauthStateStore.delete(nonce);
   }
-}, 5 * 60 * 1000);
+}, 5 * 60 * 1000).unref();
 const { execSync } = require("child_process");
 const path = require("path");
 const os = require("os");
@@ -29,6 +29,7 @@ const GoveeLeak = require("./govee-leak");
 let TrendingEngine = null;
 let trendingUnavailableReason = null;
 let mqttModule = null;        // MQTT cloud bridge (optional)
+let httpServer = null;        // HTTP/HTTPS server instance
 
 try {
   ({ TrendingEngine } = require("./trending"));
@@ -122,7 +123,9 @@ function clearEnvVar(name) {
 
 function persistSettings() {
   try {
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(appSettings, null, 2), { mode: 0o600 });
+    const tmpPath = SETTINGS_FILE + ".tmp";
+    fs.writeFileSync(tmpPath, JSON.stringify(appSettings, null, 2), { mode: 0o600 });
+    fs.renameSync(tmpPath, SETTINGS_FILE);
   } catch (err) {
     console.error("Failed to save settings:", err.message);
   }
@@ -170,7 +173,9 @@ try {
 
 function persistRoutines() {
   try {
-    fs.writeFileSync(ROUTINES_FILE, JSON.stringify(routinesStore, null, 2), { mode: 0o600 });
+    const tmpPath = ROUTINES_FILE + ".tmp";
+    fs.writeFileSync(tmpPath, JSON.stringify(routinesStore, null, 2), { mode: 0o600 });
+    fs.renameSync(tmpPath, ROUTINES_FILE);
   } catch (err) {
     console.error("Failed to save routines:", err.message);
   }
@@ -565,7 +570,7 @@ setInterval(() => {
       if (!timestamps.length) store.delete(ip);
     }
   }
-}, 60_000);
+}, 60_000).unref();
 const authRateLimit = rateLimit(5, 60_000);
 const llmRateLimit = rateLimit(20, 60_000);
 
@@ -633,6 +638,14 @@ if (oauth.isConfigured()) {
       const { code, state } = req.query;
       if (!code) return res.status(400).send("Missing authorization code");
 
+      // Validate OAuth state nonce BEFORE any token exchange or session creation
+      const storedState = oauthStateStore.get(state);
+      if (!storedState || Date.now() - storedState.ts > OAUTH_STATE_TTL) {
+        oauthStateStore.delete(state);
+        return res.status(403).send("Invalid or expired OAuth state. Please try again.");
+      }
+      oauthStateStore.delete(state);
+
       const callbackUrl = buildCallbackUrl(req);
 
       const tokens = await oauth.googleExchangeCode(code, callbackUrl);
@@ -643,15 +656,9 @@ if (oauth.isConfigured()) {
       }
 
       const sessionId = oauth.createSession(user.email, user.name || user.email);
-      const isSecure = proto === "https";
+      const isSecure = req.protocol === "https";
       oauth.setSessionCookie(res, sessionId, isSecure);
 
-      const storedState = oauthStateStore.get(state);
-      if (!storedState || Date.now() - storedState.ts > OAUTH_STATE_TTL) {
-        oauthStateStore.delete(state);
-        return res.status(403).send("Invalid or expired OAuth state. Please try again.");
-      }
-      oauthStateStore.delete(state);
       const next = sanitizeNextPath(storedState.nextPath || "/");
       res.redirect(next);
     } catch (err) {
@@ -2054,7 +2061,7 @@ app.post("/ring/login", authRateLimit, async (req, res) => {
   }
 });
 
-app.post("/ring/verify", async (req, res) => {
+app.post("/ring/verify", authRateLimit, async (req, res) => {
   const { code } = req.body;
   if (!code || typeof code !== "string" || code.length > 10) {
     return res.status(400).json({ error: "code required (string, max 10 chars)" });
@@ -2501,7 +2508,14 @@ function startMockEventEmitter() {
 function broadcastSSE(eventType, data) {
   const payload = JSON.stringify({ ...data, type: eventType });
   for (const client of sseClients) {
-    try { client.write(`event: ${eventType}\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
+    try {
+      if (client.writableLength > 65536) {
+        sseClients.delete(client);
+        client.end();
+        continue;
+      }
+      client.write(`event: ${eventType}\ndata: ${payload}\n\n`);
+    } catch { sseClients.delete(client); }
   }
 }
 
@@ -2546,7 +2560,9 @@ function getStateSnapshot() {
 // Real-time: POST /api/realtime/connect
 // ---------------------------------------------------------------------------
 
-app.post("/api/realtime/connect", async (req, res) => {
+const realtimeRateLimit = rateLimit(3, 60_000);
+
+app.post("/api/realtime/connect", realtimeRateLimit, async (req, res) => {
   const { controllerIp, directorToken, accountToken, controllerCommonName, validSeconds } = req.body;
   if (!controllerIp || !directorToken) {
     return res.status(400).json({ error: "controllerIp and directorToken required" });
@@ -2771,7 +2787,9 @@ app.post("/api/govee/leak/rooms", (req, res) => {
   for (const [k, v] of entries) {
     if (typeof k !== "string" || typeof v !== "string") return res.status(400).json({ error: "all keys and values must be strings" });
   }
-  appSettings.goveeSensorRooms = rooms;
+  const clean = Object.create(null);
+  for (const [k, v] of entries) clean[k] = v;
+  appSettings.goveeSensorRooms = clean;
   persistSettings();
   res.json({ ok: true });
 });
@@ -2868,12 +2886,13 @@ function startServer() {
       key: fs.readFileSync(keyPath),
     };
 
-    https.createServer(tlsOptions, app).listen(HTTPS_PORT, () => {
+    httpServer = https.createServer(tlsOptions, app);
+    httpServer.listen(HTTPS_PORT, () => {
       console.log(`WebControl4 running at https://localhost:${HTTPS_PORT}`);
     });
   } else {
     // Plain HTTP mode when HTTPS is explicitly disabled
-    app.listen(PORT, () => {
+    httpServer = app.listen(PORT, () => {
       console.log(`WebControl4 running at http://localhost:${PORT}`);
     });
   }
@@ -2884,6 +2903,9 @@ startScheduler();
 
 async function cleanup() {
   console.log("[shutdown] Cleaning up...");
+  if (httpServer) {
+    try { httpServer.close(); } catch {}
+  }
   stopHistoryRecording();
   stopFallbackPolling();
   if (mqttModule) {

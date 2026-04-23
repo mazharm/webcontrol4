@@ -24,7 +24,7 @@ const initialState: ChatState = { messages: [], pending: false };
 function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
     case "ADD_MESSAGE":
-      return { ...state, messages: [...state.messages, action.payload], pending: false };
+      return { ...state, messages: [...state.messages, action.payload].slice(-200), pending: false };
     case "SET_PENDING":
       return { ...state, pending: action.payload };
     case "CLEAR":

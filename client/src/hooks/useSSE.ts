@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { acquireEventSource, releaseEventSource } from "../services/sse-singleton";
 import type { DeviceAction } from "../contexts/DeviceContext";
 import type { Alert } from "../types/devices";
 
@@ -6,7 +7,7 @@ export function useSSE(dispatch: React.Dispatch<DeviceAction>) {
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
-    const es = new EventSource("/api/events");
+    const es = acquireEventSource();
     esRef.current = es;
 
     es.addEventListener("state", (e) => {
@@ -64,7 +65,7 @@ export function useSSE(dispatch: React.Dispatch<DeviceAction>) {
     };
 
     return () => {
-      es.close();
+      releaseEventSource();
       esRef.current = null;
     };
   }, [dispatch]);

@@ -5,6 +5,7 @@ import { ThemeProvider } from "./contexts/ThemeContext";
 import { AuthProvider } from "./contexts/AuthContext";
 import { DeviceProvider } from "./contexts/DeviceContext";
 import { ChatProvider } from "./contexts/ChatContext";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { App } from "./App";
 import "./index.css";
 
@@ -13,16 +14,18 @@ if (!rootEl) throw new Error("Root element not found");
 
 ReactDOM.createRoot(rootEl).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <ThemeProvider>
-        <AuthProvider>
-          <DeviceProvider>
-            <ChatProvider>
-              <App />
-            </ChatProvider>
-          </DeviceProvider>
-        </AuthProvider>
-      </ThemeProvider>
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <ThemeProvider>
+          <AuthProvider>
+            <DeviceProvider>
+              <ChatProvider>
+                <App />
+              </ChatProvider>
+            </DeviceProvider>
+          </AuthProvider>
+        </ThemeProvider>
+      </BrowserRouter>
+    </ErrorBoundary>
   </React.StrictMode>
 );

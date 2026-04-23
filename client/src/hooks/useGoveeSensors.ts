@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
 import { getGoveeLeakStatus } from "../api/settings";
 import { isRemoteMode } from "../config/transport";
+import { getSharedEventSource } from "../services/sse-singleton";
 import type { GoveeSensor, GoveeLeakStatus } from "../types/api";
 
 // ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ async function fetchStatus() {
 
 function ensureSSE() {
   if (es || isRemoteMode()) return;
-  es = new EventSource("/api/events");
+  es = getSharedEventSource();
 
   // Full refresh when Govee connects/disconnects/discovers devices
   es.addEventListener("govee:status", () => {

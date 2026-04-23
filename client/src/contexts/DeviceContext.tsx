@@ -1,4 +1,4 @@
-import { createContext, useContext, useReducer, type ReactNode, type Dispatch } from "react";
+import { createContext, useContext, useReducer, useMemo, type ReactNode, type Dispatch } from "react";
 import type { UnifiedDevice, Alert, Room, Zone, Scene } from "../types/devices";
 
 export interface DeviceContextState {
@@ -183,8 +183,9 @@ const DeviceContext = createContext<DeviceContextValue>({
 
 export function DeviceProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(deviceReducer, initialState);
+  const value = useMemo(() => ({ state, dispatch }), [state, dispatch]);
   return (
-    <DeviceContext.Provider value={{ state, dispatch }}>
+    <DeviceContext.Provider value={value}>
       {children}
     </DeviceContext.Provider>
   );

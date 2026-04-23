@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import {
   makeStyles,
   tokens,
@@ -77,10 +77,9 @@ export function ThermostatCard({ device }: ThermostatCardProps) {
   const ts = device.state as ThermostatState;
   const c4Id = parseInt(device.id.replace("control4:", ""));
 
-  const directorOpts = {
-    ip: auth.controllerIp || "",
-    token: auth.directorToken || "",
-  };
+  const ip = auth.controllerIp || "";
+  const token = auth.directorToken || "";
+  const directorOpts = useMemo(() => ({ ip, token }), [ip, token]);
 
   const remote = isRemoteMode();
 
