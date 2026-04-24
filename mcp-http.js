@@ -13,12 +13,18 @@
 //          GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET (for OAuth)
 
 require("dotenv").config();
-
 const express = require("express");
 const { StreamableHTTPServerTransport } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const { createMcpServer } = require("./mcp-server.js");
 const { requestJson } = require("./http-client");
 const oauth = require("./oauth");
+const {
+  hasBasicAuthConfigured,
+  getBasicAuthHeader,
+  isLoopbackRequest,
+  isValidBasicAuthHeader,
+  sendBasicAuthChallenge,
+} = require("./auth-utils");
 
 const MCP_PORT = parseInt(process.env.MCP_HTTP_PORT, 10) || 3001;
 const APP_PORT = process.env.HTTPS_ENABLED === "true"
@@ -31,26 +37,109 @@ const BASE_URL = process.env.MCP_BASE_URL || (
 );
 const CONTROLLER_IP = process.env.MCP_CONTROLLER_IP || "mock";
 const PKCE_S256_RE = /^[A-Za-z0-9\-_]{43,128}$/;
+const GOOGLE_OAUTH_ENABLED = oauth.isConfigured();
+const BASIC_AUTH_ENABLED = hasBasicAuthConfigured();
+const MCP_IDEMPOTENCY_TTL_MS = 2 * 60 * 1000;
+const mcpIdempotencyCache = new Map();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of mcpIdempotencyCache) {
+    if (entry.status === "complete" && entry.expiresAt <= now) {
+      mcpIdempotencyCache.delete(key);
+    }
+  }
+}, 30_000).unref();
+
+function getMcpIdempotencyKey(req) {
+  const clientKey = req.mcpUser?.clientId || "anonymous";
+  const headerKey = typeof req.headers["idempotency-key"] === "string"
+    ? req.headers["idempotency-key"].trim()
+    : "";
+  if (headerKey) return `header:${clientKey}:${headerKey}`;
+
+  try {
+    if (req.body && !Array.isArray(req.body) && req.body.id !== undefined) {
+      return `jsonrpc:${clientKey}:${String(req.body.method || "")}:${String(req.body.id)}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function startMcpResponseCapture(res, entry) {
+  const chunks = [];
+  const originalWrite = res.write.bind(res);
+  const originalEnd = res.end.bind(res);
+
+  res.write = (chunk, encoding, cb) => {
+    if (chunk) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, typeof encoding === "string" ? encoding : undefined));
+    }
+    return originalWrite(chunk, encoding, cb);
+  };
+
+  res.end = (chunk, encoding, cb) => {
+    if (chunk) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, typeof encoding === "string" ? encoding : undefined));
+    }
+    return originalEnd(chunk, encoding, cb);
+  };
+
+  res.on("finish", () => {
+    if (res.statusCode >= 500) {
+      return;
+    }
+    entry.status = "complete";
+    entry.statusCode = res.statusCode;
+    entry.headers = res.getHeaders();
+    entry.body = Buffer.concat(chunks);
+    entry.expiresAt = Date.now() + MCP_IDEMPOTENCY_TTL_MS;
+  });
+}
+
+function replayMcpResponse(entry, res) {
+  if (entry.headers) {
+    for (const [key, value] of Object.entries(entry.headers)) {
+      if (value !== undefined && key.toLowerCase() !== "content-length") {
+        res.setHeader(key, value);
+      }
+    }
+  }
+  res.status(entry.statusCode || 200);
+  res.end(entry.body || "");
+}
 
 async function main() {
   let directorToken = process.env.MCP_DIRECTOR_TOKEN || "";
   let authHeader = "";
 
+  if (oauth.hasGoogleCredentials() && !oauth.hasAllowedEmails()) {
+    console.warn("[mcp-http] GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET are set but ALLOWED_EMAILS is empty. MCP OAuth remains disabled until an explicit allowlist is configured.");
+  }
+
   // When Google OAuth is configured, create a local session for the MCP HTTP
   // server so it can call the Express API on behalf of authenticated users.
-  if (oauth.isConfigured()) {
+  if (GOOGLE_OAUTH_ENABLED) {
     const email = process.env.ALLOWED_EMAILS
       ? process.env.ALLOWED_EMAILS.split(",")[0].trim()
       : "mcp-http@local";
     const sessionId = oauth.createSession(email, "MCP HTTP");
     authHeader = `Cookie: wc4_session=${sessionId}`;
+  } else if (BASIC_AUTH_ENABLED) {
+    authHeader = getBasicAuthHeader();
   }
 
   // Auto-authenticate in demo/mock mode
   if (!directorToken && CONTROLLER_IP === "mock") {
     const headers = { "Content-Type": "application/json" };
-    if (authHeader.startsWith("Cookie:")) {
-      headers["Cookie"] = authHeader.replace("Cookie: ", "");
+    if (authHeader) {
+      if (authHeader.startsWith("Cookie:")) {
+        headers["Cookie"] = authHeader.replace("Cookie: ", "");
+      } else {
+        headers["Authorization"] = authHeader;
+      }
     }
 
     const loginData = await requestJson(`${BASE_URL}/api/auth/login`, {
@@ -91,12 +180,23 @@ async function main() {
     next();
   });
 
+  if (!GOOGLE_OAUTH_ENABLED) {
+    app.use((req, res, next) => {
+      if (BASIC_AUTH_ENABLED) {
+        if (isValidBasicAuthHeader(req.headers.authorization || "")) return next();
+        return sendBasicAuthChallenge(res, "WebControl4 MCP");
+      }
+      if (isLoopbackRequest(req)) return next();
+      return res.status(403).json({ error: "MCP HTTP requires OAuth, Basic Auth, or loopback access" });
+    });
+  }
+
   // -------------------------------------------------------------------------
   // OAuth 2.0 Authorization Server endpoints (for MCP clients)
   // Only active when Google OAuth is configured.
   // -------------------------------------------------------------------------
 
-  if (oauth.isConfigured()) {
+  if (GOOGLE_OAUTH_ENABLED) {
     console.log("MCP OAuth enabled (Google login required for MCP clients)");
 
     function getSafeHost(req) {
@@ -290,11 +390,44 @@ async function main() {
     if (req.mcpUser) {
       console.log(`[MCP] Request from user: ${req.mcpUser.email || "unknown"} (client: ${req.mcpUser.clientId || "none"})`);
     }
+
+    const requestKey = getMcpIdempotencyKey(req);
+    if (requestKey) {
+      const cached = mcpIdempotencyCache.get(requestKey);
+      if (cached?.status === "complete") {
+        return replayMcpResponse(cached, res);
+      }
+      if (cached?.status === "pending") {
+        return res.status(409).json({ error: "Duplicate MCP request already in progress" });
+      }
+    }
+
+    const cacheEntry = requestKey ? { status: "pending" } : null;
+    if (requestKey && cacheEntry) {
+      mcpIdempotencyCache.set(requestKey, cacheEntry);
+      startMcpResponseCapture(res, cacheEntry);
+    }
+
     const server = createMcpServer(mcpConfig);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    res.on("close", () => { transport.close(); });
-    await server.connect(transport);
-    await transport.handleRequest(req, res);
+    res.on("close", () => {
+      if (requestKey) {
+        const cached = mcpIdempotencyCache.get(requestKey);
+        if (cached?.status === "pending") {
+          mcpIdempotencyCache.delete(requestKey);
+        }
+      }
+      transport.close();
+    });
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res);
+    } catch (err) {
+      if (requestKey) {
+        mcpIdempotencyCache.delete(requestKey);
+      }
+      throw err;
+    }
   });
 
   // GET and DELETE not supported in stateless mode
@@ -308,8 +441,10 @@ async function main() {
 
   app.listen(MCP_PORT, () => {
     console.log(`MCP HTTP server running at http://localhost:${MCP_PORT}/mcp`);
-    if (oauth.isConfigured()) {
+    if (GOOGLE_OAUTH_ENABLED) {
       console.log(`OAuth metadata: http://localhost:${MCP_PORT}/.well-known/oauth-authorization-server`);
+    } else if (!BASIC_AUTH_ENABLED) {
+      console.log("MCP HTTP is restricted to loopback clients until OAuth or Basic Auth is configured.");
     }
   });
 }

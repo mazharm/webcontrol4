@@ -58,7 +58,7 @@ The app uses these Director endpoints:
 
 ## Configuration
 
-Copy `.env.example` to `.env` and edit as needed. All settings are optional — without a `.env` file, the server serves plain HTTP on port 3443 with no auth.
+Copy `.env.example` to `.env` and edit as needed. All settings are optional — without Google OAuth or Basic Auth configured, the server serves on port 3443 but only accepts loopback clients (`localhost`) for safety.
 
 ```bash
 cp .env.example .env
@@ -109,6 +109,10 @@ HTTPS_ENABLED=true
 ### Port Forwarding
 
 Forward your router's external port to the server's HTTPS port (default 3443). For example, forward external port 443 to internal `<server-ip>:3443`. Then access the app at `https://<your-public-ip>` or set up a dynamic DNS hostname.
+
+### Google OAuth allowlist
+
+If you enable Google OAuth, you must also set `ALLOWED_EMAILS`. The server now fails closed when the allowlist is empty instead of accepting every Google account.
 
 ## License
 

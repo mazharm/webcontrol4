@@ -82,7 +82,7 @@ GOOGLE_CLIENT_SECRET=your-client-secret
 ALLOWED_EMAILS=you@gmail.com,family@gmail.com
 ```
 
-Leave `ALLOWED_EMAILS` empty to allow any Google account.
+`ALLOWED_EMAILS` must be set when Google OAuth is enabled. An empty allowlist disables Google OAuth instead of allowing every Google account.
 
 ---
 
@@ -235,7 +235,7 @@ History data (light states, thermostat readings) is stored **in memory only** an
 ### OAuth: "Email not authorized"
 
 - Add the email to `ALLOWED_EMAILS` in `.env` and restart
-- Leave `ALLOWED_EMAILS` empty to allow all Google accounts
+- Confirm the email is present in `ALLOWED_EMAILS`; an empty allowlist disables Google OAuth
 
 ### Scheduled routines not running
 

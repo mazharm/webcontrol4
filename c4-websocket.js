@@ -46,15 +46,21 @@ class C4WebSocket extends EventEmitter {
    * @param {object}   opts
    * @param {string}   opts.directorIp      – Director LAN IP
    * @param {string}   opts.directorToken   – Bearer token for Director
+   * @param {number}   [opts.tokenValidSeconds] – token TTL in seconds
    * @param {function} [opts.refreshTokenFn] – async () => { token, validSeconds }
+   * @param {function} [opts.onTokenRefresh] – ({ token, validSeconds }) => void
    * @param {function} [opts.logger]         – (...args) => void
    * @param {boolean}  [opts.rejectUnauthorized] – TLS cert validation (default false for local directors with self-signed certs)
    */
-  constructor({ directorIp, directorToken, refreshTokenFn, logger, rejectUnauthorized }) {
+  constructor({ directorIp, directorToken, tokenValidSeconds, refreshTokenFn, onTokenRefresh, logger, rejectUnauthorized }) {
     super();
     this._directorIp = directorIp;
     this._token = directorToken;
+    this._tokenValidSeconds = Number.isFinite(tokenValidSeconds) && tokenValidSeconds > 0
+      ? tokenValidSeconds
+      : 86400;
     this._refreshTokenFn = refreshTokenFn;
+    this._onTokenRefresh = onTokenRefresh || null;
     this._logger = logger || (() => {});
     this._rejectUnauthorized = rejectUnauthorized !== undefined ? rejectUnauthorized : false;
 
@@ -427,7 +433,7 @@ class C4WebSocket extends EventEmitter {
     if (!this._refreshTokenFn) return;
 
     // Refresh ~1h before expiry.  Default Director token = 86400s → refresh at ~82800s (23h)
-    const refreshMs = (86400 - TOKEN_REFRESH_BUFFER_S) * 1000;
+    const refreshMs = Math.max(60, this._tokenValidSeconds - TOKEN_REFRESH_BUFFER_S) * 1000;
     // Add jitter: ±5 minutes (reduces correlated refresh storms across replicas)
     const jitter = (Math.random() - 0.5) * 10 * 60 * 1000;
     const delay = Math.max(60_000, refreshMs + jitter); // at least 1 minute
@@ -442,10 +448,20 @@ class C4WebSocket extends EventEmitter {
   async _refreshToken() {
     try {
       this._logger("ws-token-refreshing");
-      const { token } = await this._refreshTokenFn();
+      const { token, validSeconds } = await this._refreshTokenFn();
       this._token = token;
+      if (Number.isFinite(validSeconds) && validSeconds > 0) {
+        this._tokenValidSeconds = validSeconds;
+      }
       this._lastTokenRefreshAt = Date.now();
       this._tokenRefreshRetryCount = 0;
+      if (this._onTokenRefresh) {
+        try {
+          this._onTokenRefresh({ token, validSeconds });
+        } catch (err) {
+          this._logger("ws-token-refresh-callback-error", err.message);
+        }
+      }
       this._logger("ws-token-refreshed", "reconnecting with new token");
 
       // Reconnect with the new token.  Use the reconnect path so

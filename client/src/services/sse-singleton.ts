@@ -5,10 +5,11 @@
 
 let sharedES: EventSource | null = null;
 let refCount = 0;
+const EVENTS_URL = "/api/events";
 
 export function acquireEventSource(): EventSource {
   if (!sharedES || sharedES.readyState === EventSource.CLOSED) {
-    sharedES = new EventSource("/api/events");
+    sharedES = new EventSource(EVENTS_URL);
   }
   refCount++;
   return sharedES;
@@ -21,12 +22,4 @@ export function releaseEventSource(): void {
     sharedES?.close();
     sharedES = null;
   }
-}
-
-/** Get the current shared EventSource without ref-counting (for module-level singletons). */
-export function getSharedEventSource(): EventSource {
-  if (!sharedES || sharedES.readyState === EventSource.CLOSED) {
-    sharedES = new EventSource("/api/events");
-  }
-  return sharedES;
 }

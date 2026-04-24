@@ -50,11 +50,19 @@ function timingSafeEqual(a, b) {
 }
 
 function isConfigured() {
+  return hasGoogleCredentials() && hasAllowedEmails();
+}
+
+function hasGoogleCredentials() {
   return !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET);
 }
 
+function hasAllowedEmails() {
+  return ALLOWED_EMAILS.length > 0;
+}
+
 function isEmailAllowed(email) {
-  if (ALLOWED_EMAILS.length === 0) return true;
+  if (!hasAllowedEmails()) return false;
   return ALLOWED_EMAILS.includes(email.toLowerCase());
 }
 
@@ -386,6 +394,8 @@ function refreshAccessToken(oldRefreshToken, clientId) {
 
 module.exports = {
   isConfigured,
+  hasGoogleCredentials,
+  hasAllowedEmails,
   isEmailAllowed,
 
   // Google OAuth

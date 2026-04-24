@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 import { getGoveeLeakStatus } from "../api/settings";
 import { isRemoteMode } from "../config/transport";
-import { getSharedEventSource } from "../services/sse-singleton";
-import type { GoveeSensor, GoveeLeakStatus } from "../types/api";
+import { acquireEventSource, releaseEventSource } from "../services/sse-singleton";
+import type { GoveeLeakStatus } from "../types/api";
 
 // ---------------------------------------------------------------------------
 // Shared singleton store — one fetch, one SSE listener, many subscribers.
@@ -38,59 +38,75 @@ async function fetchStatus() {
   fetchInFlight = false;
 }
 
+function handleGoveeStatus() {
+  void fetchStatus();
+}
+
+function handleGoveeLeak(event: Event) {
+  try {
+    const payload = JSON.parse((event as MessageEvent).data) as {
+      device?: string;
+      leakDetected?: boolean;
+      battery?: number;
+      online?: boolean;
+      gwOnline?: boolean;
+      lastTime?: number;
+    };
+    const sensors = currentState.sensors.map((s) =>
+      s.id === payload.device
+        ? {
+            ...s,
+            leakDetected: payload.leakDetected ?? s.leakDetected,
+            battery: payload.battery ?? s.battery,
+            online: payload.online ?? s.online,
+            gwOnline: payload.gwOnline ?? s.gwOnline,
+            lastTime: payload.lastTime ?? s.lastTime,
+          }
+        : s
+    );
+    setState({
+      ...currentState,
+      sensors,
+      anyLeak: sensors.some((s) => s.leakDetected),
+    });
+  } catch {
+    // ignore malformed SSE
+  }
+}
+
 function ensureSSE() {
   if (es || isRemoteMode()) return;
-  es = getSharedEventSource();
+  es = acquireEventSource();
 
   // Full refresh when Govee connects/disconnects/discovers devices
-  es.addEventListener("govee:status", () => {
-    fetchStatus();
-  });
+  es.addEventListener("govee:status", handleGoveeStatus);
 
   // Incremental update on individual leak events
-  es.addEventListener("govee:leak", (e) => {
-    try {
-      const event = JSON.parse(e.data);
-      const sensors = currentState.sensors.map((s) =>
-        s.id === event.device
-          ? {
-              ...s,
-              leakDetected: event.leakDetected,
-              battery: event.battery ?? s.battery,
-              online: event.online ?? s.online,
-              gwOnline: event.gwOnline ?? s.gwOnline,
-              lastTime: event.lastTime ?? s.lastTime,
-            }
-          : s
-      );
-      setState({
-        ...currentState,
-        sensors,
-        anyLeak: sensors.some((s) => s.leakDetected),
-      });
-    } catch {
-      // ignore
-    }
-  });
+  es.addEventListener("govee:leak", handleGoveeLeak);
+}
 
-  es.onerror = () => {
-    // Reconnect handled by browser EventSource auto-reconnect
-  };
+function teardownSSE() {
+  if (!es) return;
+  es.removeEventListener("govee:status", handleGoveeStatus);
+  es.removeEventListener("govee:leak", handleGoveeLeak);
+  releaseEventSource();
+  es = null;
 }
 
 function subscribe(listener: Listener) {
   listeners.add(listener);
 
-  // First subscriber: initialize
-  if (!initialized) {
+  if (listeners.size === 1) {
     initialized = true;
-    fetchStatus();
     ensureSSE();
+    void fetchStatus();
   }
 
   return () => {
     listeners.delete(listener);
-    // Don't tear down SSE — keep it alive for the app lifetime
+    if (listeners.size === 0) {
+      teardownSSE();
+    }
   };
 }
 

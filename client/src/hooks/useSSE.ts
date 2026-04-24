@@ -1,19 +1,16 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { acquireEventSource, releaseEventSource } from "../services/sse-singleton";
 import type { DeviceAction } from "../contexts/DeviceContext";
 import type { Alert } from "../types/devices";
 
 export function useSSE(dispatch: React.Dispatch<DeviceAction>) {
-  const esRef = useRef<EventSource | null>(null);
-
   useEffect(() => {
     const es = acquireEventSource();
-    esRef.current = es;
 
-    es.addEventListener("state", (e) => {
+    const handleState = (e: Event) => {
       let data: Record<string, unknown>;
       try {
-        data = JSON.parse(e.data);
+        data = JSON.parse((e as MessageEvent).data);
       } catch {
         return; // ignore malformed SSE
       }
@@ -32,41 +29,51 @@ export function useSSE(dispatch: React.Dispatch<DeviceAction>) {
           },
         });
       }
-    });
+    };
 
-    es.addEventListener("alert", (e) => {
+    const handleAlert = (e: Event) => {
       let data: Record<string, unknown>;
       try {
-        data = JSON.parse(e.data);
+        data = JSON.parse((e as MessageEvent).data);
       } catch {
         return;
       }
       dispatch({ type: "SET_ALERTS", payload: (data.alerts as Alert[]) || [] });
-    });
+    };
 
-    es.addEventListener("homeState", (e) => {
+    const handleHomeState = (e: Event) => {
       let data: Record<string, unknown>;
       try {
-        data = JSON.parse(e.data);
+        data = JSON.parse((e as MessageEvent).data);
       } catch {
         return;
       }
       if (data.alerts) {
         dispatch({ type: "SET_ALERTS", payload: data.alerts as Alert[] });
       }
-    });
+    };
 
-    es.onerror = () => {
+    const handleError = () => {
       dispatch({ type: "SET_CONNECTION", payload: "disconnected" });
     };
 
-    es.onopen = () => {
+    const handleOpen = () => {
       dispatch({ type: "SET_CONNECTION", payload: "connected" });
     };
 
+    es.addEventListener("state", handleState);
+    es.addEventListener("alert", handleAlert);
+    es.addEventListener("homeState", handleHomeState);
+    es.addEventListener("error", handleError);
+    es.addEventListener("open", handleOpen);
+
     return () => {
+      es.removeEventListener("state", handleState);
+      es.removeEventListener("alert", handleAlert);
+      es.removeEventListener("homeState", handleHomeState);
+      es.removeEventListener("error", handleError);
+      es.removeEventListener("open", handleOpen);
       releaseEventSource();
-      esRef.current = null;
     };
   }, [dispatch]);
 }

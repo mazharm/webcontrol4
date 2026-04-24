@@ -86,9 +86,7 @@ class StateMachine extends EventEmitter {
         const items = await this._apiFn(`api/v1/categories/${typeInfo.category}`);
         if (!Array.isArray(items)) continue;
 
-        const proxyOnlyTypes = ["light", "thermostat"];
         for (const item of items) {
-          if (proxyOnlyTypes.includes(typeName) && item.type !== 7) continue; // only proxy (real) devices for lights/thermostats
           if (this._devices.has(item.id)) {
             this._logger("discover-duplicate-skip", { itemId: item.id, keptType: this._devices.get(item.id).type, skippedType: typeName });
             continue;

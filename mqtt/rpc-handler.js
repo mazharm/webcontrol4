@@ -146,11 +146,16 @@ async function handleGetSnapshot(params) {
   if (!buffer) throw new Error(`No snapshot available for camera ${cameraId}`);
 
   const base64 = buffer.toString("base64");
-  return {
+  const result = {
     image: `data:image/jpeg;base64,${base64}`,
     cameraId: String(numericId),
     ts: new Date().toISOString(),
   };
+  const responseBytes = Buffer.byteLength(JSON.stringify(result), "utf8") + 128;
+  if (responseBytes > MAX_RESPONSE_BYTES) {
+    throw new Error(`Snapshot too large (${Math.round(responseBytes / 1024)}KB > ${MAX_RESPONSE_BYTES / 1024}KB limit)`);
+  }
+  return result;
 }
 
 /**

@@ -81,7 +81,7 @@ function createMcpServer(config) {
 
   server.tool("list_lights", "List all lights with level, on/off state, room, and floor", {}, async () => {
     const items = await directorGet("api/v1/categories/lights");
-    const lights = (Array.isArray(items) ? items : []).filter((i) => i.type === 7);
+    const lights = Array.isArray(items) ? items : [];
 
     // Fetch current levels
     const results = await Promise.all(
@@ -120,7 +120,7 @@ function createMcpServer(config) {
 
   server.tool("list_thermostats", "List all thermostats with temperature, setpoints, mode, and humidity", {}, async () => {
     const items = await directorGet("api/v1/categories/thermostats");
-    const thermos = (Array.isArray(items) ? items : []).filter((i) => i.type === 7);
+    const thermos = Array.isArray(items) ? items : [];
 
     const results = await Promise.all(
       thermos.map(async (t) => {
@@ -152,7 +152,7 @@ function createMcpServer(config) {
 
   server.tool("list_scenes", "List all scenes with room and floor", {}, async () => {
     const items = await directorGet("api/v1/categories/voice-scene");
-    const scenes = (Array.isArray(items) ? items : []).filter((i) => i.type === 7);
+    const scenes = Array.isArray(items) ? items : [];
     const results = scenes.map((s) => ({
       id: s.id,
       name: s.name,
