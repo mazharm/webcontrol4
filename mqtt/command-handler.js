@@ -53,7 +53,12 @@ async function handleCommand(payload, topic) {
     console.warn(`[mqtt-cmd] Rejected command without timestamp: ${topic}`);
     return;
   }
-  const age = Date.now() - new Date(payload.ts).getTime();
+  const ts = new Date(payload.ts).getTime();
+  if (!Number.isFinite(ts)) {
+    console.warn(`[mqtt-cmd] Rejected command with invalid timestamp: ${topic}`);
+    return;
+  }
+  const age = Date.now() - ts;
   if (age > 30_000 || age < -5_000) {
     console.warn(`[mqtt-cmd] Rejected stale command (age=${Math.round(age / 1000)}s): ${topic}`);
     return;

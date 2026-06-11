@@ -271,7 +271,11 @@ class C4WebSocket extends EventEmitter {
         this._connected = false;
         this._stopHeartbeat();
         this._logger("ws-connect-error", err.message);
-        this.emit("error", err);
+        // Only emit "error" when something is listening — an unheard "error"
+        // event makes EventEmitter throw, which would escape to
+        // uncaughtException and take the whole process down on a transient
+        // reconnect failure.
+        if (this.listenerCount("error") > 0) this.emit("error", err);
 
         // Only reject the caller's promise on the very first attempt.
         // Subsequent errors trigger reconnect; rejecting would leak an
@@ -302,8 +306,12 @@ class C4WebSocket extends EventEmitter {
       // *and* we've seen no other traffic for STALL_TIMEOUT_MS, force a
       // reconnect — the connection is dead but has not surfaced as such.
       try {
-        this._socket.timeout(HEARTBEAT_INTERVAL_MS).emit("ping", () => {
-          this._lastEventAt = Date.now();
+        this._socket.timeout(HEARTBEAT_INTERVAL_MS).emit("ping", (err) => {
+          // Socket.IO invokes this ack callback with an Error as the first
+          // argument when the ping times out.  Only treat a *successful* ack
+          // as fresh traffic — otherwise a dead socket keeps refreshing
+          // _lastEventAt and the stall detector below never fires.
+          if (!err) this._lastEventAt = Date.now();
         });
       } catch (err) {
         this._logger("ws-heartbeat-emit-error", err.message);

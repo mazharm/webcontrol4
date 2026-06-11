@@ -55,7 +55,12 @@ async function handleRpcRequest(payload, topic) {
     console.warn(`[mqtt-rpc] Rejected RPC without timestamp: ${method}`);
     return;
   }
-  const age = Date.now() - new Date(ts).getTime();
+  const tsMs = new Date(ts).getTime();
+  if (!Number.isFinite(tsMs)) {
+    console.warn(`[mqtt-rpc] Rejected RPC with invalid timestamp: ${method}`);
+    return;
+  }
+  const age = Date.now() - tsMs;
   if (age > 30_000 || age < -5_000) {
     console.warn(`[mqtt-rpc] Rejected stale RPC (age=${Math.round(age / 1000)}s): ${method}`);
     return;

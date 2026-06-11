@@ -7,6 +7,23 @@ const fs = require("fs");
 const crypto = require("crypto");
 const oauthStateStore = new Map();
 const OAUTH_STATE_TTL = 10 * 60 * 1000; // 10 minutes
+const OAUTH_STATE_MAX_ENTRIES = 5000;   // cap to bound memory under abuse
+// Record a pending OAuth login nonce, evicting expired (then oldest) entries
+// first so the public /auth/google endpoint cannot be used to exhaust memory.
+function rememberOAuthState(nonce, entry) {
+  if (oauthStateStore.size >= OAUTH_STATE_MAX_ENTRIES) {
+    const now = Date.now();
+    for (const [key, val] of oauthStateStore) {
+      if (now - val.ts > OAUTH_STATE_TTL) oauthStateStore.delete(key);
+    }
+    while (oauthStateStore.size >= OAUTH_STATE_MAX_ENTRIES) {
+      const oldest = oauthStateStore.keys().next().value;
+      if (oldest === undefined) break;
+      oauthStateStore.delete(oldest);
+    }
+  }
+  oauthStateStore.set(nonce, entry);
+}
 setInterval(() => {
   const now = Date.now();
   for (const [nonce, entry] of oauthStateStore) {
@@ -912,7 +929,7 @@ if (GOOGLE_OAUTH_ENABLED) {
   app.get("/auth/google", (req, res) => {
     const callbackUrl = buildCallbackUrl(req);
     const nonce = crypto.randomBytes(32).toString("hex");
-    oauthStateStore.set(nonce, { nextPath: sanitizeNextPath(req.query.next), ts: Date.now() });
+    rememberOAuthState(nonce, { nextPath: sanitizeNextPath(req.query.next), ts: Date.now() });
     res.redirect(oauth.googleAuthUrl(callbackUrl, nonce));
   });
 
@@ -2612,26 +2629,34 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
   // 3. Wire state changes → trending + SSE
   let prevMode = stateMachine.getHomeState().mode;
   stateMachine.on("stateChange", (change) => {
-    if (trending) {
-      trending.recordEvent({
-        itemId: change.itemId,
-        varName: change.varName,
-        value: change.value,
-        oldValue: change.oldValue,
-        timestamp: change.timestamp,
-      });
-    }
+    // A failure in any single side effect (SQLite/trending write, SSE
+    // serialization, condition engine) must not escape this synchronous
+    // emit — an unguarded throw here would reach uncaughtException and shut
+    // the process down.
+    try {
+      if (trending) {
+        trending.recordEvent({
+          itemId: change.itemId,
+          varName: change.varName,
+          value: change.value,
+          oldValue: change.oldValue,
+          timestamp: change.timestamp,
+        });
+      }
 
-    // Track home-mode transitions
-    const homeState = stateMachine.getHomeState();
-    if (trending && homeState.mode !== prevMode) {
-      trending.recordModeChange(homeState.mode, homeState.confidence);
-      prevMode = homeState.mode;
-    }
+      // Track home-mode transitions
+      const homeState = stateMachine.getHomeState();
+      if (trending && homeState.mode !== prevMode) {
+        trending.recordModeChange(homeState.mode, homeState.confidence);
+        prevMode = homeState.mode;
+      }
 
-    broadcastSSE("state", change);
-    broadcastSSE("homeState", homeState);
-    onStateChangeForConditions();
+      broadcastSSE("state", change);
+      broadcastSSE("homeState", homeState);
+      onStateChangeForConditions();
+    } catch (err) {
+      console.error("[realtime] stateChange handler error:", err?.stack || err?.message || err);
+    }
   });
 
   // 3b. MQTT cloud bridge (optional — env vars or persisted settings)
@@ -2668,15 +2693,18 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
     }
   }
 
-  // 4. WebSocket (skip for mock)
-  if (controllerIp !== "mock") {
-    // Clean up previous connection
-    if (c4ws) {
-      c4ws.disconnect();
-      c4ws = null;
-    }
-    stopFallbackPolling();
+  // 4. Realtime transport — always tear down any previously-running transport
+  // first.  Without this, switching modes (mock ↔ real) or reconnecting leaves
+  // an orphaned mock timer, websocket, or fallback poller alive that keeps
+  // mutating the freshly-created state machine with stale/foreign events.
+  if (c4ws) {
+    try { c4ws.disconnect(); } catch {}
+    c4ws = null;
+  }
+  stopFallbackPolling();
+  stopMockEventEmitter();
 
+  if (controllerIp !== "mock") {
     const refreshTokenFn = accountToken && controllerCommonName
       ? async () => {
         const tokenData = await requestDirectorToken(accountToken, controllerCommonName);
@@ -2701,7 +2729,11 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
     });
 
     c4ws.onAnyChange((payload) => {
-      stateMachine.handleDeviceEvent(payload);
+      try {
+        stateMachine.handleDeviceEvent(payload);
+      } catch (err) {
+        console.error("[ws] handleDeviceEvent error:", err?.stack || err?.message || err);
+      }
     });
 
     c4ws.on("disconnected", ({ reason } = {}) => {
@@ -2819,6 +2851,13 @@ function startMockEventEmitter() {
     stateMachine.handleDeviceEvent({ itemId: device.itemId, varName: "LIGHT_STATE", value: newLevel > 0 ? "1" : "0" });
   }, 30000);
   if (mockEventTimer.unref) mockEventTimer.unref();
+}
+
+function stopMockEventEmitter() {
+  if (mockEventTimer) {
+    clearInterval(mockEventTimer);
+    mockEventTimer = null;
+  }
 }
 
 function broadcastSSE(eventType, data) {

@@ -314,13 +314,21 @@ function exchangeAuthCode(code, codeVerifier, clientId, redirectUri) {
     return null;
   }
   if (c.clientId !== clientId) return null;
-  // Verify redirect_uri matches the one used during authorization
-  if (c.redirectUri && redirectUri && c.redirectUri !== redirectUri) return null;
+  // Verify redirect_uri matches the one used during authorization.  When a
+  // redirect_uri was registered at /authorize it MUST be presented again and
+  // match exactly (RFC 6749 §4.1.3) — otherwise an attacker who intercepts an
+  // auth code could redeem it without binding to the original redirect.
+  if (c.redirectUri && c.redirectUri !== redirectUri) return null;
 
   // Verify PKCE (only S256 is supported)
   if (c.codeChallenge) {
     if (c.codeChallengeMethod !== "S256") return null; // reject non-S256 methods
-    if (!codeVerifier) return null;
+    // RFC 7636 §4.1: code_verifier is 43-128 chars from the unreserved set.
+    // Validating the type/format also prevents a non-string body value from
+    // throwing inside crypto.update() (→ 500).
+    if (typeof codeVerifier !== "string" || !/^[A-Za-z0-9._~-]{43,128}$/.test(codeVerifier)) {
+      return null;
+    }
     const hash = crypto
       .createHash("sha256")
       .update(codeVerifier)
@@ -360,6 +368,14 @@ function refreshAccessToken(oldRefreshToken, clientId) {
   const rt = refreshTokens.get(oldRefreshToken);
   if (!rt) return null;
   if (rt.clientId !== clientId) return null;
+  // Reject (and revoke) expired refresh tokens immediately — the periodic
+  // cleanup leaves a window in which an expired token would otherwise still
+  // mint a fresh access token.
+  if (rt.expiresAt && Date.now() > rt.expiresAt) {
+    refreshTokens.delete(oldRefreshToken);
+    if (rt.accessToken) accessTokens.delete(rt.accessToken);
+    return null;
+  }
 
   // Revoke old tokens
   accessTokens.delete(rt.accessToken);

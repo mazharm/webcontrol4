@@ -158,6 +158,7 @@ function doRequest(body, boundary) {
         port: 443,
         path: "/1/messages.json",
         method: "POST",
+        timeout: 15_000,
         headers: {
           "Content-Type": `multipart/form-data; boundary=${boundary}`,
           "Content-Length": body.length,
@@ -191,6 +192,10 @@ function doRequest(body, boundary) {
     req.on("error", (err) => {
       console.error("[Notify] Pushover request failed:", err.message);
       resolve({ success: false, errors: [err.message], _retryable: true });
+    });
+
+    req.on("timeout", () => {
+      req.destroy(new Error("Pushover request timed out"));
     });
 
     req.write(body);

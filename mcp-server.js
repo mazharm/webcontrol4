@@ -388,7 +388,7 @@ function createMcpServer(config) {
     "Get historical trend data for a device over a time period. Returns raw events.",
     {
       itemId: z.number().int().nonnegative().describe("Device item ID"),
-      hours: z.number().optional().describe("Hours of history to retrieve (default 24)"),
+      hours: z.number().int().min(1).max(720).optional().describe("Hours of history to retrieve (1-720, default 24)"),
     },
     async ({ itemId, hours }) => {
       try {

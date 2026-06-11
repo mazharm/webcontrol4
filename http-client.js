@@ -1,5 +1,6 @@
 const http = require("http");
 const https = require("https");
+const net = require("net");
 
 function isPrivateIPv4(ip) {
   const parts = ip.split(".");
@@ -17,21 +18,37 @@ function isPrivateOrLocalHost(hostname) {
   if (!hostname) return false;
 
   const normalized = String(hostname).replace(/^\[|\]$/g, "").toLowerCase();
-  if (normalized === "localhost" || normalized === "::1" || normalized === "::") return true;
+  if (normalized === "localhost") return true;
 
-  // IPv6 unique local (fc00::/7) and link-local (fe80::/10)
-  if (normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:")) return true;
+  const ipVersion = net.isIP(normalized);
 
-  // IPv4-mapped IPv6 (::ffff:x.x.x.x)
-  if (normalized.startsWith("::ffff:")) {
-    const embedded = normalized.slice(7);
-    return isPrivateIPv4(embedded);
+  // IPv6 literals only — string-prefix checks below must never run against an
+  // arbitrary DNS hostname (e.g. "fd.attacker.com" must NOT be treated as a
+  // private fd00::/8 address, which would bypass the SSRF allowlist and
+  // disable TLS verification).
+  if (ipVersion === 6) {
+    if (normalized === "::1" || normalized === "::") return true;
+
+    // IPv4-mapped IPv6 (::ffff:x.x.x.x)
+    if (normalized.startsWith("::ffff:")) {
+      return isPrivateIPv4(normalized.slice(7));
+    }
+
+    // IPv6 unique local (fc00::/7) and link-local (fe80::/10)
+    if (normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:")) {
+      return true;
+    }
+    return false;
   }
 
-  // 0.0.0.0
-  if (normalized === "0.0.0.0") return true;
+  // IPv4 literals
+  if (ipVersion === 4) {
+    if (normalized === "0.0.0.0") return true;
+    return isPrivateIPv4(normalized);
+  }
 
-  return isPrivateIPv4(normalized);
+  // Not an IP literal and not "localhost" → treat as a public hostname.
+  return false;
 }
 
 const SENSITIVE_HEADERS = [

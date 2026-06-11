@@ -259,6 +259,19 @@ class GoveeLeak {
   // -----------------------------------------------------------------------
 
   async pollLeakStatus() {
+    // Guard against overlapping polls: if a cycle runs longer than the poll
+    // interval, a second setInterval tick must not start a concurrent sweep
+    // (which would double API usage and can reorder state updates).
+    if (this._pollInFlight) return;
+    this._pollInFlight = true;
+    try {
+      await this._pollLeakStatusInner();
+    } finally {
+      this._pollInFlight = false;
+    }
+  }
+
+  async _pollLeakStatusInner() {
     for (const [deviceId, state] of this.devices) {
       try {
         const res = await this._apiRequest(

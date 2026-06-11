@@ -23,9 +23,35 @@ function shouldLog(level) {
   return (LEVELS[level] || 20) >= (LEVELS[DEFAULT_LEVEL] || 20);
 }
 
+function safeStringify(obj) {
+  try {
+    return JSON.stringify(obj);
+  } catch {
+    try {
+      const seen = new WeakSet();
+      return JSON.stringify(obj, (_k, v) => {
+        if (typeof v === "bigint") return v.toString();
+        if (v && typeof v === "object") {
+          if (seen.has(v)) return "[Circular]";
+          seen.add(v);
+        }
+        return v;
+      });
+    } catch {
+      return JSON.stringify({
+        ts: obj && obj.ts,
+        level: obj && obj.level,
+        module: obj && obj.module,
+        event: obj && obj.event,
+        _logError: "unserializable record",
+      });
+    }
+  }
+}
+
 function emit(rec) {
   if (FORMAT === "json") {
-    process.stdout.write(JSON.stringify(rec) + "\n");
+    process.stdout.write(safeStringify(rec) + "\n");
     return;
   }
   const { ts, level, module: mod, event, ...rest } = rec;
