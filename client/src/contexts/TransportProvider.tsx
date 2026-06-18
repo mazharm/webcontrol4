@@ -89,13 +89,17 @@ function MqttSetupGate({ onConfigured }: { onConfigured: () => void }) {
       setError("Broker URL, username, and password are required.");
       return;
     }
-    saveMqttConfig({
-      brokerWsUrl,
-      username,
-      password,
-      homeId: homeId || "home1",
-    });
-    onConfigured();
+    try {
+      saveMqttConfig({
+        brokerWsUrl,
+        username,
+        password,
+        homeId: homeId || "home1",
+      });
+      onConfigured();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invalid MQTT configuration.");
+    }
   }, [brokerWsUrl, username, password, homeId, onConfigured]);
 
   return (

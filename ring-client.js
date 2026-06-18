@@ -16,6 +16,10 @@ let tokenSubscription = null;
 // Snapshot cache: cameraId -> { buffer, ts }
 const snapshotCache = new Map();
 const SNAPSHOT_CACHE_TTL = 10_000; // 10 seconds
+const OAUTH_TIMEOUT_MS = 15_000;
+const MAX_OAUTH_RESPONSE_BYTES = 256 * 1024;
+const HUB_TIMEOUT = 15_000; // 15s timeout for alarm hub operations
+const CAMERA_TIMEOUT = 30_000; // 30s timeout for camera operations
 
 // Pending login state for email/password + 2FA flow
 let pendingLogin = null; // { email, password, hardwareId }
@@ -27,7 +31,15 @@ const PENDING_LOGIN_TTL = 10 * 60 * 1000; // 10 minutes
 // ---------------------------------------------------------------------------
 
 function ringOAuthRequest(grantData, hardwareId, twoFactorCode) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (result) => {
+      if (!settled) {
+        settled = true;
+        resolve(result);
+      }
+    };
+
     const body = JSON.stringify({
       client_id: "ring_official_android",
       scope: "client",
@@ -51,34 +63,43 @@ function ringOAuthRequest(grantData, hardwareId, twoFactorCode) {
       },
       (res) => {
         let data = "";
-        res.on("data", (chunk) => (data += chunk));
+        let received = 0;
+        res.on("data", (chunk) => {
+          received += Buffer.byteLength(chunk);
+          if (received > MAX_OAUTH_RESPONSE_BYTES) {
+            req.destroy(new Error("Ring OAuth response too large"));
+            return;
+          }
+          data += chunk;
+        });
         res.on("end", () => {
           try {
             const json = JSON.parse(data);
             if (res.statusCode === 200) {
-              resolve({ success: true, data: json });
+              done({ success: true, data: json });
             } else if (res.statusCode === 412) {
               // 2FA required
               const prompt = json.tsv_state === "totp"
                 ? "Enter the code from your authenticator app"
                 : `Enter the code sent to ${json.phone || "your device"} via ${json.tsv_state || "SMS"}`;
-              resolve({ success: false, requires2FA: true, prompt });
+              done({ success: false, requires2FA: true, prompt });
             } else if (res.statusCode === 400 && typeof json.error === "string" && json.error.startsWith("Verification Code")) {
-              resolve({ success: false, requires2FA: true, prompt: "Invalid code. Please try again." });
+              done({ success: false, requires2FA: true, prompt: "Invalid code. Please try again." });
             } else {
               const msg = json.error_description || json.error || `HTTP ${res.statusCode}`;
-              resolve({ success: false, error: msg });
+              done({ success: false, error: msg });
             }
           } catch {
-            resolve({ success: false, error: `Unexpected response (HTTP ${res.statusCode})` });
+            done({ success: false, error: `Unexpected response (HTTP ${res.statusCode})` });
           }
         });
       }
     );
 
     req.on("error", (err) => {
-      resolve({ success: false, error: err.message });
+      done({ success: false, error: err.message });
     });
+    req.setTimeout(OAUTH_TIMEOUT_MS, () => req.destroy(new Error("Ring OAuth request timed out")));
 
     req.write(body);
     req.end();
@@ -101,10 +122,14 @@ async function loginWithEmail(email, password) {
     if (pendingLoginTimer) clearTimeout(pendingLoginTimer);
     pendingLogin = { email, password, hardwareId };
     pendingLoginTimer = setTimeout(() => { pendingLogin = null; pendingLoginTimer = null; }, PENDING_LOGIN_TTL);
+    if (pendingLoginTimer.unref) pendingLoginTimer.unref();
     return result;
   }
 
   if (!result.success) return result;
+  if (!result.data?.refresh_token) {
+    return { success: false, error: "Ring login succeeded but did not return a refresh token" };
+  }
 
   // Got a refresh token directly (no 2FA)
   if (pendingLoginTimer) { clearTimeout(pendingLoginTimer); pendingLoginTimer = null; }
@@ -129,6 +154,9 @@ async function verify2FA(code) {
   if (result.requires2FA) return result; // still needs valid code
 
   if (!result.success) return result;
+  if (!result.data?.refresh_token) {
+    return { success: false, error: "Ring verification succeeded but did not return a refresh token" };
+  }
 
   pendingLogin = null;
   if (pendingLoginTimer) { clearTimeout(pendingLoginTimer); pendingLoginTimer = null; }
@@ -147,6 +175,8 @@ function buildRefreshToken(rawToken, hardwareId) {
 // ---------------------------------------------------------------------------
 
 async function initialize(refreshToken) {
+  disconnect();
+  snapshotCache.clear();
   connectionStatus = "connecting";
   try {
     ringApi = new RingApi({
@@ -160,13 +190,25 @@ async function initialize(refreshToken) {
       next: ({ newRefreshToken }) => {
         persistToken(newRefreshToken);
       },
+      error: (err) => {
+        console.error("[Ring] Refresh-token subscription error:", err?.message || String(err));
+      },
     });
 
-    locations = await ringApi.getLocations();
+    locations = await withTimeout(ringApi.getLocations(), HUB_TIMEOUT, "getLocations");
     connectionStatus = "connected";
     console.log(`[Ring] Connected. ${locations.length} location(s) found.`);
     return { success: true, locationCount: locations.length };
   } catch (err) {
+    if (tokenSubscription) {
+      try { tokenSubscription.unsubscribe(); } catch { /* ignore */ }
+      tokenSubscription = null;
+    }
+    if (ringApi) {
+      try { ringApi.disconnect(); } catch { /* ignore */ }
+      ringApi = null;
+    }
+    locations = [];
     connectionStatus = "error";
     console.error("[Ring] Init failed:", err.message);
     return { success: false, error: err.message };
@@ -193,27 +235,35 @@ function loadPersistedToken() {
 }
 
 function persistToken(token) {
+  let tmp = null;
   try {
     const dir = path.dirname(RING_TOKEN_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     // Write+chmod atomically via a tmp file so an interrupted write cannot
     // leave a partial token or a default-permissions file on disk.
-    const tmp = `${RING_TOKEN_FILE}.tmp`;
+    tmp = `${RING_TOKEN_FILE}.${process.pid}.${Date.now()}.tmp`;
     fs.writeFileSync(tmp, token, { mode: 0o600 });
     fs.renameSync(tmp, RING_TOKEN_FILE);
     process.env.RING_REFRESH_TOKEN = token;
   } catch (err) {
     console.error("[Ring] Failed to persist token:", err.message);
+    if (tmp) {
+      try { fs.unlinkSync(tmp); } catch { /* ignore cleanup errors */ }
+    }
   }
 }
 
 function disconnect() {
   if (tokenSubscription) {
-    tokenSubscription.unsubscribe();
+    try { tokenSubscription.unsubscribe(); } catch (err) {
+      console.error("[Ring] Failed to unsubscribe:", err?.message || String(err));
+    }
     tokenSubscription = null;
   }
   if (ringApi) {
-    ringApi.disconnect();
+    try { ringApi.disconnect(); } catch (err) {
+      console.error("[Ring] Disconnect failed:", err?.message || String(err));
+    }
     ringApi = null;
   }
   locations = [];
@@ -235,24 +285,27 @@ function withTimeout(promise, ms, label) {
     promise,
     new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms);
+      if (timer.unref) timer.unref();
     }),
   ]).finally(() => clearTimeout(timer));
 }
 
 async function withRetry(fn, label, maxAttempts = 3, delay = 2000) {
-  const nonRetryable = /auth|unauthorized|401|403|not initialized/i;
+  const nonRetryable = /auth|unauthorized|401|403|not initialized|invalid/i;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       return await fn();
     } catch (err) {
-      if (attempt === maxAttempts || nonRetryable.test(err.message)) throw err;
-      console.warn(`[Ring] ${label} failed (attempt ${attempt}/${maxAttempts}): ${err.message}, retrying in ${delay}ms`);
-      await new Promise((r) => setTimeout(r, delay));
+      const msg = err?.message || String(err);
+      if (attempt === maxAttempts || nonRetryable.test(msg)) throw err;
+      console.warn(`[Ring] ${label} failed (attempt ${attempt}/${maxAttempts}): ${msg}, retrying in ${delay}ms`);
+      await new Promise((r) => {
+        const timer = setTimeout(r, delay);
+        if (timer.unref) timer.unref();
+      });
     }
   }
 }
-
-const HUB_TIMEOUT = 15_000; // 15s timeout for alarm hub operations
 
 // ---------------------------------------------------------------------------
 // Alarm control
@@ -272,21 +325,24 @@ async function getAlarmMode(locationIndex = 0) {
 }
 
 async function setAlarmMode(mode, bypassZids = [], locationIndex = 0) {
-  const loc = getLocation(locationIndex);
-  switch (mode) {
-    case "away":
-      await loc.armAway(bypassZids);
-      break;
-    case "home":
-      await loc.armHome(bypassZids);
-      break;
-    case "disarm":
-      await loc.disarm();
-      break;
-    default:
-      throw new Error(`Invalid mode: ${mode}. Use away|home|disarm`);
-  }
-  return { success: true, mode };
+  return withRetry(async () => {
+    const loc = getLocation(locationIndex);
+    const bypass = Array.isArray(bypassZids) ? bypassZids : [];
+    switch (mode) {
+      case "away":
+        await withTimeout(loc.armAway(bypass), HUB_TIMEOUT, "armAway");
+        break;
+      case "home":
+        await withTimeout(loc.armHome(bypass), HUB_TIMEOUT, "armHome");
+        break;
+      case "disarm":
+        await withTimeout(loc.disarm(), HUB_TIMEOUT, "disarm");
+        break;
+      default:
+        throw new Error(`Invalid mode: ${mode}. Use away|home|disarm`);
+    }
+    return { success: true, mode };
+  }, "setAlarmMode");
 }
 
 // ---------------------------------------------------------------------------
@@ -294,10 +350,17 @@ async function setAlarmMode(mode, bypassZids = [], locationIndex = 0) {
 // ---------------------------------------------------------------------------
 
 async function controlSiren(action, locationIndex = 0) {
-  const loc = getLocation(locationIndex);
-  if (action === "on") await loc.soundSiren();
-  if (action === "off") await loc.silenceSiren();
-  return { success: true, siren: action };
+  return withRetry(async () => {
+    const loc = getLocation(locationIndex);
+    if (action === "on") {
+      await withTimeout(loc.soundSiren(), HUB_TIMEOUT, "soundSiren");
+    } else if (action === "off") {
+      await withTimeout(loc.silenceSiren(), HUB_TIMEOUT, "silenceSiren");
+    } else {
+      throw new Error(`Invalid siren action: ${action}. Use on|off`);
+    }
+    return { success: true, siren: action };
+  }, "controlSiren");
 }
 
 // ---------------------------------------------------------------------------
@@ -343,9 +406,23 @@ async function getSensorStatus(locationIndex = 0) {
 // Cameras
 // ---------------------------------------------------------------------------
 
+function normalizeCameraId(cameraId) {
+  return String(cameraId);
+}
+
+function normalizeBoolean(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const lower = value.toLowerCase();
+    if (lower === "true" || lower === "1" || lower === "on") return true;
+    if (lower === "false" || lower === "0" || lower === "off") return false;
+  }
+  return Boolean(value);
+}
+
 async function getCameras() {
   if (!ringApi) throw new Error("Ring not initialized");
-  const cameras = await ringApi.getCameras();
+  const cameras = await withTimeout(ringApi.getCameras(), CAMERA_TIMEOUT, "getCameras");
   return cameras.map((c) => ({
     id: c.id,
     name: c.name,
@@ -359,39 +436,44 @@ async function getCameras() {
 
 async function getCameraSnapshot(cameraId) {
   if (!ringApi) throw new Error("Ring not initialized");
+  const id = normalizeCameraId(cameraId);
 
   // Check cache
-  const cached = snapshotCache.get(cameraId);
+  const cached = snapshotCache.get(id);
   if (cached && Date.now() - cached.ts < SNAPSHOT_CACHE_TTL) {
     return cached.buffer;
   }
 
-  const cameras = await ringApi.getCameras();
-  const cam = cameras.find((c) => c.id === cameraId);
+  const cameras = await withTimeout(ringApi.getCameras(), CAMERA_TIMEOUT, "getCameras");
+  const cam = cameras.find((c) => normalizeCameraId(c.id) === id);
   if (!cam) throw new Error(`Camera ${cameraId} not found`);
-  const snapshot = await cam.getSnapshot();
+  const snapshot = await withTimeout(cam.getSnapshot(), CAMERA_TIMEOUT, "getSnapshot");
 
   // Cache result
-  snapshotCache.set(cameraId, { buffer: snapshot, ts: Date.now() });
+  snapshotCache.set(id, { buffer: snapshot, ts: Date.now() });
   return snapshot; // Buffer (JPEG)
 }
 
 async function setCameraLight(cameraId, on) {
   if (!ringApi) throw new Error("Ring not initialized");
-  const cameras = await ringApi.getCameras();
-  const cam = cameras.find((c) => c.id === cameraId);
+  const id = normalizeCameraId(cameraId);
+  const cameras = await withTimeout(ringApi.getCameras(), CAMERA_TIMEOUT, "getCameras");
+  const cam = cameras.find((c) => normalizeCameraId(c.id) === id);
   if (!cam) throw new Error(`Camera ${cameraId} not found`);
-  await cam.setLight(on);
-  return { success: true, light: on };
+  const enabled = normalizeBoolean(on);
+  await withTimeout(cam.setLight(enabled), CAMERA_TIMEOUT, "setLight");
+  return { success: true, light: enabled };
 }
 
 async function setCameraSiren(cameraId, on) {
   if (!ringApi) throw new Error("Ring not initialized");
-  const cameras = await ringApi.getCameras();
-  const cam = cameras.find((c) => c.id === cameraId);
+  const id = normalizeCameraId(cameraId);
+  const cameras = await withTimeout(ringApi.getCameras(), CAMERA_TIMEOUT, "getCameras");
+  const cam = cameras.find((c) => normalizeCameraId(c.id) === id);
   if (!cam) throw new Error(`Camera ${cameraId} not found`);
-  await cam.setSiren(on);
-  return { success: true, siren: on };
+  const enabled = normalizeBoolean(on);
+  await withTimeout(cam.setSiren(enabled), CAMERA_TIMEOUT, "setSiren");
+  return { success: true, siren: enabled };
 }
 
 // ---------------------------------------------------------------------------

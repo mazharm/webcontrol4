@@ -11,6 +11,8 @@ const { deviceToMqttPayload, ringCameraToMqttPayload, ringAlarmToMqttPayload, ri
 let heartbeatTimer = null;
 let unsubReconnect = null;
 let stateChangeHandler = null;
+let currentStateMachine = null;
+const retainedCache = new Map();
 
 /**
  * Initialize the state publisher.
@@ -24,6 +26,11 @@ let stateChangeHandler = null;
  */
 function init({ stateMachine, ring, goveeInstance, getRoutines, getScenes }) {
   const homeId = mqttClient.getHomeId();
+  if (stateChangeHandler && currentStateMachine) {
+    stop(currentStateMachine);
+  }
+  currentStateMachine = stateMachine || null;
+  retainedCache.clear();
 
   // -------------------------------------------------------------------------
   // 1. Publish full state snapshot on startup (skip if no controller yet)
@@ -34,7 +41,7 @@ function init({ stateMachine, ring, goveeInstance, getRoutines, getScenes }) {
   }
   if (getRoutines) publishRoutineList(getRoutines, homeId);
   if (getScenes) publishScenes(getScenes, homeId);
-  publishRingDevices(ring, homeId);
+  publishRingDevices(ring, homeId).catch((err) => console.warn("[mqtt-state] Failed initial Ring publish:", err.message));
   if (goveeInstance) publishGoveeDevices(goveeInstance, homeId);
 
   // -------------------------------------------------------------------------
@@ -48,8 +55,8 @@ function init({ stateMachine, ring, goveeInstance, getRoutines, getScenes }) {
       if (!device) return;
 
       const payload = deviceToMqttPayload(device);
-      const topic = `wc4/${homeId}/state/control4/${change.itemId}`;
-      mqttClient.publish(topic, payload, { retain: true });
+      const topic = `wc4/${homeId}/state/control4/${safeSegment(change.itemId, "Control4 device ID")}`;
+      publishRetainedIfChanged(topic, payload);
 
       // Also publish updated home state
       publishHomeState(stateMachine, homeId);
@@ -72,13 +79,14 @@ function init({ stateMachine, ring, goveeInstance, getRoutines, getScenes }) {
   if (unsubReconnect) unsubReconnect();
   unsubReconnect = mqttClient.onReconnect(() => {
     console.log("[mqtt-state] Broker reconnected — re-publishing all state");
+    retainedCache.clear();
     if (stateMachine) {
       publishAllDevices(stateMachine, homeId);
       publishHomeState(stateMachine, homeId);
     }
     if (getRoutines) publishRoutineList(getRoutines, homeId);
     if (getScenes) publishScenes(getScenes, homeId);
-    publishRingDevices(ring, homeId);
+    publishRingDevices(ring, homeId, { force: true }).catch((err) => console.warn("[mqtt-state] Failed reconnect Ring publish:", err.message));
     if (goveeInstance) publishGoveeDevices(goveeInstance, homeId);
     publishHeartbeat(homeId);
   });
@@ -86,7 +94,8 @@ function init({ stateMachine, ring, goveeInstance, getRoutines, getScenes }) {
   // -------------------------------------------------------------------------
   // 5. Clean up stale retained messages from previous server instances
   // -------------------------------------------------------------------------
-  cleanupStaleRetained(homeId, { stateMachine, ring, goveeInstance });
+  cleanupStaleRetained(homeId, { stateMachine, ring, goveeInstance })
+    .catch((err) => console.warn("[mqtt-state] Retained cleanup failed:", err.message));
 
   console.log("[mqtt-state] State publisher initialized");
 }
@@ -99,8 +108,8 @@ function publishAllDevices(stateMachine, homeId) {
   let count = 0;
   for (const [itemId, device] of devices) {
     const payload = deviceToMqttPayload(device);
-    const topic = `wc4/${homeId}/state/control4/${itemId}`;
-    mqttClient.publish(topic, payload, { retain: true });
+    const topic = `wc4/${homeId}/state/control4/${safeSegment(itemId, "Control4 device ID")}`;
+    publishRetainedIfChanged(topic, payload);
     count++;
   }
   console.log(`[mqtt-state] Published ${count} Control4 devices`);
@@ -109,7 +118,7 @@ function publishAllDevices(stateMachine, homeId) {
 /**
  * Publish Ring devices (cameras, sensors, alarm).
  */
-async function publishRingDevices(ring, homeId) {
+async function publishRingDevices(ring, homeId, options = {}) {
   try {
     const status = ring.getStatus();
     if (!status.connected) return;
@@ -117,23 +126,23 @@ async function publishRingDevices(ring, homeId) {
     const cameras = await ring.getCameras().catch(() => []);
     for (const cam of cameras) {
       const payload = ringCameraToMqttPayload(cam);
-      const topic = `wc4/${homeId}/state/ring/${cam.id}`;
-      mqttClient.publish(topic, payload, { retain: true });
+      const topic = `wc4/${homeId}/state/ring/${safeSegment(cam.id, "Ring camera ID")}`;
+      publishRetainedIfChanged(topic, payload, options);
     }
 
     const devices = await ring.getDevices().catch(() => []);
     for (const sensor of devices) {
       const payload = ringSensorToMqttPayload(sensor);
       const devId = sensor.zid || sensor.id;
-      const topic = `wc4/${homeId}/state/ring/${devId}`;
-      mqttClient.publish(topic, payload, { retain: true });
+      const topic = `wc4/${homeId}/state/ring/${safeSegment(devId, "Ring device ID")}`;
+      publishRetainedIfChanged(topic, payload, options);
     }
 
     try {
       const alarm = await ring.getAlarmMode();
       if (alarm && alarm.mode) {
         const payload = ringAlarmToMqttPayload(alarm.mode);
-        mqttClient.publish(`wc4/${homeId}/state/ring/alarm`, payload, { retain: true });
+        publishRetainedIfChanged(`wc4/${homeId}/state/ring/alarm`, payload, options);
       }
     } catch {
       // alarm not available
@@ -155,8 +164,8 @@ function publishGoveeDevices(goveeInstance, homeId) {
 
     for (const sensor of state.sensors) {
       const payload = goveeSensorToMqttPayload(sensor);
-      const topic = `wc4/${homeId}/state/govee/${sensor.id}`;
-      mqttClient.publish(topic, payload, { retain: true });
+      const topic = `wc4/${homeId}/state/govee/${safeSegment(sensor.id, "Govee sensor ID")}`;
+      publishRetainedIfChanged(topic, payload);
     }
     console.log(`[mqtt-state] Published ${state.sensors.length} Govee sensors`);
   } catch (err) {
@@ -183,7 +192,7 @@ function publishHomeState(stateMachine, homeId) {
     })),
     ts: new Date().toISOString(),
   };
-  mqttClient.publish(`wc4/${homeId}/state/home`, payload, { retain: true });
+  publishRetainedIfChanged(`wc4/${homeId}/state/home`, payload);
 }
 
 /**
@@ -198,7 +207,7 @@ function publishRoutineList(getRoutines, homeId) {
     hasSchedule: !!(r.schedule && r.schedule.enabled),
     hasConditions: !!(r.conditions && r.conditions.length > 0 && r.conditionsEnabled),
   }));
-  mqttClient.publish(`wc4/${homeId}/state/routines/list`, list, { retain: true });
+  publishRetainedIfChanged(`wc4/${homeId}/state/routines/list`, list);
   console.log(`[mqtt-state] Published ${list.length} routines`);
 }
 
@@ -209,7 +218,7 @@ async function publishScenes(getScenes, homeId) {
   try {
     const scenes = await getScenes();
     if (scenes && scenes.length > 0) {
-      mqttClient.publish(`wc4/${homeId}/state/scenes`, scenes, { retain: true });
+      publishRetainedIfChanged(`wc4/${homeId}/state/scenes`, scenes);
       console.log(`[mqtt-state] Published ${scenes.length} scenes`);
     }
   } catch {
@@ -255,7 +264,7 @@ async function cleanupStaleRetained(homeId, { stateMachine, ring, goveeInstance 
   // Collect current Control4 device topics
   if (stateMachine) {
     for (const [itemId] of stateMachine.getAllDeviceStates()) {
-      validTopics.add(`wc4/${homeId}/state/control4/${itemId}`);
+      validTopics.add(`wc4/${homeId}/state/control4/${safeSegment(itemId, "Control4 device ID")}`);
     }
   }
 
@@ -263,9 +272,9 @@ async function cleanupStaleRetained(homeId, { stateMachine, ring, goveeInstance 
   try {
     if (ring.getStatus().connected) {
       const cameras = await ring.getCameras().catch(() => []);
-      for (const cam of cameras) validTopics.add(`wc4/${homeId}/state/ring/${cam.id}`);
+      for (const cam of cameras) validTopics.add(`wc4/${homeId}/state/ring/${safeSegment(cam.id, "Ring camera ID")}`);
       const devices = await ring.getDevices().catch(() => []);
-      for (const s of devices) validTopics.add(`wc4/${homeId}/state/ring/${s.zid || s.id}`);
+      for (const s of devices) validTopics.add(`wc4/${homeId}/state/ring/${safeSegment(s.zid || s.id, "Ring device ID")}`);
       validTopics.add(`wc4/${homeId}/state/ring/alarm`);
     }
   } catch { /* ignore */ }
@@ -275,7 +284,7 @@ async function cleanupStaleRetained(homeId, { stateMachine, ring, goveeInstance 
     try {
       const state = goveeInstance.getState();
       if (state && state.sensors) {
-        for (const s of state.sensors) validTopics.add(`wc4/${homeId}/state/govee/${s.id}`);
+        for (const s of state.sensors) validTopics.add(`wc4/${homeId}/state/govee/${safeSegment(s.id, "Govee sensor ID")}`);
       }
     } catch { /* ignore */ }
   }
@@ -298,14 +307,14 @@ async function cleanupStaleRetained(homeId, { stateMachine, ring, goveeInstance 
   mqttClient.subscribe(`wc4/${homeId}/state/#`, handler);
 
   // Wait for retained messages to arrive from the broker
-  await new Promise((r) => setTimeout(r, 3000));
+  await delay(3000);
 
   mqttClient.unsubscribe(`wc4/${homeId}/state/#`, handler);
 
   // Re-collect valid topics to account for devices added during the wait window
   if (stateMachine) {
     for (const [itemId] of stateMachine.getAllDeviceStates()) {
-      validTopics.add(`wc4/${homeId}/state/control4/${itemId}`);
+      validTopics.add(`wc4/${homeId}/state/control4/${safeSegment(itemId, "Control4 device ID")}`);
     }
   }
 
@@ -313,6 +322,7 @@ async function cleanupStaleRetained(homeId, { stateMachine, ring, goveeInstance 
   const confirmedStale = staleTopics.filter((t) => !validTopics.has(t));
   for (const topic of confirmedStale) {
     mqttClient.publish(topic, "", { retain: true });
+    retainedCache.delete(topic);
   }
 
   if (confirmedStale.length > 0) {
@@ -336,6 +346,40 @@ function stop(stateMachine) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
   }
+  currentStateMachine = null;
+}
+
+function publishRetainedIfChanged(topic, payload, options = {}) {
+  const cacheKey = stableStateString(payload);
+  if (!options.force && retainedCache.get(topic) === cacheKey) return false;
+  retainedCache.set(topic, cacheKey);
+  return mqttClient.publish(topic, payload, { retain: true });
+}
+
+function stableStateString(value) {
+  return JSON.stringify(stripVolatileFields(value));
+}
+
+function stripVolatileFields(value) {
+  if (Array.isArray(value)) return value.map(stripVolatileFields);
+  if (!value || typeof value !== "object") return value;
+  const out = {};
+  for (const [key, childValue] of Object.entries(value)) {
+    if (key === "ts") continue;
+    out[key] = stripVolatileFields(childValue);
+  }
+  return out;
+}
+
+function safeSegment(value, label) {
+  return mqttClient.safeTopicSegment(value, label);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    if (timer.unref) timer.unref();
+  });
 }
 
 module.exports = {

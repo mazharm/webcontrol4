@@ -20,7 +20,18 @@ const SESSION_TTL        = 24 * 3600 * 1000;        // 24 hours
 const CODE_TTL           = 10 * 60 * 1000;          // 10 minutes
 const TOKEN_TTL          = 3600 * 1000;             // 1 hour
 const REFRESH_TOKEN_TTL  = 30 * 24 * 3600 * 1000;  // 30 days
+const CLIENT_IDLE_TTL    = 30 * 24 * 3600 * 1000;  // 30 days
 const MAX_CLIENTS        = 100;                     // max registered OAuth clients
+const MAX_SESSIONS       = 1000;
+const MAX_AUTH_CODES     = 500;
+const MAX_ACCESS_TOKENS  = 1000;
+const MAX_REFRESH_TOKENS = 1000;
+const MAX_PENDING_AUTHS  = 500;
+const MAX_PENDING_AUTHS_PER_CLIENT = 25;
+const MAX_REDIRECT_URIS_PER_CLIENT = 10;
+const MAX_REDIRECT_URI_LENGTH = 2048;
+const MAX_CLIENT_NAME_LENGTH = 100;
+const MAX_CLIENT_METADATA_VALUES = 10;
 
 // ---------------------------------------------------------------------------
 // In-memory stores
@@ -39,6 +50,46 @@ const pendingAuths      = new Map(); // stateId → { clientId, redirectUri, cod
 
 function randomId() {
   return crypto.randomBytes(32).toString("hex");
+}
+
+function limitError(message) {
+  const err = new Error(message);
+  err.statusCode = 429;
+  err.code = "limit_exceeded";
+  return err;
+}
+
+function metadataError(message) {
+  const err = new Error(message);
+  err.statusCode = 400;
+  err.code = "invalid_client_metadata";
+  return err;
+}
+
+function deleteOldest(map, predicate = () => true, onDelete) {
+  for (const [key, value] of map) {
+    if (!predicate(value, key)) continue;
+    map.delete(key);
+    if (onDelete) onDelete(value, key);
+    return true;
+  }
+  return false;
+}
+
+function setBounded(map, key, value, max, onEvict) {
+  while (map.size >= max) {
+    if (!deleteOldest(map, () => true, onEvict)) break;
+  }
+  map.set(key, value);
+}
+
+function clientHasLiveState(clientId) {
+  const hasClientId = (entry) => entry && entry.clientId === clientId;
+  for (const entry of pendingAuths.values()) if (hasClientId(entry)) return true;
+  for (const entry of authCodes.values()) if (hasClientId(entry)) return true;
+  for (const entry of accessTokens.values()) if (hasClientId(entry)) return true;
+  for (const entry of refreshTokens.values()) if (hasClientId(entry)) return true;
+  return false;
 }
 
 function timingSafeEqual(a, b) {
@@ -63,10 +114,12 @@ function hasAllowedEmails() {
 
 function isEmailAllowed(email) {
   if (!hasAllowedEmails()) return false;
+  if (typeof email !== "string") return false;
   return ALLOWED_EMAILS.includes(email.toLowerCase());
 }
 
 function isValidRedirectUri(redirectUri) {
+  if (typeof redirectUri !== "string" || redirectUri.length > MAX_REDIRECT_URI_LENGTH) return false;
   try {
     const parsed = new URL(redirectUri);
     if (!["http:", "https:"].includes(parsed.protocol)) return false;
@@ -136,7 +189,8 @@ async function googleUserInfo(accessToken) {
 
 function createSession(email, name) {
   const id = randomId();
-  sessions.set(id, { email, name, expiresAt: Date.now() + SESSION_TTL });
+  cleanupExpired();
+  setBounded(sessions, id, { email, name, expiresAt: Date.now() + SESSION_TTL }, MAX_SESSIONS);
   return id;
 }
 
@@ -189,13 +243,21 @@ function clearSessionCookie(res) {
 
 function cleanupExpired() {
   const now = Date.now();
-  for (const [id, s] of Array.from(sessions))     { if (now > s.expiresAt)  sessions.delete(id); }
-  for (const [id, p] of Array.from(pendingAuths)) { if (now > p.expiresAt)  pendingAuths.delete(id); }
-  for (const [id, c] of Array.from(authCodes))    { if (now > c.expiresAt)  authCodes.delete(id); }
-  for (const [id, t] of Array.from(accessTokens)) { if (now > t.expiresAt)  accessTokens.delete(id); }
+  for (const [id, s] of sessions)     { if (now > s.expiresAt)  sessions.delete(id); }
+  for (const [id, p] of pendingAuths) { if (now > p.expiresAt)  pendingAuths.delete(id); }
+  for (const [id, c] of authCodes)    { if (now > c.expiresAt)  authCodes.delete(id); }
+  for (const [id, t] of accessTokens) { if (now > t.expiresAt)  accessTokens.delete(id); }
   // Clean up refresh tokens that have exceeded their own TTL
-  for (const [id, rt] of Array.from(refreshTokens)) {
-    if (now > rt.expiresAt) refreshTokens.delete(id);
+  for (const [id, rt] of refreshTokens) {
+    if (now > rt.expiresAt) {
+      refreshTokens.delete(id);
+      if (rt.accessToken) accessTokens.delete(rt.accessToken);
+    }
+  }
+  for (const [id, client] of registeredClients) {
+    if (client.expiresAt && now > client.expiresAt && !clientHasLiveState(id)) {
+      registeredClients.delete(id);
+    }
   }
 }
 
@@ -228,30 +290,54 @@ function validateAccessToken(token) {
 // ---------------------------------------------------------------------------
 
 function registerClient(metadata) {
+  if (!metadata || typeof metadata !== "object") {
+    throw metadataError("Invalid client metadata");
+  }
+  cleanupExpired();
   if (registeredClients.size >= MAX_CLIENTS) {
-    throw new Error("Maximum number of registered clients reached");
+    deleteOldest(registeredClients, (_client, clientId) => !clientHasLiveState(clientId));
+  }
+  if (registeredClients.size >= MAX_CLIENTS) {
+    throw limitError("Maximum number of registered clients reached");
+  }
+
+  if (Array.isArray(metadata.redirect_uris) && metadata.redirect_uris.length > MAX_REDIRECT_URIS_PER_CLIENT) {
+    throw metadataError(`At most ${MAX_REDIRECT_URIS_PER_CLIENT} redirect_uris are allowed`);
   }
 
   const redirectUris = Array.isArray(metadata.redirect_uris)
     ? metadata.redirect_uris.filter((uri) => typeof uri === "string" && isValidRedirectUri(uri))
     : [];
+  const clientName = typeof metadata.client_name === "string" && metadata.client_name.trim()
+    ? metadata.client_name.trim().slice(0, MAX_CLIENT_NAME_LENGTH)
+    : "Unknown";
+  const grantTypes = Array.isArray(metadata.grant_types)
+    ? metadata.grant_types.filter((v) => typeof v === "string").slice(0, MAX_CLIENT_METADATA_VALUES)
+    : ["authorization_code"];
+  const responseTypes = Array.isArray(metadata.response_types)
+    ? metadata.response_types.filter((v) => typeof v === "string").slice(0, MAX_CLIENT_METADATA_VALUES)
+    : ["code"];
 
   const clientId = randomId();
   const clientSecret = randomId();
+  const now = Date.now();
   registeredClients.set(clientId, {
     clientSecret,
     redirectUris,
-    clientName: metadata.client_name || "Unknown",
-    grantTypes: metadata.grant_types || ["authorization_code"],
-    responseTypes: metadata.response_types || ["code"],
+    clientName,
+    grantTypes,
+    responseTypes,
+    createdAt: now,
+    lastSeenAt: now,
+    expiresAt: now + CLIENT_IDLE_TTL,
   });
   return {
     client_id: clientId,
     client_secret: clientSecret,
-    client_name: metadata.client_name,
+    client_name: clientName,
     redirect_uris: redirectUris,
-    grant_types: metadata.grant_types || ["authorization_code"],
-    response_types: metadata.response_types || ["code"],
+    grant_types: grantTypes,
+    response_types: responseTypes,
     token_endpoint_auth_method: "client_secret_post",
     client_id_issued_at: Math.floor(Date.now() / 1000),
     client_secret_expires_at: 0,
@@ -259,7 +345,13 @@ function registerClient(metadata) {
 }
 
 function getClient(clientId) {
-  return registeredClients.get(clientId) || null;
+  cleanupExpired();
+  const client = registeredClients.get(clientId);
+  if (!client) return null;
+  const now = Date.now();
+  client.lastSeenAt = now;
+  client.expiresAt = now + CLIENT_IDLE_TTL;
+  return client;
 }
 
 function verifyClientSecret(client, secret) {
@@ -272,8 +364,18 @@ function verifyClientSecret(client, secret) {
 // ---------------------------------------------------------------------------
 
 function createPendingAuth(params) {
+  cleanupExpired();
+  const clientId = params?.clientId;
+  let clientPendingCount = 0;
+  for (const pending of pendingAuths.values()) {
+    if (pending.clientId === clientId) clientPendingCount += 1;
+  }
+  while (clientPendingCount >= MAX_PENDING_AUTHS_PER_CLIENT) {
+    if (!deleteOldest(pendingAuths, (pending) => pending.clientId === clientId)) break;
+    clientPendingCount -= 1;
+  }
   const id = randomId();
-  pendingAuths.set(id, { ...params, expiresAt: Date.now() + CODE_TTL });
+  setBounded(pendingAuths, id, { ...params, expiresAt: Date.now() + CODE_TTL }, MAX_PENDING_AUTHS);
   return id;
 }
 
@@ -294,15 +396,16 @@ function getPendingAuth(id) {
 // ---------------------------------------------------------------------------
 
 function createAuthCode(clientId, redirectUri, codeChallenge, codeChallengeMethod, email) {
+  cleanupExpired();
   const code = randomId();
-  authCodes.set(code, {
+  setBounded(authCodes, code, {
     clientId,
     redirectUri,
     codeChallenge,
     codeChallengeMethod,
     email,
     expiresAt: Date.now() + CODE_TTL,
-  });
+  }, MAX_AUTH_CODES);
   return code;
 }
 
@@ -340,16 +443,18 @@ function exchangeAuthCode(code, codeVerifier, clientId, redirectUri) {
 
   const accessToken = randomId();
   const refreshToken = randomId();
-  accessTokens.set(accessToken, {
+  setBounded(accessTokens, accessToken, {
     clientId,
     email: c.email,
     expiresAt: Date.now() + TOKEN_TTL,
-  });
-  refreshTokens.set(refreshToken, {
+  }, MAX_ACCESS_TOKENS);
+  setBounded(refreshTokens, refreshToken, {
     clientId,
     email: c.email,
     accessToken,
     expiresAt: Date.now() + REFRESH_TOKEN_TTL,
+  }, MAX_REFRESH_TOKENS, (rt) => {
+    if (rt.accessToken) accessTokens.delete(rt.accessToken);
   });
 
   return {
@@ -384,16 +489,18 @@ function refreshAccessToken(oldRefreshToken, clientId) {
   // Issue new pair
   const newAccessToken = randomId();
   const newRefreshToken = randomId();
-  accessTokens.set(newAccessToken, {
+  setBounded(accessTokens, newAccessToken, {
     clientId,
     email: rt.email,
     expiresAt: Date.now() + TOKEN_TTL,
-  });
-  refreshTokens.set(newRefreshToken, {
+  }, MAX_ACCESS_TOKENS);
+  setBounded(refreshTokens, newRefreshToken, {
     clientId,
     email: rt.email,
     accessToken: newAccessToken,
     expiresAt: Date.now() + REFRESH_TOKEN_TTL,
+  }, MAX_REFRESH_TOKENS, (oldRt) => {
+    if (oldRt.accessToken) accessTokens.delete(oldRt.accessToken);
   });
 
   return {

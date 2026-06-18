@@ -1,4 +1,4 @@
-import { createContext, useContext, useReducer, type ReactNode, type Dispatch } from "react";
+import { createContext, useContext, useMemo, useReducer, type ReactNode, type Dispatch } from "react";
 import type { Controller } from "../types/devices";
 
 export type AuthStage = "checking" | "login" | "controller-select" | "connected";
@@ -65,8 +65,9 @@ const AuthContext = createContext<AuthContextValue>({
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(authReducer, initialState);
+  const value = useMemo(() => ({ state, dispatch }), [state, dispatch]);
   return (
-    <AuthContext.Provider value={{ state, dispatch }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useState, useRef } from "react";
+import { useEffect, useCallback, useState } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { FluentProvider, Spinner, Text, makeStyles, tokens } from "@fluentui/react-components";
 import { useTheme } from "./contexts/ThemeContext";
@@ -103,26 +103,22 @@ function LocalConnectedApp() {
   // SSE for realtime updates
   useSSE(dispatch);
 
-  const loadC4Snapshot = useCallback(async (): Promise<UnifiedDevice[]> => {
+  const loadC4Snapshot = useCallback(async (): Promise<{ devices: UnifiedDevice[]; alerts: Alert[] | null }> => {
     const snapshot: StateSnapshot = await getState();
     const c4Devices = mapStateDevices(snapshot);
-
-    if (snapshot.alerts) {
-      dispatch({
-        type: "SET_ALERTS",
-        payload: snapshot.alerts.map((a) => ({
+    const alerts = snapshot.alerts
+      ? snapshot.alerts.map((a) => ({
           id: `${a.type}-${a.itemId}-${a.timestamp}`,
           type: a.type as Alert["type"],
           message: a.message,
           deviceId: String(a.itemId),
           deviceName: a.itemName,
           timestamp: a.timestamp,
-        })),
-      });
-    }
+        }))
+      : null;
 
-    return c4Devices;
-  }, [dispatch]);
+    return { devices: c4Devices, alerts };
+  }, []);
 
   const captureHistory = useCallback(async (devices: UnifiedDevice[]) => {
     const control4Devices = devices.filter((device) => device.source === "control4");
@@ -132,12 +128,22 @@ function LocalConnectedApp() {
 
   useEffect(() => {
     let active = true;
+    let refreshInterval: ReturnType<typeof setInterval> | null = null;
+    let refreshing = false;
+
+    const applyAlerts = (alerts: Alert[] | null) => {
+      if (alerts) {
+        dispatch({ type: "SET_ALERTS", payload: alerts });
+      }
+    };
 
     const initializeDevices = async () => {
       dispatch({ type: "SET_CONNECTION", payload: "connecting" });
       try {
-        const c4Devices = await loadC4Snapshot();
+        const snapshot = await loadC4Snapshot();
         if (!active) return;
+        applyAlerts(snapshot.alerts);
+        const c4Devices = snapshot.devices;
 
         dispatch({ type: "SET_DEVICES", payload: c4Devices });
         await captureHistory(c4Devices);
@@ -155,12 +161,14 @@ function LocalConnectedApp() {
       }
     };
 
-    const fetchingRef = { current: false };
     const refreshDevices = async () => {
-      if (fetchingRef.current) return;
-      fetchingRef.current = true;
+      if (refreshing) return;
+      refreshing = true;
       try {
-        const c4Devices = await loadC4Snapshot();
+        const snapshot = await loadC4Snapshot();
+        if (!active) return;
+        applyAlerts(snapshot.alerts);
+        const c4Devices = snapshot.devices;
         await captureHistory(c4Devices);
         const ringDevices = await loadRingDevices();
         if (!active) return;
@@ -168,18 +176,20 @@ function LocalConnectedApp() {
       } catch (err) {
         console.error("Failed to refresh devices:", err);
       } finally {
-        fetchingRef.current = false;
+        refreshing = false;
       }
     };
 
-    void initializeDevices();
-    const interval = setInterval(() => {
-      void refreshDevices();
-    }, 30000);
+    void initializeDevices().then(() => {
+      if (!active) return;
+      refreshInterval = setInterval(() => {
+        void refreshDevices();
+      }, 30000);
+    });
 
     return () => {
       active = false;
-      clearInterval(interval);
+      if (refreshInterval) clearInterval(refreshInterval);
     };
   }, [captureHistory, dispatch, loadC4Snapshot, loadRingDevices]);
 

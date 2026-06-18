@@ -29,13 +29,16 @@ function setState(next: GoveeLeakStatus) {
 async function fetchStatus() {
   if (fetchInFlight || isRemoteMode()) return;
   fetchInFlight = true;
+  notify();
   try {
     const status = await getGoveeLeakStatus();
     setState(status);
   } catch {
     // ignore — keep previous state
+  } finally {
+    fetchInFlight = false;
+    notify();
   }
-  fetchInFlight = false;
 }
 
 function handleGoveeStatus() {
@@ -98,6 +101,7 @@ function subscribe(listener: Listener) {
 
   if (listeners.size === 1) {
     initialized = true;
+    notify();
     ensureSSE();
     void fetchStatus();
   }

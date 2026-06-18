@@ -40,6 +40,9 @@ const STALL_TIMEOUT_MS = 90_000;   // 3x heartbeat — tolerates one missed beat
 // itemId:varName:value within a short window.
 const DEDUP_WINDOW_MS = 2_000;
 const DEDUP_MAX_ENTRIES = 512;
+const MAX_VAR_NAME_LENGTH = 128;
+const MAX_LOG_STRING_LENGTH = 256;
+const MAX_LOG_ARRAY_ITEMS = 8;
 
 class C4WebSocket extends EventEmitter {
   /**
@@ -96,6 +99,10 @@ class C4WebSocket extends EventEmitter {
     if (this._connected) return Promise.resolve();
 
     this._userDisconnected = false;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
     this._reconnectAttempts = 0;
 
     this._connectingPromise = new Promise((resolve, reject) => {
@@ -117,13 +124,14 @@ class C4WebSocket extends EventEmitter {
     this._teardownSocket();
     const wasConnected = this._connected;
     this._connected = false;
-    if (wasConnected) this.emit("disconnected", { reason: "user" });
+    if (wasConnected) this._emitSafely("disconnected", { reason: "user" });
     this._logger("ws-disconnected", "user-initiated");
   }
 
   /** Register callback for a specific device's variable changes. */
   onDeviceChange(itemId, cb) {
-    const id = Number(itemId);
+    const id = this._coercePositiveInteger(itemId);
+    if (!id || typeof cb !== "function") return;
     if (!this._deviceCallbacks.has(id)) {
       this._deviceCallbacks.set(id, new Set());
     }
@@ -132,18 +140,32 @@ class C4WebSocket extends EventEmitter {
 
   /** Unregister callback(s) for a device.  If cb omitted, removes all. */
   offDeviceChange(itemId, cb) {
-    const id = Number(itemId);
+    const id = this._coercePositiveInteger(itemId);
+    if (!id) return;
     if (!cb) {
       this._deviceCallbacks.delete(id);
     } else {
       const cbs = this._deviceCallbacks.get(id);
-      if (cbs) cbs.delete(cb);
+      if (cbs) {
+        cbs.delete(cb);
+        if (cbs.size === 0) this._deviceCallbacks.delete(id);
+      }
     }
   }
 
   /** Register wildcard callback for ALL device changes. */
   onAnyChange(cb) {
+    if (typeof cb !== "function") return;
     this._anyCallbacks.add(cb);
+  }
+
+  /** Unregister wildcard callback(s).  If cb omitted, removes all. */
+  offAnyChange(cb) {
+    if (!cb) {
+      this._anyCallbacks.clear();
+    } else {
+      this._anyCallbacks.delete(cb);
+    }
   }
 
   /** Connection status. */
@@ -172,6 +194,7 @@ class C4WebSocket extends EventEmitter {
   _teardownSocket() {
     if (this._heartbeatTimer) { clearInterval(this._heartbeatTimer); this._heartbeatTimer = null; }
     if (this._socket) {
+      try { if (typeof this._socket.offAny === "function") this._socket.offAny(); } catch {}
       try { this._socket.removeAllListeners(); } catch {}
       try { this._socket.disconnect(); } catch {}
       this._socket = null;
@@ -219,7 +242,7 @@ class C4WebSocket extends EventEmitter {
         this._reconnectAttempts = 0;
         this._lastEventAt = Date.now();
         this._logger("ws-connected", url);
-        this.emit("connected");
+        this._emitSafely("connected");
         this._startHeartbeat();
         this._scheduleTokenRefresh();
         settleOk();
@@ -239,8 +262,12 @@ class C4WebSocket extends EventEmitter {
       for (const name of eventNames) {
         this._socket.on(name, (data) => {
           this._lastEventAt = Date.now();
-          this._logger("ws-raw-event", { event: name, data });
-          this._handleEvent(data);
+          this._logger("ws-raw-event", this._summarizeEventForLog(name, data));
+          try {
+            this._handleEvent(data);
+          } catch (err) {
+            this._logger("ws-event-handler-error", this._errorMessage(err));
+          }
         });
       }
 
@@ -248,10 +275,17 @@ class C4WebSocket extends EventEmitter {
       this._socket.onAny((eventName, ...args) => {
         this._lastEventAt = Date.now();
         if (!eventNames.includes(eventName) && eventName !== "connect" && eventName !== "disconnect") {
-          this._logger("ws-unknown-event", { event: eventName, args });
+          this._logger("ws-unknown-event", {
+            event: String(eventName).slice(0, MAX_LOG_STRING_LENGTH),
+            args: this._sanitizeForLog(args),
+          });
           // Attempt to parse as device event anyway
           if (args[0] && typeof args[0] === "object") {
-            this._handleEvent(args[0]);
+            try {
+              this._handleEvent(args[0]);
+            } catch (err) {
+              this._logger("ws-event-handler-error", this._errorMessage(err));
+            }
           }
         }
       });
@@ -260,7 +294,7 @@ class C4WebSocket extends EventEmitter {
         this._connected = false;
         this._stopHeartbeat();
         this._logger("ws-disconnected", reason);
-        this.emit("disconnected", { reason });
+        this._emitSafely("disconnected", { reason });
 
         if (!this._userDisconnected) {
           this._scheduleReconnect();
@@ -270,12 +304,12 @@ class C4WebSocket extends EventEmitter {
       this._socket.on("connect_error", (err) => {
         this._connected = false;
         this._stopHeartbeat();
-        this._logger("ws-connect-error", err.message);
+        this._logger("ws-connect-error", this._errorMessage(err));
         // Only emit "error" when something is listening — an unheard "error"
         // event makes EventEmitter throw, which would escape to
         // uncaughtException and take the whole process down on a transient
         // reconnect failure.
-        if (this.listenerCount("error") > 0) this.emit("error", err);
+        if (this.listenerCount("error") > 0) this._emitSafely("error", err);
 
         // Only reject the caller's promise on the very first attempt.
         // Subsequent errors trigger reconnect; rejecting would leak an
@@ -314,7 +348,7 @@ class C4WebSocket extends EventEmitter {
           if (!err) this._lastEventAt = Date.now();
         });
       } catch (err) {
-        this._logger("ws-heartbeat-emit-error", err.message);
+        this._logger("ws-heartbeat-emit-error", this._errorMessage(err));
       }
 
       const stale = Date.now() - (this._lastEventAt || 0);
@@ -337,7 +371,7 @@ class C4WebSocket extends EventEmitter {
   // -------------------------------------------------------------------------
 
   _isDuplicate(payload) {
-    const key = `${payload.itemId}:${payload.varName}:${payload.value}`;
+    const key = `${payload.itemId}:${payload.varName}:${this._dedupValue(payload.value)}`;
     const now = payload.timestamp;
 
     // Evict expired entries
@@ -363,22 +397,24 @@ class C4WebSocket extends EventEmitter {
 
       // Normalize: the Director uses iddevice for the device ID.
       // Variable changes may come as individual fields or as a varName/value pair.
-      const itemId = Number(evt.iddevice || evt.itemId || evt.id);
-      if (!itemId || !Number.isFinite(itemId)) continue;
+      const itemId = this._coercePositiveInteger(evt.iddevice ?? evt.itemId ?? evt.id);
+      if (!itemId) continue;
 
       // Extract variable changes — try multiple formats
       const changes = [];
 
       // Format 1: { iddevice, varName, value }
       if (evt.varName !== undefined) {
-        changes.push({ varName: evt.varName, value: evt.value });
+        const name = this._normalizeVarName(evt.varName);
+        if (name) changes.push({ varName: name, value: evt.value });
       }
 
       // Format 2: { iddevice, changes: [{ varName, value }, ...] }
       if (Array.isArray(evt.changes)) {
         for (const c of evt.changes) {
-          if (c.varName !== undefined) {
-            changes.push({ varName: c.varName, value: c.value });
+          if (c && typeof c === "object" && c.varName !== undefined) {
+            const name = this._normalizeVarName(c.varName);
+            if (name) changes.push({ varName: name, value: c.value });
           }
         }
       }
@@ -389,7 +425,7 @@ class C4WebSocket extends EventEmitter {
           if (key === "iddevice" || key === "idparent" || key === "itemId" || key === "id") continue;
           if (key.startsWith("_")) continue;
           // Assume uppercase keys are variable names
-          if (key === key.toUpperCase() && key.length > 1) {
+          if (key === key.toUpperCase() && key.length > 1 && this._normalizeVarName(key)) {
             changes.push({ varName: key, value: val });
           }
         }
@@ -398,7 +434,7 @@ class C4WebSocket extends EventEmitter {
       for (const { varName, value } of changes) {
         const payload = {
           itemId,
-          varName: String(varName),
+          varName,
           value,
           timestamp: Date.now(),
           raw: evt,
@@ -413,21 +449,17 @@ class C4WebSocket extends EventEmitter {
         const cbs = this._deviceCallbacks.get(itemId);
         if (cbs) {
           for (const cb of cbs) {
-            try { cb(payload); } catch (err) {
-              this._logger("ws-callback-error", err.message);
-            }
+            this._invokeCallback(cb, payload, "ws-callback-error");
           }
         }
 
         // Wildcard callbacks
         for (const cb of this._anyCallbacks) {
-          try { cb(payload); } catch (err) {
-            this._logger("ws-any-callback-error", err.message);
-          }
+          this._invokeCallback(cb, payload, "ws-any-callback-error");
         }
 
         // EventEmitter
-        this.emit("deviceChange", payload);
+        this._emitSafely("deviceChange", payload);
       }
     }
   }
@@ -449,14 +481,17 @@ class C4WebSocket extends EventEmitter {
     this._tokenRefreshRetryCount = 0;
     this._logger("ws-token-refresh-scheduled", `in ${Math.round(delay / 60000)}m`);
 
-    this._tokenRefreshTimer = setTimeout(() => this._refreshToken(), delay);
-    if (this._tokenRefreshTimer.unref) this._tokenRefreshTimer.unref();
+    this._scheduleTokenRefreshTimer(delay);
   }
 
   async _refreshToken() {
     try {
       this._logger("ws-token-refreshing");
-      const { token, validSeconds } = await this._refreshTokenFn();
+      const refreshed = await this._refreshTokenFn();
+      if (!refreshed || typeof refreshed.token !== "string" || refreshed.token.length === 0) {
+        throw new Error("refreshTokenFn returned invalid token");
+      }
+      const { token, validSeconds } = refreshed;
       this._token = token;
       if (Number.isFinite(validSeconds) && validSeconds > 0) {
         this._tokenValidSeconds = validSeconds;
@@ -464,19 +499,15 @@ class C4WebSocket extends EventEmitter {
       this._lastTokenRefreshAt = Date.now();
       this._tokenRefreshRetryCount = 0;
       if (this._onTokenRefresh) {
-        try {
-          this._onTokenRefresh({ token, validSeconds });
-        } catch (err) {
-          this._logger("ws-token-refresh-callback-error", err.message);
-        }
+        this._invokeCallback(this._onTokenRefresh, { token, validSeconds }, "ws-token-refresh-callback-error");
       }
       this._logger("ws-token-refreshed", "reconnecting with new token");
 
       // Reconnect with the new token.  Use the reconnect path so
       // replacement goes through the same guard as regular reconnects.
       this._setupSocket(
-        () => this.emit("reconnected"),
-        (err) => this._logger("ws-token-refresh-reconnect-error", err.message)
+        () => this._emitSafely("reconnected"),
+        (err) => this._logger("ws-token-refresh-reconnect-error", this._errorMessage(err))
       );
 
       // Schedule the next refresh at the full 23h interval.
@@ -484,14 +515,14 @@ class C4WebSocket extends EventEmitter {
     } catch (err) {
       this._tokenRefreshRetryCount++;
       this._logger("ws-token-refresh-error", {
-        error: err.message,
+        error: this._errorMessage(err),
         retry: this._tokenRefreshRetryCount,
       });
 
       if (this._tokenRefreshRetryCount >= TOKEN_REFRESH_MAX_RETRIES) {
         this._logger("ws-token-refresh-gave-up", "falling back to full 23h reschedule");
         this._tokenRefreshRetryCount = 0;
-        this.emit("tokenRefreshFailed");
+        this._emitSafely("tokenRefreshFailed");
         this._scheduleTokenRefresh();
         return;
       }
@@ -502,8 +533,7 @@ class C4WebSocket extends EventEmitter {
         TOKEN_REFRESH_RETRY_MAX_MS
       );
       if (this._tokenRefreshTimer) clearTimeout(this._tokenRefreshTimer);
-      this._tokenRefreshTimer = setTimeout(() => this._refreshToken(), delay);
-      if (this._tokenRefreshTimer.unref) this._tokenRefreshTimer.unref();
+      this._scheduleTokenRefreshTimer(delay);
     }
   }
 
@@ -526,16 +556,16 @@ class C4WebSocket extends EventEmitter {
     // Surface a persistent outage via a periodic event for alerting.
     if (this._reconnectAttempts % RECONNECT_ALERT_EVERY === 0) {
       this._logger("ws-reconnect-still-failing", { attempts: this._reconnectAttempts });
-      this.emit("reconnectFailed", { attempts: this._reconnectAttempts });
+      this._emitSafely("reconnectFailed", { attempts: this._reconnectAttempts });
     }
 
     this._logger("ws-reconnecting", { attempt: this._reconnectAttempts, delayMs: delay });
-    this.emit("reconnecting", { attempt: this._reconnectAttempts, delay });
+    this._emitSafely("reconnecting", { attempt: this._reconnectAttempts, delay });
 
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
       this._setupSocket(
-        () => this.emit("reconnected"),
+        () => this._emitSafely("reconnected"),
         () => {} // swallow reject; `connect_error` will re-schedule
       );
     }, delay);
@@ -546,6 +576,115 @@ class C4WebSocket extends EventEmitter {
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
     if (this._tokenRefreshTimer) { clearTimeout(this._tokenRefreshTimer); this._tokenRefreshTimer = null; }
     this._stopHeartbeat();
+  }
+
+  _scheduleTokenRefreshTimer(delay) {
+    this._tokenRefreshTimer = setTimeout(() => {
+      this._refreshToken().catch((timerErr) => {
+        this._logger("ws-token-refresh-unhandled-error", this._errorMessage(timerErr));
+      });
+    }, delay);
+    if (this._tokenRefreshTimer.unref) this._tokenRefreshTimer.unref();
+  }
+
+  _coercePositiveInteger(value) {
+    const id = Number(value);
+    return Number.isSafeInteger(id) && id > 0 ? id : null;
+  }
+
+  _normalizeVarName(varName) {
+    if (varName === null || varName === undefined) return null;
+    const name = String(varName);
+    if (name.length === 0 || name.length > MAX_VAR_NAME_LENGTH) return null;
+    if (!this._isSafePropertyName(name)) return null;
+    return name;
+  }
+
+  _isSafePropertyName(name) {
+    return name !== "__proto__" && name !== "prototype" && name !== "constructor" && !/[\u0000-\u001f\u007f]/.test(name);
+  }
+
+  _dedupValue(value) {
+    if (value === null || value === undefined) return String(value);
+    const type = typeof value;
+    if (type === "string" || type === "number" || type === "boolean" || type === "bigint") return String(value);
+    if (type === "symbol") return String(value);
+    const tag = Object.prototype.toString.call(value);
+    const keys = typeof value === "object" ? Object.keys(value).slice(0, 4).join(",") : "";
+    return keys ? `${tag}:${keys}` : tag;
+  }
+
+  _invokeCallback(cb, arg, logEvent) {
+    if (typeof cb !== "function") return;
+    try {
+      const result = cb(arg);
+      if (result && typeof result.then === "function") {
+        result.catch((err) => this._logger(logEvent, this._errorMessage(err)));
+      }
+    } catch (err) {
+      this._logger(logEvent, this._errorMessage(err));
+    }
+  }
+
+  _emitSafely(eventName, ...args) {
+    const listeners = this.rawListeners(eventName);
+    if (listeners.length === 0) return false;
+    for (const listener of listeners) {
+      try {
+        const result = listener.apply(this, args);
+        if (result && typeof result.then === "function") {
+          result.catch((err) => this._logger("ws-emitter-listener-error", {
+            event: eventName,
+            error: this._errorMessage(err),
+          }));
+        }
+      } catch (err) {
+        this._logger("ws-emitter-listener-error", {
+          event: eventName,
+          error: this._errorMessage(err),
+        });
+      }
+    }
+    return true;
+  }
+
+  _summarizeEventForLog(eventName, data) {
+    const events = Array.isArray(data) ? data : [data];
+    const first = events.find((evt) => evt && typeof evt === "object");
+    return {
+      event: String(eventName).slice(0, MAX_LOG_STRING_LENGTH),
+      count: Array.isArray(data) ? data.length : 1,
+      itemId: first ? (first.iddevice ?? first.itemId ?? first.id ?? null) : null,
+      varName: first && first.varName !== undefined ? this._normalizeVarName(first.varName) : null,
+      keys: first ? Object.keys(first).slice(0, MAX_LOG_ARRAY_ITEMS) : [],
+    };
+  }
+
+  _sanitizeForLog(value, depth = 0) {
+    if (depth > 3) return "[truncated]";
+    if (value === null || value === undefined) return value;
+    if (typeof value === "string") {
+      return value.length > MAX_LOG_STRING_LENGTH
+        ? `${value.slice(0, MAX_LOG_STRING_LENGTH)}…`
+        : value;
+    }
+    if (typeof value !== "object") return value;
+    if (Array.isArray(value)) {
+      return value.slice(0, MAX_LOG_ARRAY_ITEMS).map((item) => this._sanitizeForLog(item, depth + 1));
+    }
+    const out = {};
+    for (const [key, val] of Object.entries(value).slice(0, MAX_LOG_ARRAY_ITEMS)) {
+      if (/token|jwt|secret|password|authorization/i.test(key)) {
+        out[key] = "[redacted]";
+      } else {
+        out[key] = this._sanitizeForLog(val, depth + 1);
+      }
+    }
+    return out;
+  }
+
+  _errorMessage(err) {
+    return err && err.message ? err.message : String(err);
   }
 }
 

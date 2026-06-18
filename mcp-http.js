@@ -13,6 +13,7 @@
 //          GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET (for OAuth)
 
 require("dotenv").config();
+const crypto = require("crypto");
 const express = require("express");
 const { StreamableHTTPServerTransport } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const { createMcpServer } = require("./mcp-server.js");
@@ -40,27 +41,85 @@ const PKCE_S256_RE = /^[A-Za-z0-9\-_]{43,128}$/;
 const GOOGLE_OAUTH_ENABLED = oauth.isConfigured();
 const BASIC_AUTH_ENABLED = hasBasicAuthConfigured();
 const MCP_IDEMPOTENCY_TTL_MS = 2 * 60 * 1000;
+const MCP_IDEMPOTENCY_PENDING_TTL_MS = 30 * 1000;
+const MCP_IDEMPOTENCY_MAX_ENTRIES = 200;
+const MCP_IDEMPOTENCY_MAX_BODY_BYTES = 512 * 1024;
+const MCP_IDEMPOTENCY_MAX_KEY_LENGTH = 256;
 const mcpIdempotencyCache = new Map();
+let mcpIdempotencyBytes = 0;
 
-setInterval(() => {
+function deleteMcpCacheEntry(key) {
+  const entry = mcpIdempotencyCache.get(key);
+  if (!entry) return false;
+  if (entry.status === "complete" && entry.bodyLength) {
+    mcpIdempotencyBytes = Math.max(0, mcpIdempotencyBytes - entry.bodyLength);
+  }
+  mcpIdempotencyCache.delete(key);
+  return true;
+}
+
+function cleanupMcpIdempotencyCache() {
   const now = Date.now();
   for (const [key, entry] of mcpIdempotencyCache) {
-    if (entry.status === "complete" && entry.expiresAt <= now) {
-      mcpIdempotencyCache.delete(key);
+    if (entry.expiresAt <= now) {
+      deleteMcpCacheEntry(key);
     }
   }
-}, 30_000).unref();
+
+  while (mcpIdempotencyBytes > MCP_IDEMPOTENCY_MAX_BODY_BYTES) {
+    if (!evictOldestMcpEntry((entry) => entry.status === "complete")) break;
+  }
+}
+
+function evictOldestMcpEntry(predicate) {
+  for (const [key, entry] of mcpIdempotencyCache) {
+    if (!predicate || predicate(entry, key)) {
+      return deleteMcpCacheEntry(key);
+    }
+  }
+  return false;
+}
+
+setInterval(cleanupMcpIdempotencyCache, 30_000).unref();
+
+function hashValue(value) {
+  return crypto.createHash("sha256").update(value).digest("base64url");
+}
+
+function getMcpPrincipal(req) {
+  if (req.mcpUser?.clientId) return `oauth:${req.mcpUser.clientId}`;
+  if (typeof req.headers.authorization === "string" && req.headers.authorization) {
+    return `auth:${hashValue(req.headers.authorization)}`;
+  }
+  return `loopback:${req.ip || req.socket?.remoteAddress || "unknown"}`;
+}
+
+function getMcpRequestHash(req) {
+  try {
+    return hashValue(JSON.stringify(req.body ?? null));
+  } catch {
+    return null;
+  }
+}
 
 function getMcpIdempotencyKey(req) {
-  const clientKey = req.mcpUser?.clientId || "anonymous";
+  const clientKey = getMcpPrincipal(req);
   const headerKey = typeof req.headers["idempotency-key"] === "string"
     ? req.headers["idempotency-key"].trim()
     : "";
-  if (headerKey) return `header:${clientKey}:${headerKey}`;
+  if (headerKey) {
+    if (headerKey.length > MCP_IDEMPOTENCY_MAX_KEY_LENGTH) return null;
+    return `header:${clientKey}:${hashValue(headerKey)}`;
+  }
 
   try {
     if (req.body && !Array.isArray(req.body) && req.body.id !== undefined) {
-      return `jsonrpc:${clientKey}:${String(req.body.method || "")}:${String(req.body.id)}`;
+      const method = String(req.body.method || "");
+      const id = String(req.body.id);
+      if (method.length > MCP_IDEMPOTENCY_MAX_KEY_LENGTH || id.length > MCP_IDEMPOTENCY_MAX_KEY_LENGTH) {
+        return null;
+      }
+      return `jsonrpc:${clientKey}:${hashValue(method)}:${hashValue(id)}`;
     }
     return null;
   } catch {
@@ -89,13 +148,22 @@ function startMcpResponseCapture(res, entry) {
 
   res.on("finish", () => {
     if (res.statusCode >= 500) {
+      deleteMcpCacheEntry(entry.key);
+      return;
+    }
+    const body = Buffer.concat(chunks);
+    if (body.length > MCP_IDEMPOTENCY_MAX_BODY_BYTES) {
+      deleteMcpCacheEntry(entry.key);
       return;
     }
     entry.status = "complete";
     entry.statusCode = res.statusCode;
     entry.headers = res.getHeaders();
-    entry.body = Buffer.concat(chunks);
+    entry.body = body;
+    entry.bodyLength = body.length;
     entry.expiresAt = Date.now() + MCP_IDEMPOTENCY_TTL_MS;
+    mcpIdempotencyBytes += body.length;
+    cleanupMcpIdempotencyCache();
   });
 }
 
@@ -167,6 +235,12 @@ async function main() {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+  app.use((err, _req, res, next) => {
+    if (err instanceof SyntaxError || err?.type === "entity.parse.failed") {
+      return res.status(400).json({ error: "Invalid JSON request body" });
+    }
+    return next(err);
+  });
 
   // Trust proxy only when explicitly configured
   if (process.env.TRUST_PROXY) {
@@ -234,13 +308,22 @@ async function main() {
         const client = oauth.registerClient(metadata);
         res.status(201).json(client);
       } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(err.statusCode || 500).json({ error: err.message });
       }
     });
 
     // --- Authorization Endpoint ---
     app.get("/authorize", (req, res) => {
       const { client_id, redirect_uri, state, code_challenge, code_challenge_method, response_type } = req.query;
+
+      if (
+        typeof client_id !== "string" ||
+        typeof redirect_uri !== "string" ||
+        typeof code_challenge !== "string" ||
+        (state !== undefined && (typeof state !== "string" || state.length > 1024))
+      ) {
+        return res.status(400).json({ error: "Invalid authorization request parameters." });
+      }
 
       if (response_type !== "code") {
         return res.status(400).json({ error: "Unsupported response_type. Use 'code'." });
@@ -261,14 +344,19 @@ async function main() {
         return res.status(400).json({ error: "PKCE with S256 code_challenge is required." });
       }
 
-      // Store pending auth state, then redirect to Google
-      const pendingId = oauth.createPendingAuth({
-        clientId: client_id,
-        redirectUri: redirect_uri,
-        codeChallenge: code_challenge,
-        codeChallengeMethod: code_challenge_method || "S256",
-        clientState: state,
-      });
+      let pendingId;
+      try {
+        // Store pending auth state, then redirect to Google
+        pendingId = oauth.createPendingAuth({
+          clientId: client_id,
+          redirectUri: redirect_uri,
+          codeChallenge: code_challenge,
+          codeChallengeMethod: code_challenge_method || "S256",
+          clientState: state,
+        });
+      } catch (err) {
+        return res.status(err.statusCode || 500).json({ error: err.message });
+      }
 
       const proto = req.protocol;
       const host = getSafeHost(req);
@@ -282,10 +370,10 @@ async function main() {
     app.get("/auth/google/callback", async (req, res) => {
       try {
         const { code, state } = req.query;
-        if (!code) return res.status(400).json({ error: "Missing authorization code" });
+        if (typeof code !== "string" || !code) return res.status(400).json({ error: "Missing authorization code" });
 
         // Extract pending auth ID from state — must start with "mcp:" prefix
-        const stateStr = state || "";
+        const stateStr = typeof state === "string" ? state : "";
         if (!stateStr.startsWith("mcp:")) {
           return res.status(400).json({ error: "Invalid authorization state format" });
         }
@@ -330,6 +418,9 @@ async function main() {
 
     // --- Token Endpoint ---
     app.post("/token", (req, res) => {
+      if (!req.body || typeof req.body !== "object") {
+        return res.status(400).json({ error: "invalid_request" });
+      }
       const { grant_type, code, code_verifier, client_id, client_secret } = req.body;
 
       // Validate client credentials (required for all grant types)
@@ -391,18 +482,40 @@ async function main() {
       console.log(`[MCP] Request from user: ${req.mcpUser.email || "unknown"} (client: ${req.mcpUser.clientId || "none"})`);
     }
 
+    cleanupMcpIdempotencyCache();
     const requestKey = getMcpIdempotencyKey(req);
+    const requestHash = requestKey ? getMcpRequestHash(req) : null;
     if (requestKey) {
       const cached = mcpIdempotencyCache.get(requestKey);
       if (cached?.status === "complete") {
+        if (cached.requestHash !== requestHash) {
+          return res.status(409).json({ error: "Idempotency key reused with different request body" });
+        }
+        mcpIdempotencyCache.delete(requestKey);
+        mcpIdempotencyCache.set(requestKey, cached);
         return replayMcpResponse(cached, res);
       }
       if (cached?.status === "pending") {
+        if (cached.requestHash !== requestHash) {
+          return res.status(409).json({ error: "Idempotency key reused with different request body" });
+        }
         return res.status(409).json({ error: "Duplicate MCP request already in progress" });
       }
     }
 
-    const cacheEntry = requestKey ? { status: "pending" } : null;
+    if (requestKey && mcpIdempotencyCache.size >= MCP_IDEMPOTENCY_MAX_ENTRIES) {
+      evictOldestMcpEntry((entry) => entry.status === "complete");
+      if (mcpIdempotencyCache.size >= MCP_IDEMPOTENCY_MAX_ENTRIES) {
+        return res.status(429).json({ error: "Too many idempotent MCP requests in progress" });
+      }
+    }
+
+    const cacheEntry = requestKey ? {
+      key: requestKey,
+      status: "pending",
+      requestHash,
+      expiresAt: Date.now() + MCP_IDEMPOTENCY_PENDING_TTL_MS,
+    } : null;
     if (requestKey && cacheEntry) {
       mcpIdempotencyCache.set(requestKey, cacheEntry);
       startMcpResponseCapture(res, cacheEntry);
@@ -424,9 +537,14 @@ async function main() {
       await transport.handleRequest(req, res);
     } catch (err) {
       if (requestKey) {
-        mcpIdempotencyCache.delete(requestKey);
+        deleteMcpCacheEntry(requestKey);
       }
-      throw err;
+      console.error("[MCP] Request failed:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "MCP request failed" });
+      } else {
+        res.destroy(err);
+      }
     }
   });
 

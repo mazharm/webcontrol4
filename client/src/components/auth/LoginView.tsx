@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import {
   makeStyles,
   tokens,
@@ -60,6 +60,13 @@ export function LoginView() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [hasGoogle, setHasGoogle] = useState(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (username) {
@@ -77,6 +84,7 @@ export function LoginView() {
     (async () => {
       try {
         const status = await getAuthStatus();
+        if (!mountedRef.current) return;
         if (status.authenticated && status.user) {
           dispatch({ type: "SET_GOOGLE_AUTH", payload: { email: status.user.email } });
           dispatch({ type: "SET_STAGE", payload: "login" });
@@ -85,6 +93,7 @@ export function LoginView() {
           dispatch({ type: "SET_STAGE", payload: "login" });
         }
       } catch {
+        if (!mountedRef.current) return;
         dispatch({ type: "SET_STAGE", payload: "login" });
       }
     })();
@@ -96,13 +105,18 @@ export function LoginView() {
     dispatch({ type: "SET_ERROR", payload: null });
     try {
       const result = await login(username, password);
+      if (!mountedRef.current) return;
       dispatch({ type: "SET_ACCOUNT_TOKEN", payload: result.accountToken });
       const controllers = await getControllers(result.accountToken);
+      if (!mountedRef.current) return;
       dispatch({ type: "SET_CONTROLLERS", payload: controllers.controllers });
     } catch (err) {
-      dispatch({ type: "SET_ERROR", payload: err instanceof Error ? err.message : "Login failed" });
+      if (mountedRef.current) {
+        dispatch({ type: "SET_ERROR", payload: err instanceof Error ? err.message : "Login failed" });
+      }
+    } finally {
+      if (mountedRef.current) setLoading(false);
     }
-    setLoading(false);
   }, [username, password, dispatch]);
 
   if (auth.stage === "checking") {

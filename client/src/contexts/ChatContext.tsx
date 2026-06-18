@@ -1,4 +1,4 @@
-import { createContext, useContext, useReducer, type ReactNode, type Dispatch } from "react";
+import { createContext, useContext, useMemo, useReducer, type ReactNode, type Dispatch } from "react";
 import type { LLMAction } from "../types/api";
 
 export interface ChatMessage {
@@ -46,8 +46,9 @@ const ChatContext = createContext<ChatContextValue>({
 
 export function ChatProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(chatReducer, initialState);
+  const value = useMemo(() => ({ state, dispatch }), [state, dispatch]);
   return (
-    <ChatContext.Provider value={{ state, dispatch }}>
+    <ChatContext.Provider value={value}>
       {children}
     </ChatContext.Provider>
   );

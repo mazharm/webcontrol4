@@ -106,13 +106,17 @@ export function RemoteSettingsView() {
       setError("Broker URL and username are required.");
       return;
     }
-    saveMqttConfig({
-      brokerWsUrl,
-      username,
-      password: password || config.password,
-      homeId: homeId || "home1",
-    });
-    window.location.reload();
+    try {
+      saveMqttConfig({
+        brokerWsUrl,
+        username,
+        password: password || config.password,
+        homeId: homeId || "home1",
+      });
+      window.location.reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invalid MQTT configuration.");
+    }
   }, [brokerWsUrl, username, password, homeId, config.password]);
 
   const handleDisconnect = useCallback(() => {

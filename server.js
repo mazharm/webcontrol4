@@ -735,7 +735,14 @@ function captureHistoryFromStateMachine() {
 
 function startHistoryRecording() {
   stopHistoryRecording();
-  historyRecordTimer = setInterval(captureHistoryFromStateMachine, HISTORY_RECORD_INTERVAL_MS);
+  historyRecordTimer = setInterval(() => {
+    try {
+      captureHistoryFromStateMachine();
+    } catch (err) {
+      console.error("[history] Capture error:", err?.stack || err?.message || err);
+    }
+  }, HISTORY_RECORD_INTERVAL_MS);
+  if (historyRecordTimer.unref) historyRecordTimer.unref();
 }
 
 function stopHistoryRecording() {
@@ -802,8 +809,8 @@ app.use((_req, res, next) => {
 function isInternalDirectorProxyRequest(req) {
   return isLoopbackRequest(req)
     && req.path.startsWith("/api/director/")
-    && !!req.headers["x-director-ip"]
-    && !!req.headers["x-director-token"];
+    && !!getSingleHeader(req, "x-director-ip", 255)
+    && !!getSingleHeader(req, "x-director-token", 4096);
 }
 
 function rejectRemoteWithoutAuth(req, res) {
@@ -833,6 +840,35 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: "1mb" }));
+app.use((err, _req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
+    return res.status(400).json({ error: "invalid JSON payload" });
+  }
+  return next(err);
+});
+app.use((req, _res, next) => {
+  if (req.body == null) req.body = {};
+  next();
+});
+
+function isPlainRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+const UNSAFE_OBJECT_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function isSafeObjectKey(key, maxLen = 128) {
+  return typeof key === "string"
+    && key.length > 0
+    && key.length <= maxLen
+    && !UNSAFE_OBJECT_KEYS.has(key);
+}
+
+function getSingleHeader(req, name, maxLen = 4096) {
+  const value = req.headers[String(name).toLowerCase()];
+  if (typeof value !== "string" || value.length === 0 || value.length > maxLen) return null;
+  return value;
+}
 
 // ---------------------------------------------------------------------------
 // Rate limiter (in-memory, per-IP sliding window)
@@ -1169,7 +1205,7 @@ function handleMockRequest(req, res, apiPath) {
         const events = [];
         if (command === "SET_MODE_HVAC") {
           const allowedModes = ["Off", "Heat", "Cool", "Auto"];
-          if (allowedModes.includes(tParams.MODE)) {
+          if (allowedModes.includes(tParams?.MODE)) {
             thermo.hvacMode = tParams.MODE;
             events.push({ varName: "HVAC_MODE", value: thermo.hvacMode });
             // HVAC_STATE follows mode
@@ -1256,15 +1292,32 @@ app.get("/api/discover", (_req, res) => {
   const found = new Map();
   let responded = false;
   const sockets = [];
+  let timeoutId = null;
+
+  function cleanupDiscovery() {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+    for (const s of sockets) {
+      try { s.close(); } catch {}
+    }
+  }
 
   function finish() {
     if (responded) return;
     responded = true;
-    for (const s of sockets) {
-      try { s.close(); } catch {}
-    }
+    cleanupDiscovery();
     console.log(`[SDDP] Discovery complete: ${found.size} device(s) found`);
-    res.json(Array.from(found.values()));
+    if (!res.destroyed && !res.writableEnded) {
+      res.json(Array.from(found.values()));
+    }
+  }
+
+  function abortDiscovery() {
+    if (responded) return;
+    responded = true;
+    cleanupDiscovery();
   }
 
   // Send SDDP multicast from every non-internal IPv4 interface so discovery
@@ -1324,9 +1377,12 @@ app.get("/api/discover", (_req, res) => {
     });
   }
 
-  // Clean up sockets immediately if the client disconnects before the timeout
-  _req.on("close", finish);
-  setTimeout(finish, 4000);
+  // Clean up sockets immediately if the client disconnects before the timeout.
+  res.on("close", () => {
+    if (!res.writableEnded) abortDiscovery();
+  });
+  timeoutId = setTimeout(finish, 4000);
+  if (timeoutId.unref) timeoutId.unref();
 });
 
 // ---------------------------------------------------------------------------
@@ -1334,9 +1390,15 @@ app.get("/api/discover", (_req, res) => {
 // ---------------------------------------------------------------------------
 
 app.post("/api/auth/login", authRateLimit, async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const { username, password } = req.body;
-  if (!username || !password) {
+  if (typeof username !== "string" || typeof password !== "string" || !username || !password) {
     return res.status(400).json({ error: "username and password required" });
+  }
+  if (username.length > 256 || password.length > 1024) {
+    return res.status(400).json({ error: "credentials too long" });
   }
   // Demo mode — disabled when DISABLE_DEMO_MODE env var is set
   if (username === "demo@demo.com") {
@@ -1384,9 +1446,15 @@ app.post("/api/auth/login", authRateLimit, async (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.post("/api/auth/controllers", async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const { accountToken } = req.body;
-  if (!accountToken) {
+  if (typeof accountToken !== "string" || !accountToken) {
     return res.status(400).json({ error: "accountToken required" });
+  }
+  if (accountToken.length > 4096) {
+    return res.status(400).json({ error: "accountToken too long" });
   }
   // Demo mode
   if (accountToken === "mock-token") {
@@ -1414,11 +1482,18 @@ app.post("/api/auth/controllers", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.post("/api/auth/director-token", async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const { accountToken, controllerCommonName } = req.body;
-  if (!accountToken || !controllerCommonName) {
+  if (typeof accountToken !== "string" || !accountToken ||
+      typeof controllerCommonName !== "string" || !controllerCommonName) {
     return res
       .status(400)
       .json({ error: "accountToken and controllerCommonName required" });
+  }
+  if (accountToken.length > 4096 || controllerCommonName.length > 256) {
+    return res.status(400).json({ error: "credential field too long" });
   }
   try {
     res.json(await requestDirectorToken(accountToken, controllerCommonName));
@@ -1431,6 +1506,10 @@ app.post("/api/auth/director-token", async (req, res) => {
 async function requestDirectorToken(accountToken, controllerCommonName) {
   if (controllerCommonName === "mock-controller" || accountToken === "mock-token") {
     return { directorToken: "mock-director-token", validSeconds: 999999 };
+  }
+  if (typeof accountToken !== "string" || typeof controllerCommonName !== "string" ||
+      accountToken.length > 4096 || controllerCommonName.length > 256) {
+    throw new Error("Invalid director token request");
   }
 
   const body = JSON.stringify({
@@ -1466,7 +1545,9 @@ function isValidDirectorIp(ip) {
 }
 
 function sanitizeApiPath(pathSegments) {
-  const joined = "/" + pathSegments.join("/");
+  const segments = Array.isArray(pathSegments) ? pathSegments : [pathSegments];
+  if (segments.some((segment) => typeof segment !== "string" || segment.length > 512)) return null;
+  const joined = "/" + segments.join("/");
   // Reject path traversal attempts
   if (/(?:^|\/)\.\.(\/|$)/.test(joined)) return null;
   // Reject encoded traversal
@@ -1477,8 +1558,8 @@ function sanitizeApiPath(pathSegments) {
 }
 
 app.get("/api/director/{*path}", async (req, res) => {
-  const ip = req.headers["x-director-ip"];
-  const token = req.headers["x-director-token"];
+  const ip = getSingleHeader(req, "x-director-ip", 255);
+  const token = getSingleHeader(req, "x-director-token", 4096);
   const rest = req.query;
   if (!ip || !token) {
     return res.status(400).json({ error: "ip and token required" });
@@ -1543,8 +1624,8 @@ async function waitForDirectorReady() {
 }
 
 app.post("/api/director/{*path}", async (req, res) => {
-  const ip = req.headers["x-director-ip"];
-  const token = req.headers["x-director-token"];
+  const ip = getSingleHeader(req, "x-director-ip", 255);
+  const token = getSingleHeader(req, "x-director-token", 4096);
   const rest = req.query;
   if (!ip || !token) {
     return res.status(400).json({ error: "ip and token required" });
@@ -1597,8 +1678,8 @@ app.post("/api/director/{*path}", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.put("/api/director/{*path}", async (req, res) => {
-  const ip = req.headers["x-director-ip"];
-  const token = req.headers["x-director-token"];
+  const ip = getSingleHeader(req, "x-director-ip", 255);
+  const token = getSingleHeader(req, "x-director-token", 4096);
   const rest = req.query;
   if (!ip || !token) {
     return res.status(400).json({ error: "ip and token required" });
@@ -1653,6 +1734,9 @@ const HISTORY_RECORD_MAX_ITEMS  = 500;
 const HISTORY_RECORD_MAX_FLOORS = 50;
 
 app.post("/api/history/record", (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const { lights = [], thermostats = [], floors = {} } = req.body;
   if (!Array.isArray(lights) || !Array.isArray(thermostats) ||
       typeof floors !== "object" || floors === null || Array.isArray(floors)) {
@@ -1664,25 +1748,30 @@ app.post("/api/history/record", (req, res) => {
   const ts = Date.now();
 
   for (const l of lights) {
+    if (!isPlainRecord(l)) continue;
     const lid = Number(l.id);
     if (Number.isFinite(lid) && Number.isInteger(lid)) {
       addHistoryPoint(`light:${lid}`, {
         ts,
         on: !!l.on,
-        level: Number(l.level) || 0,
+        level: clampNumber(l.level, 0, 100, 0),
       });
     }
   }
 
   for (const t of thermostats) {
+    if (!isPlainRecord(t)) continue;
     const tid = Number(t.id);
     if (Number.isFinite(tid) && Number.isInteger(tid)) {
+      const tempF = Number(t.tempF);
+      const heatF = Number(t.heatF);
+      const coolF = Number(t.coolF);
       addHistoryPoint(`thermo:${tid}`, {
         ts,
-        tempF: t.tempF != null ? Number(t.tempF) : null,
-        heatF: t.heatF != null ? Number(t.heatF) : null,
-        coolF: t.coolF != null ? Number(t.coolF) : null,
-        hvacMode: t.hvacMode || null,
+        tempF: Number.isFinite(tempF) ? tempF : null,
+        heatF: Number.isFinite(heatF) ? heatF : null,
+        coolF: Number.isFinite(coolF) ? coolF : null,
+        hvacMode: typeof t.hvacMode === "string" ? t.hvacMode.slice(0, 40) : null,
       });
     }
   }
@@ -1758,9 +1847,15 @@ app.get("/api/settings", (_req, res) => {
 });
 
 app.post("/api/settings", settingsWriteRateLimit, (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const { anthropicKey, anthropicModel } = req.body;
   if (anthropicKey !== undefined) {
-    const keyStr = String(anthropicKey).trim();
+    if (typeof anthropicKey !== "string") {
+      return res.status(400).json({ error: "anthropicKey must be a string" });
+    }
+    const keyStr = anthropicKey.trim();
     if (keyStr && keyStr.length > 256) {
       return res.status(400).json({ error: "anthropicKey is too long" });
     }
@@ -1776,7 +1871,10 @@ app.post("/api/settings", settingsWriteRateLimit, (req, res) => {
 
   const { pushoverAppToken, pushoverUserKey } = req.body;
   if (pushoverAppToken !== undefined) {
-    const tokenStr = String(pushoverAppToken).trim();
+    if (typeof pushoverAppToken !== "string") {
+      return res.status(400).json({ error: "pushoverAppToken must be a string" });
+    }
+    const tokenStr = pushoverAppToken.trim();
     if (tokenStr.length > 100) {
       return res.status(400).json({ error: "pushoverAppToken is too long" });
     }
@@ -1786,7 +1884,10 @@ app.post("/api/settings", settingsWriteRateLimit, (req, res) => {
     if (!tokenStr) clearEnvVar("PUSHOVER_APP_TOKEN");
   }
   if (pushoverUserKey !== undefined) {
-    const keyStr = String(pushoverUserKey).trim();
+    if (typeof pushoverUserKey !== "string") {
+      return res.status(400).json({ error: "pushoverUserKey must be a string" });
+    }
+    const keyStr = pushoverUserKey.trim();
     if (keyStr.length > 100) {
       return res.status(400).json({ error: "pushoverUserKey is too long" });
     }
@@ -1796,13 +1897,19 @@ app.post("/api/settings", settingsWriteRateLimit, (req, res) => {
   if (req.body.deviceMappings !== undefined) {
     const dm = req.body.deviceMappings;
     if (typeof dm === "object" && dm !== null && !Array.isArray(dm)) {
-      const clean = {};
-      for (const [k, v] of Object.entries(dm)) {
-        if (typeof k === "string" && typeof v === "number" && Number.isFinite(v)) {
+      const entries = Object.entries(dm);
+      if (entries.length > 1000) {
+        return res.status(400).json({ error: "too many device mappings" });
+      }
+      const clean = Object.create(null);
+      for (const [k, v] of entries) {
+        if (isSafeObjectKey(k, 128) && typeof v === "number" && Number.isFinite(v)) {
           clean[k] = v;
         }
       }
       appSettings.deviceMappings = clean;
+    } else {
+      return res.status(400).json({ error: "deviceMappings must be an object" });
     }
   }
   persistSettings();
@@ -1815,6 +1922,9 @@ app.post("/api/settings", settingsWriteRateLimit, (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.post("/api/mqtt/connect", credentialWriteRateLimit, async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const { brokerUrl, username, password, homeId } = req.body;
 
   if (!brokerUrl || typeof brokerUrl !== "string") {
@@ -1829,6 +1939,16 @@ app.post("/api/mqtt/connect", credentialWriteRateLimit, async (req, res) => {
   if (brokerUrl.length > 500 || username.length > 200 || password.length > 200) {
     return res.status(400).json({ error: "field too long" });
   }
+  let cleanHomeId = "home1";
+  if (homeId !== undefined && homeId !== null && homeId !== "") {
+    if (typeof homeId !== "string") {
+      return res.status(400).json({ error: "homeId must be a string" });
+    }
+    cleanHomeId = homeId.trim();
+    if (!cleanHomeId || cleanHomeId.length > 100) {
+      return res.status(400).json({ error: "homeId is invalid" });
+    }
+  }
 
   // Disconnect existing MQTT connection if active
   if (mqttModule) {
@@ -1840,7 +1960,7 @@ app.post("/api/mqtt/connect", credentialWriteRateLimit, async (req, res) => {
   appSettings.mqttBrokerUrl = brokerUrl.trim();
   appSettings.mqttUsername = username.trim();
   appSettings.mqttPassword = password;
-  appSettings.mqttHomeId = (homeId || "home1").trim();
+  appSettings.mqttHomeId = cleanHomeId;
   persistSettings();
 
   try {
@@ -1913,6 +2033,9 @@ const ROUTINE_STEPS_MAX    = 100;
 const MAX_ROUTINES = 200;
 
 app.post("/api/routines", (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const routine = req.body;
   if (!routine || !routine.id) {
     return res.status(400).json({ error: "routine with id required" });
@@ -1975,6 +2098,9 @@ app.post("/api/routines", (req, res) => {
     }
   }
   // Validate optional conditions
+  if (routine.conditions !== undefined && !Array.isArray(routine.conditions)) {
+    return res.status(400).json({ error: "conditions must be an array" });
+  }
   if (routine.conditions && Array.isArray(routine.conditions) && routine.conditions.length > 0) {
     if (routine.conditions.length > MAX_CONDITIONS) {
       return res.status(400).json({ error: `maximum of ${MAX_CONDITIONS} conditions allowed` });
@@ -2207,6 +2333,9 @@ function buildSystemPrompt(context, mode) {
  * @returns {Promise<{ message: string, actions: Array }>}
  */
 async function handleLlmChat(body) {
+  if (!isPlainRecord(body)) {
+    throw new Error("invalid payload");
+  }
   if (!appSettings.anthropicKey) {
     throw new Error("Anthropic API key not configured. Go to Settings to add your key.");
   }
@@ -2308,6 +2437,9 @@ async function handleLlmChat(body) {
 }
 
 app.post("/api/llm/chat", llmRateLimit, async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   try {
     const result = await handleLlmChat(req.body);
     res.json(result);
@@ -2355,6 +2487,9 @@ app.get("/ring/status", async (_req, res) => {
 });
 
 app.post("/ring/login", authRateLimit, async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   // Support both email/password and raw refresh token
   const { email, password, refreshToken } = req.body;
 
@@ -2391,6 +2526,9 @@ app.post("/ring/login", authRateLimit, async (req, res) => {
 });
 
 app.post("/ring/verify", authRateLimit, async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const { code } = req.body;
   if (!code || typeof code !== "string" || code.length > 10) {
     return res.status(400).json({ error: "code required (string, max 10 chars)" });
@@ -2416,12 +2554,18 @@ app.get("/ring/alarm/mode", async (_req, res) => {
 });
 
 app.post("/ring/alarm/mode", async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const { mode, bypass } = req.body;
   if (!mode || !["away", "home", "disarm"].includes(mode)) {
     return res.status(400).json({ error: "mode must be away|home|disarm" });
   }
-  if (bypass && (!Array.isArray(bypass) || bypass.some((b) => typeof b !== "string"))) {
+  if (bypass !== undefined && (!Array.isArray(bypass) || bypass.some((b) => typeof b !== "string"))) {
     return res.status(400).json({ error: "bypass must be an array of string ZIDs" });
+  }
+  if (Array.isArray(bypass) && (bypass.length > 100 || bypass.some((b) => b.length > 100))) {
+    return res.status(400).json({ error: "bypass list too large" });
   }
   try {
     res.json(await ring.setAlarmMode(mode, bypass));
@@ -2431,6 +2575,9 @@ app.post("/ring/alarm/mode", async (req, res) => {
 });
 
 app.post("/ring/alarm/siren", async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const { action } = req.body;
   if (!action || !["on", "off"].includes(action)) {
     return res.status(400).json({ error: "action must be on|off" });
@@ -2482,6 +2629,9 @@ app.get("/ring/cameras/:id/snapshot", async (req, res) => {
 });
 
 app.post("/ring/cameras/:id/light", async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const cameraId = Number(req.params.id);
   if (!Number.isFinite(cameraId)) {
     return res.status(400).json({ error: "Invalid camera ID" });
@@ -2497,6 +2647,9 @@ app.post("/ring/cameras/:id/light", async (req, res) => {
 });
 
 app.post("/ring/cameras/:id/siren", async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const cameraId = Number(req.params.id);
   if (!Number.isFinite(cameraId)) {
     return res.status(400).json({ error: "Invalid camera ID" });
@@ -2529,6 +2682,9 @@ app.get("/notify/log", (req, res) => {
 });
 
 app.post("/notify/test", async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const message = (req.body.message && typeof req.body.message === "string")
     ? req.body.message.slice(0, 1024)
     : "Test notification from WebControl4";
@@ -2545,6 +2701,9 @@ app.post("/notify/test", async (req, res) => {
 });
 
 app.post("/notify/send", async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   if (!req.body.message || typeof req.body.message !== "string") {
     return res.status(400).json({ error: "message required" });
   }
@@ -2556,7 +2715,7 @@ app.post("/notify/send", async (req, res) => {
   if (req.body.sound && typeof req.body.sound === "string") opts.sound = req.body.sound.slice(0, 50);
   if (req.body.url && typeof req.body.url === "string") opts.url = req.body.url.slice(0, 512);
   if (req.body.urlTitle && typeof req.body.urlTitle === "string") opts.urlTitle = req.body.urlTitle.slice(0, 100);
-  if (Number.isFinite(req.body.ttl) && req.body.ttl > 0) opts.ttl = req.body.ttl;
+  if (Number.isFinite(req.body.ttl) && req.body.ttl > 0) opts.ttl = Math.min(req.body.ttl, 30 * 24 * 60 * 60);
   try {
     const result = await notify.send(opts);
     res.json(result);
@@ -2569,6 +2728,14 @@ app.post("/notify/send", async (req, res) => {
 // ---------------------------------------------------------------------------
 // Real-time: initialise WebSocket + state machine + trending
 // ---------------------------------------------------------------------------
+
+let realtimeInitQueue = Promise.resolve();
+
+function queueRealtimeInitialize(args) {
+  const run = realtimeInitQueue.catch(() => {}).then(() => initializeRealtime(args));
+  realtimeInitQueue = run.catch(() => {});
+  return run;
+}
 
 async function initializeRealtime({ controllerIp, directorToken, accountToken, controllerCommonName, validSeconds }) {
   // Store director info for scheduler (only set from explicit connect, not every proxy request)
@@ -2840,15 +3007,19 @@ function startMockEventEmitter() {
   if (mockEventTimer) clearInterval(mockEventTimer);
 
   mockEventTimer = setInterval(() => {
-    if (!stateMachine) return;
-    const devices = [...stateMachine.getAllDeviceStates().values()].filter(d => d.type === "light");
-    if (devices.length === 0) return;
+    try {
+      if (!stateMachine) return;
+      const devices = [...stateMachine.getAllDeviceStates().values()].filter(d => d.type === "light");
+      if (devices.length === 0) return;
 
-    const device = devices[Math.floor(Math.random() * devices.length)];
-    const newLevel = Math.random() > 0.3 ? Math.floor(Math.random() * 100) : 0;
+      const device = devices[Math.floor(Math.random() * devices.length)];
+      const newLevel = Math.random() > 0.3 ? Math.floor(Math.random() * 100) : 0;
 
-    stateMachine.handleDeviceEvent({ itemId: device.itemId, varName: "LIGHT_LEVEL", value: String(newLevel) });
-    stateMachine.handleDeviceEvent({ itemId: device.itemId, varName: "LIGHT_STATE", value: newLevel > 0 ? "1" : "0" });
+      stateMachine.handleDeviceEvent({ itemId: device.itemId, varName: "LIGHT_LEVEL", value: String(newLevel) });
+      stateMachine.handleDeviceEvent({ itemId: device.itemId, varName: "LIGHT_STATE", value: newLevel > 0 ? "1" : "0" });
+    } catch (err) {
+      console.error("[mock] Event emitter error:", err?.stack || err?.message || err);
+    }
   }, 30000);
   if (mockEventTimer.unref) mockEventTimer.unref();
 }
@@ -2860,17 +3031,33 @@ function stopMockEventEmitter() {
   }
 }
 
+const SSE_MAX_BUFFERED_BYTES = 65536;
+
+function dropSSEClient(client) {
+  sseClients.delete(client);
+  try { client.end(); } catch { try { client.destroy(); } catch {} }
+}
+
 function broadcastSSE(eventType, data) {
-  const payload = JSON.stringify({ ...data, type: eventType });
+  let payload;
+  try {
+    const eventData = isPlainRecord(data) ? data : { value: data };
+    payload = JSON.stringify({ ...eventData, type: eventType });
+  } catch (err) {
+    console.error("[sse] Failed to serialize event:", err?.message || err);
+    return;
+  }
   for (const client of sseClients) {
     try {
-      if (client.writableLength > 65536) {
-        sseClients.delete(client);
-        client.end();
+      if (client.destroyed || client.writableEnded || client.writableLength > SSE_MAX_BUFFERED_BYTES) {
+        dropSSEClient(client);
         continue;
       }
-      client.write(`event: ${eventType}\ndata: ${payload}\n\n`);
-    } catch { sseClients.delete(client); }
+      const accepted = client.write(`event: ${eventType}\ndata: ${payload}\n\n`);
+      if (!accepted && client.writableLength > SSE_MAX_BUFFERED_BYTES) {
+        dropSSEClient(client);
+      }
+    } catch { dropSSEClient(client); }
   }
 }
 
@@ -2918,15 +3105,37 @@ function getStateSnapshot() {
 const realtimeRateLimit = rateLimit(3, 60_000);
 
 app.post("/api/realtime/connect", realtimeRateLimit, async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const { controllerIp, directorToken, accountToken, controllerCommonName, validSeconds } = req.body;
-  if (!controllerIp || !directorToken) {
+  if (typeof controllerIp !== "string" || !controllerIp ||
+      typeof directorToken !== "string" || !directorToken) {
     return res.status(400).json({ error: "controllerIp and directorToken required" });
+  }
+  if (controllerIp.length > 255 || directorToken.length > 4096) {
+    return res.status(400).json({ error: "connection field too long" });
+  }
+  if (accountToken !== undefined && accountToken !== null &&
+      (typeof accountToken !== "string" || accountToken.length > 4096)) {
+    return res.status(400).json({ error: "invalid accountToken" });
+  }
+  if (controllerCommonName !== undefined && controllerCommonName !== null &&
+      (typeof controllerCommonName !== "string" || controllerCommonName.length > 256)) {
+    return res.status(400).json({ error: "invalid controllerCommonName" });
   }
   if (controllerIp !== "mock" && !isValidDirectorIp(controllerIp)) {
     return res.status(400).json({ error: "invalid controller IP" });
   }
+  const validSecondsNum = Number(validSeconds);
   try {
-    await initializeRealtime({ controllerIp, directorToken, accountToken, controllerCommonName, validSeconds });
+    await queueRealtimeInitialize({
+      controllerIp,
+      directorToken,
+      accountToken: accountToken || null,
+      controllerCommonName: controllerCommonName || null,
+      validSeconds: Number.isFinite(validSecondsNum) ? validSecondsNum : undefined,
+    });
     res.json({
       ok: true,
       mode: controllerIp === "mock" ? "mock" : "websocket",
@@ -2957,8 +3166,12 @@ app.get("/api/events", (req, res) => {
 
   // Send initial state
   if (stateMachine) {
-    const init = JSON.stringify({ type: "init", summary: stateMachine.getStateSummary() });
-    res.write(`data: ${init}\n\n`);
+    try {
+      const init = JSON.stringify({ type: "init", summary: stateMachine.getStateSummary() });
+      res.write(`data: ${init}\n\n`);
+    } catch {
+      return dropSSEClient(res);
+    }
   }
 
   sseClients.add(res);
@@ -2971,7 +3184,13 @@ app.get("/api/events", (req, res) => {
 // SSE heartbeat — evict dead/half-open clients every 30s
 const sseHeartbeat = setInterval(() => {
   for (const client of sseClients) {
-    try { client.write(":heartbeat\n\n"); } catch { sseClients.delete(client); }
+    try {
+      if (client.destroyed || client.writableEnded || client.writableLength > SSE_MAX_BUFFERED_BYTES) {
+        dropSSEClient(client);
+        continue;
+      }
+      client.write(":heartbeat\n\n");
+    } catch { dropSSEClient(client); }
   }
 }, 30000);
 if (sseHeartbeat.unref) sseHeartbeat.unref();
@@ -3083,11 +3302,20 @@ registerGoveeRoutes(app, () => goveeInstance);
 
 // Govee login endpoint — authenticates, stores token (never password), starts polling
 app.post("/api/govee/leak/login", credentialWriteRateLimit, async (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+  if (typeof email !== "string" || typeof password !== "string" || !email || !password) {
+    return res.status(400).json({ error: "Email and password required" });
+  }
+  if (email.length > 256 || password.length > 1024) {
+    return res.status(400).json({ error: "credentials too long" });
+  }
   try {
-    console.log("[govee] Login attempt for:", String(email).trim());
-    const auth = await GoveeLeak.login(String(email).trim(), String(password));
+    const cleanEmail = email.trim();
+    console.log("[govee] Login attempt");
+    const auth = await GoveeLeak.login(cleanEmail, password);
     console.log("[govee] Login succeeded");
     // Persist token only — password is discarded
     appSettings.goveeEmail = auth.email;
@@ -3135,15 +3363,20 @@ app.post("/api/govee/leak/disconnect", (_req, res) => {
 
 // Govee sensor room assignments
 app.post("/api/govee/leak/rooms", (req, res) => {
+  if (!isPlainRecord(req.body)) {
+    return res.status(400).json({ error: "invalid payload" });
+  }
   const { rooms } = req.body;
-  if (!rooms || typeof rooms !== "object" || Array.isArray(rooms)) return res.status(400).json({ error: "rooms must be a plain object" });
+  if (!isPlainRecord(rooms)) return res.status(400).json({ error: "rooms must be a plain object" });
   const entries = Object.entries(rooms);
   if (entries.length > 100) return res.status(400).json({ error: "maximum of 100 sensor room entries allowed" });
   for (const [k, v] of entries) {
-    if (typeof k !== "string" || typeof v !== "string") return res.status(400).json({ error: "all keys and values must be strings" });
+    if (!isSafeObjectKey(k, 128) || typeof v !== "string" || v.length > 200) {
+      return res.status(400).json({ error: "all keys and values must be bounded strings" });
+    }
   }
   const clean = Object.create(null);
-  for (const [k, v] of entries) clean[k] = v;
+  for (const [k, v] of entries) clean[k] = v.trim();
   appSettings.goveeSensorRooms = clean;
   persistSettings();
   res.json({ ok: true });
@@ -3263,6 +3496,7 @@ async function cleanup() {
   }
   stopHistoryRecording();
   stopFallbackPolling();
+  stopMockEventEmitter();
   if (mqttModule) {
     try { await mqttModule.disconnect(); } catch {}
   }

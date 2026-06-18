@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { makeStyles, tokens, Text, Button, Spinner } from "@fluentui/react-components";
 import { Add24Regular } from "@fluentui/react-icons";
 import { getRoutines } from "../../api/routines";
@@ -39,19 +39,29 @@ export function RoutinesView() {
   const [loading, setLoading] = useState(true);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingRoutine, setEditingRoutine] = useState<Routine | null>(null);
+  const requestSeqRef = useRef(0);
 
   const fetchRoutines = useCallback(async () => {
+    const requestSeq = ++requestSeqRef.current;
     setLoading(true);
     try {
       const data = remote ? await getRemoteRoutines() : await getRoutines();
+      if (requestSeq !== requestSeqRef.current) return;
       setRoutines(data);
     } catch {
+      if (requestSeq !== requestSeqRef.current) return;
       setRoutines([]);
+    } finally {
+      if (requestSeq === requestSeqRef.current) setLoading(false);
     }
-    setLoading(false);
   }, [remote]);
 
-  useEffect(() => { fetchRoutines(); }, [fetchRoutines]);
+  useEffect(() => {
+    void fetchRoutines();
+    return () => {
+      requestSeqRef.current++;
+    };
+  }, [fetchRoutines]);
 
   const openNew = () => { setEditingRoutine(null); setEditorOpen(true); };
   const openEdit = (r: Routine) => { setEditingRoutine(r); setEditorOpen(true); };

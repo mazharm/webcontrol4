@@ -6,6 +6,60 @@ const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
 const { z } = require("zod");
 const { requestText, requestBinary } = require("./http-client");
 
+const DIRECTOR_VARIABLE_CONCURRENCY = 10;
+
+async function mapLimit(items, limit, iteratee) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await iteratee(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+const routineStepBase = {
+  deviceId: z.number().int().nonnegative().describe("Device ID"),
+  deviceName: z.string().optional().describe("Device name for display"),
+};
+
+const routineStepSchema = z.discriminatedUnion("type", [
+  z.object({
+    ...routineStepBase,
+    type: z.literal("light_level").describe("Step type"),
+    level: z.number().min(0).max(100).describe("Brightness level 0-100"),
+  }),
+  z.object({
+    ...routineStepBase,
+    type: z.literal("light_power").describe("Step type"),
+    on: z.boolean().describe("On/off"),
+  }),
+  z.object({
+    ...routineStepBase,
+    type: z.literal("light_toggle").describe("Step type"),
+    on: z.boolean().describe("On/off"),
+  }),
+  z.object({
+    ...routineStepBase,
+    type: z.literal("hvac_mode").describe("Step type"),
+    mode: z.enum(["Off", "Heat", "Cool", "Auto"]).describe("HVAC mode"),
+  }),
+  z.object({
+    ...routineStepBase,
+    type: z.literal("heat_setpoint").describe("Step type"),
+    value: z.number().min(32).max(120).describe("Temperature 32-120°F"),
+  }),
+  z.object({
+    ...routineStepBase,
+    type: z.literal("cool_setpoint").describe("Step type"),
+    value: z.number().min(32).max(120).describe("Temperature 32-120°F"),
+  }),
+]);
+
 
 /**
  * Creates a configured MCP server with all 18 smart-home tools.
@@ -84,8 +138,10 @@ function createMcpServer(config) {
     const lights = Array.isArray(items) ? items : [];
 
     // Fetch current levels
-    const results = await Promise.all(
-      lights.map(async (light) => {
+    const results = await mapLimit(
+      lights,
+      DIRECTOR_VARIABLE_CONCURRENCY,
+      async (light) => {
         try {
           const vars = await directorGet(
             `api/v1/items/${light.id}/variables?varnames=LIGHT_LEVEL,LIGHT_STATE`
@@ -112,7 +168,7 @@ function createMcpServer(config) {
           console.warn(`Failed to fetch variables for light ${light.id}:`, err.message);
           return { id: light.id, name: light.name, room: light.roomName || "", floor: light.floorName || "", level: 0, on: false };
         }
-      })
+      }
     );
 
     return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
@@ -122,8 +178,10 @@ function createMcpServer(config) {
     const items = await directorGet("api/v1/categories/thermostats");
     const thermos = Array.isArray(items) ? items : [];
 
-    const results = await Promise.all(
-      thermos.map(async (t) => {
+    const results = await mapLimit(
+      thermos,
+      DIRECTOR_VARIABLE_CONCURRENCY,
+      async (t) => {
         const info = { id: t.id, name: t.name, room: t.roomName || "", floor: t.floorName || "" };
         try {
           const vars = await directorGet(
@@ -144,7 +202,7 @@ function createMcpServer(config) {
           console.warn(`Failed to fetch variables for thermostat ${t.id}:`, err.message);
         }
         return info;
-      })
+      }
     );
 
     return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
@@ -323,22 +381,12 @@ function createMcpServer(config) {
     "create_routine",
     "Create a new routine with a list of steps and an optional schedule",
     {
-      name: z.string().describe("Routine name"),
-      steps: z.array(
-        z.object({
-          type: z.enum(["light_level", "light_power", "light_toggle", "hvac_mode", "heat_setpoint", "cool_setpoint"]).describe("Step type"),
-          deviceId: z.number().int().nonnegative().describe("Device ID"),
-          deviceName: z.string().optional().describe("Device name for display"),
-          level: z.number().min(0).max(100).optional().describe("Brightness level 0-100 (for light_level)"),
-          on: z.boolean().optional().describe("On/off (for light_power)"),
-          mode: z.enum(["Off", "Heat", "Cool", "Auto"]).optional().describe("HVAC mode (for hvac_mode)"),
-          value: z.number().min(32).max(120).optional().describe("Temperature 32-120°F (for setpoints)"),
-        })
-      ).describe("Array of routine steps"),
+      name: z.string().min(1).max(100).describe("Routine name"),
+      steps: z.array(routineStepSchema).min(1).max(100).describe("Array of routine steps"),
       schedule: z.object({
         enabled: z.boolean().describe("Whether the schedule is active"),
-        time: z.string().regex(/^\d{2}:\d{2}$/).describe("Time to run in HH:MM format (24-hour)"),
-        days: z.array(z.number().min(0).max(6)).describe("Days of week to run (0=Sunday, 6=Saturday)"),
+        time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).describe("Time to run in HH:MM format (24-hour)"),
+        days: z.array(z.number().int().min(0).max(6)).max(7).describe("Days of week to run (0=Sunday, 6=Saturday)"),
       }).optional().describe("Optional schedule to run the routine automatically"),
     },
     async ({ name, steps, schedule }) => {
@@ -436,7 +484,7 @@ function createMcpServer(config) {
       try {
         const data = await apiCall("/api/alerts");
         let anomalies = data.anomalies || [];
-        if (itemId) anomalies = anomalies.filter(a => a.itemId === itemId);
+        if (itemId !== undefined) anomalies = anomalies.filter(a => a.itemId === itemId);
         if (anomalies.length === 0) {
           return { content: [{ type: "text", text: itemId ? `No anomalies for device ${itemId}` : "No anomalies detected" }] };
         }
@@ -525,7 +573,7 @@ function createMcpServer(config) {
   server.tool(
     "ring_camera_snapshot",
     "Get a snapshot from a Ring camera (returns JPEG image)",
-    { camera_id: z.number().describe("Camera ID from ring_cameras") },
+    { camera_id: z.number().int().nonnegative().describe("Camera ID from ring_cameras") },
     async ({ camera_id }) => {
       try {
         const response = await requestBinary(`${baseUrl}/ring/cameras/${camera_id}/snapshot`, {
@@ -547,7 +595,7 @@ function createMcpServer(config) {
     "ring_camera_light",
     "Turn Ring camera light on/off",
     {
-      camera_id: z.number().describe("Camera ID"),
+      camera_id: z.number().int().nonnegative().describe("Camera ID"),
       on: z.boolean().describe("true = on, false = off"),
     },
     async ({ camera_id, on }) => {
@@ -560,7 +608,7 @@ function createMcpServer(config) {
     "ring_camera_siren",
     "Turn Ring camera siren on/off",
     {
-      camera_id: z.number().describe("Camera ID"),
+      camera_id: z.number().int().nonnegative().describe("Camera ID"),
       on: z.boolean().describe("true = on, false = off"),
     },
     async ({ camera_id, on }) => {
@@ -605,13 +653,13 @@ function createMcpServer(config) {
   server.tool(
     "govee_leak_sensor_detail",
     "Get status for a specific Govee leak sensor by name or device ID",
-    { query: z.string().describe("Partial sensor name or exact device ID") },
+    { query: z.string().min(1).max(100).describe("Partial sensor name or exact device ID") },
     async ({ query }) => {
       try {
         const status = await apiCall("/api/govee/leak/status");
         const q = query.toLowerCase();
         const match = (status.sensors || []).find(
-          (s) => s.id.toLowerCase() === q || s.name.toLowerCase().includes(q)
+          (s) => String(s.id || "").toLowerCase() === q || String(s.name || "").toLowerCase().includes(q)
         );
         if (!match) {
           const names = (status.sensors || []).map((s) => s.name).join(", ");

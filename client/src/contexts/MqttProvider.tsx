@@ -132,7 +132,7 @@ export function MqttProvider({ children }: { children: React.ReactNode }) {
 
         const device: UnifiedDevice = {
           id: mqttPayload.id,
-          source: mqttPayload.source === "govee" ? "ring" : mqttPayload.source, // map govee to ring for DeviceSource compat
+          source: mqttPayload.source,
           type: mqttPayload.type,
           name: mqttPayload.name,
           roomId: normalizeRoomId(mqttPayload.roomId, roomName, floorName),

@@ -102,13 +102,15 @@ export function SettingsView() {
   }, []);
 
   useEffect(() => {
+    let active = true;
     (async () => {
       try {
         const [s, m, r] = await Promise.all([
           getSettings(),
           getModels().catch(() => []),
-          refreshRingStatus().catch(() => null),
+          getRingStatus().catch(() => null),
         ]);
+        if (!active) return;
         setSettings(s);
         setSelectedModel(s.anthropicModel || "");
         setModels(m);
@@ -117,9 +119,12 @@ export function SettingsView() {
         if (s.mqttUsername) setMqttUsername(s.mqttUsername);
         if (s.mqttHomeId) setMqttHomeId(s.mqttHomeId);
       } catch { /* ignore */ }
-      setLoading(false);
+      if (active) setLoading(false);
     })();
-  }, [refreshRingStatus]);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const handleSave = useCallback(async () => {
     setSaving(true);

@@ -25,6 +25,8 @@ const LEAK_SKUS = ["H5054", "H5058", "H5059", "H5040", "H5043", "H5072"];
 const TOKEN_MAX_AGE_MS = 23 * 60 * 60 * 1000; // 23 hours
 const MIN_POLL_INTERVAL = 30;
 const MAX_POLL_INTERVAL = 300; // 5 minutes
+const REQUEST_TIMEOUT_MS = 15000;
+const MAX_RESPONSE_BYTES = 512 * 1024;
 
 const DEFAULT_HEADERS = {
   "Content-Type": "application/json",
@@ -34,6 +36,12 @@ const DEFAULT_HEADERS = {
   "User-Agent":
     "GoveeHome/6.3.0 (com.ihoment.GoVeeSensor; build:2; iOS 17.0.0) Alamofire/5.6.4",
 };
+
+function normalizePollInterval(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 60;
+  return Math.max(MIN_POLL_INTERVAL, Math.min(Math.floor(n), MAX_POLL_INTERVAL));
+}
 
 // ---------------------------------------------------------------------------
 // Minimal HTTPS JSON request helper (no external deps)
@@ -51,17 +59,25 @@ function request(method, url, body, extraHeaders, { skipDefaults = false } = {})
 
     const req = https.request(
       parsed,
-      { method, headers, timeout: 15000 },
+      { method, headers, timeout: REQUEST_TIMEOUT_MS },
       (res) => {
         let raw = "";
+        let received = 0;
         res.setEncoding("utf8");
-        res.on("data", (chunk) => (raw += chunk));
+        res.on("data", (chunk) => {
+          received += Buffer.byteLength(chunk);
+          if (received > MAX_RESPONSE_BYTES) {
+            req.destroy(new Error("Govee response too large"));
+            return;
+          }
+          raw += chunk;
+        });
         res.on("end", () => {
           let data;
           try {
             data = JSON.parse(raw);
           } catch {
-            return reject(new Error(`Non-JSON response: ${raw.slice(0, 200)}`));
+            return reject(new Error(`Non-JSON response from Govee (HTTP ${res.statusCode})`));
           }
           resolve({ status: res.statusCode, headers: res.headers, data });
         });
@@ -93,7 +109,7 @@ class GoveeLeak {
    */
   constructor(opts) {
     this.email = opts.email;
-    this.pollInterval = Math.max(opts.pollInterval || 60, MIN_POLL_INTERVAL);
+    this.pollInterval = normalizePollInterval(opts.pollInterval);
     this.onLeakEvent = opts.onLeakEvent || (() => {});
     this.onDevicesReady = opts.onDevicesReady || (() => {});
     this.onTokenExpired = opts.onTokenExpired || (() => {});
@@ -105,7 +121,10 @@ class GoveeLeak {
     this.needsReauth = false;
     this.devices = new Map();
     this._pollTimer = null;
+    this._retryTimer = null;
+    this._pollInFlight = false;
     this._running = false;
+    this._runId = 0;
     this._currentPollInterval = this.pollInterval;
   }
 
@@ -137,13 +156,13 @@ class GoveeLeak {
     const goveeStatus = d?.status;
     if (goveeStatus && goveeStatus !== 200) {
       const msg = d?.message || d?.msg || "";
-      throw new Error(`Govee login failed (code ${goveeStatus}): ${msg || JSON.stringify(d).slice(0, 300)}`);
+      throw new Error(`Govee login failed (code ${goveeStatus}): ${msg || "unexpected response"}`);
     }
 
     const client = d?.client || d?.data?.client;
     const token = client?.token || client?.A || client?.B;
     if (!token) {
-      throw new Error(`Govee login failed: unexpected response: ${JSON.stringify(d).slice(0, 300)}`);
+      throw new Error("Govee login failed: unexpected response");
     }
 
     return {
@@ -158,16 +177,40 @@ class GoveeLeak {
   // Auth
   // -----------------------------------------------------------------------
 
+  _emitTokenExpired() {
+    try {
+      this.onTokenExpired();
+    } catch (err) {
+      this.log.error(`[govee] onTokenExpired callback failed: ${err?.message || String(err)}`);
+    }
+  }
+
+  _emitDevicesReady(sensors) {
+    try {
+      this.onDevicesReady(sensors);
+    } catch (err) {
+      this.log.error(`[govee] onDevicesReady callback failed: ${err?.message || String(err)}`);
+    }
+  }
+
+  _emitLeakEvent(event) {
+    try {
+      this.onLeakEvent(event);
+    } catch (err) {
+      this.log.error(`[govee] onLeakEvent callback failed: ${err?.message || String(err)}`);
+    }
+  }
+
   _checkToken() {
     if (!this.token) {
       this.needsReauth = true;
-      this.onTokenExpired();
+      this._emitTokenExpired();
       throw new Error("Govee token not available — re-authentication required");
     }
     if (Date.now() - this.tokenTimestamp > TOKEN_MAX_AGE_MS) {
       this.needsReauth = true;
       this.token = null;
-      this.onTokenExpired();
+      this._emitTokenExpired();
       throw new Error("Govee token expired — re-authentication required");
     }
   }
@@ -195,8 +238,11 @@ class GoveeLeak {
     if (res.status === 401) {
       this.needsReauth = true;
       this.token = null;
-      this.onTokenExpired();
+      this._emitTokenExpired();
       throw new Error("Govee token rejected — re-authentication required");
+    }
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`Govee API returned HTTP ${res.status}`);
     }
     return res;
   }
@@ -212,16 +258,21 @@ class GoveeLeak {
       {}
     );
 
-    const deviceList = res.data?.devices || res.data?.data?.devices || [];
+    const deviceListRaw = res.data?.devices || res.data?.data?.devices || [];
+    const deviceList = Array.isArray(deviceListRaw) ? deviceListRaw : [];
     this.log.info(`[govee] Device list response: ${deviceList.length} total device(s)`);
     for (const d of deviceList) {
+      if (!d || typeof d !== "object") continue;
       this.log.info(`[govee]   - ${d.deviceName || d.device} (sku: ${d.sku}, type: ${d.deviceType || "?"})`);
     }
     let found = 0;
+    const seen = new Set();
 
     for (const d of deviceList) {
+      if (!d || typeof d !== "object" || typeof d.device !== "string" || !d.device) continue;
       if (!LEAK_SKUS.includes(d.sku)) continue;
       found++;
+      seen.add(d.device);
 
       const existing = this.devices.get(d.device);
       this.devices.set(d.device, {
@@ -235,8 +286,12 @@ class GoveeLeak {
       });
     }
 
+    for (const id of this.devices.keys()) {
+      if (!seen.has(id)) this.devices.delete(id);
+    }
+
     this.log.info(`[govee] Discovered ${found} leak sensor(s)`);
-    this.onDevicesReady(this.getState().sensors);
+    this._emitDevicesReady(this.getState().sensors);
     return found;
   }
 
@@ -309,7 +364,7 @@ class GoveeLeak {
         // Emit if state changed OR if leak is currently active (safety: re-emit)
         const stateChanged = prevLeak !== parsed.leakDetected;
         if (stateChanged || parsed.leakDetected) {
-          this.onLeakEvent({
+          this._emitLeakEvent({
             device: deviceId,
             name: state.name,
             sku: state.sku,
@@ -426,6 +481,7 @@ class GoveeLeak {
         () => this.pollLeakStatus().catch((e) => this.log.error("[govee] Poll error:", e.message)),
         this._currentPollInterval * 1000
       );
+      if (this._pollTimer.unref) this._pollTimer.unref();
     }
   }
 
@@ -438,34 +494,41 @@ class GoveeLeak {
       await this.stop();
     }
     this._running = true;
-    this._retryTimer = null;
+    const runId = ++this._runId;
 
     const tryDiscover = async () => {
       try {
         const count = await this.discoverDevices();
+        if (!this._running || this._runId !== runId) return;
         if (count === 0) {
           this.log.warn("[govee] No leak sensors found, retrying in 5 minutes");
           this._retryTimer = setTimeout(() => {
-            if (this._running) tryDiscover();
+            if (this._running && this._runId === runId) tryDiscover();
           }, 5 * 60 * 1000);
+          if (this._retryTimer.unref) this._retryTimer.unref();
           return;
         }
         // Initial poll
         await this.pollLeakStatus();
+        if (!this._running || this._runId !== runId) return;
         // Start polling interval
+        this._stopPollTimer();
         this._pollTimer = setInterval(
           () => this.pollLeakStatus().catch((e) => this.log.error("[govee] Poll error:", e.message)),
           this._currentPollInterval * 1000
         );
+        if (this._pollTimer.unref) this._pollTimer.unref();
       } catch (err) {
+        if (!this._running || this._runId !== runId) return;
         if (this.needsReauth) {
           this.log.warn("[govee] Token expired during startup — waiting for re-auth");
           return;
         }
         this.log.error(`[govee] Discovery failed: ${err.message}, retrying in 30s`);
         this._retryTimer = setTimeout(() => {
-          if (this._running) tryDiscover();
+          if (this._running && this._runId === runId) tryDiscover();
         }, 30000);
+        if (this._retryTimer.unref) this._retryTimer.unref();
       }
     };
 
@@ -474,6 +537,7 @@ class GoveeLeak {
 
   async stop() {
     this._running = false;
+    this._runId++;
     if (this._retryTimer) {
       clearTimeout(this._retryTimer);
       this._retryTimer = null;

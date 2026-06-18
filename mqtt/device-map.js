@@ -59,10 +59,12 @@ function deviceToMqttPayload(device) {
  */
 function buildDeviceState(device) {
   const vars = device.variables || {};
+  const timestamps = device.variableTimestamps || {};
 
   switch (device.type) {
     case "light": {
-      const level = parseInt(vars.LIGHT_LEVEL, 10) || 0;
+      const rawLevel = parseInt(vars.LIGHT_LEVEL, 10);
+      const level = Number.isFinite(rawLevel) ? Math.max(0, Math.min(100, rawLevel)) : 0;
       // Derive on from level – consistent with SSE-path logic in DeviceContext
       return { type: "light", on: level > 0, level };
     }
@@ -91,11 +93,14 @@ function buildDeviceState(device) {
       const triggered = hasContact
         ? (vars.CONTACT_STATE === "1" || vars.CONTACT_STATE === "Open")
         : (vars.MOTION_STATE === "1" || vars.MOTION_DETECTED === "1");
+      const lastTriggered = triggered
+        ? (hasContact ? timestamps.CONTACT_STATE : (timestamps.MOTION_STATE || timestamps.MOTION_DETECTED)) || null
+        : null;
       return {
         type: "sensor",
         sensorKind,
         triggered,
-        lastTriggered: triggered ? Date.now() : null,
+        lastTriggered,
         batteryLevel: vars.BATTERY_LEVEL ? parseInt(vars.BATTERY_LEVEL, 10) : undefined,
       };
     }
@@ -190,7 +195,7 @@ function ringSensorToMqttPayload(sensor) {
       type: "sensor",
       sensorKind: sensor.sensorKind || "contact",
       triggered: sensor.faulted || false,
-      lastTriggered: sensor.faulted ? Date.now() : null,
+      lastTriggered: sensor.faulted ? (sensor.lastTriggered || sensor.lastUpdate || null) : null,
       batteryLevel: sensor.batteryLevel,
     },
     ts: new Date().toISOString(),
@@ -213,7 +218,7 @@ function goveeSensorToMqttPayload(sensor) {
       type: "sensor",
       sensorKind: "flood",
       triggered: sensor.leakDetected || false,
-      lastTriggered: sensor.leakDetected ? Date.now() : null,
+      lastTriggered: sensor.leakDetected ? (sensor.lastTriggered || sensor.lastUpdate || null) : null,
       batteryLevel: sensor.battery,
     },
     ts: new Date().toISOString(),

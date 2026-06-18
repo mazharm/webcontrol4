@@ -21,6 +21,36 @@ export interface MqttConfig {
 let _mqttConfig: MqttConfig | null = null;
 
 const MQTT_STORAGE_KEY = "wc4_mqtt_config";
+const MQTT_HOME_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+function normalizeMqttConfig(config: MqttConfig): MqttConfig {
+  const brokerWsUrl = config.brokerWsUrl.trim();
+  const username = config.username.trim();
+  const password = config.password;
+  const homeId = (config.homeId || "home1").trim();
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(brokerWsUrl);
+  } catch {
+    throw new Error("MQTT broker URL is invalid.");
+  }
+
+  if (parsedUrl.protocol !== "ws:" && parsedUrl.protocol !== "wss:") {
+    throw new Error("MQTT broker URL must use ws:// or wss://.");
+  }
+  if (!parsedUrl.hostname || parsedUrl.username || parsedUrl.password) {
+    throw new Error("MQTT broker URL must include a host and no embedded credentials.");
+  }
+  if (!username || !password) {
+    throw new Error("MQTT username and password are required.");
+  }
+  if (!MQTT_HOME_ID_RE.test(homeId)) {
+    throw new Error("MQTT Home ID may only contain letters, numbers, underscores, and hyphens.");
+  }
+
+  return { brokerWsUrl, username, password, homeId };
+}
 
 export function getMqttConfig(): MqttConfig {
   if (_mqttConfig) return _mqttConfig;
@@ -32,20 +62,13 @@ export function getMqttConfig(): MqttConfig {
   const homeId = (import.meta.env.VITE_MQTT_HOME_ID as string) || "home1";
 
   if (brokerWsUrl && username && password) {
-    _mqttConfig = { brokerWsUrl, username, password, homeId };
+    _mqttConfig = normalizeMqttConfig({ brokerWsUrl, username, password, homeId });
     return _mqttConfig;
   }
 
-  // Fall back to sessionStorage (for remote mode without baked-in secrets)
+  // Clear legacy configs that stored MQTT passwords in sessionStorage.
   try {
-    const stored = sessionStorage.getItem(MQTT_STORAGE_KEY);
-    if (stored) {
-      const parsed = JSON.parse(stored) as MqttConfig;
-      if (parsed.brokerWsUrl && parsed.username && parsed.password) {
-        _mqttConfig = parsed;
-        return _mqttConfig;
-      }
-    }
+    sessionStorage.removeItem(MQTT_STORAGE_KEY);
   } catch { /* ignore */ }
 
   throw new Error("Missing MQTT configuration");
@@ -61,8 +84,10 @@ export function hasMqttConfig(): boolean {
 }
 
 export function saveMqttConfig(config: MqttConfig): void {
-  _mqttConfig = config;
-  sessionStorage.setItem(MQTT_STORAGE_KEY, JSON.stringify(config));
+  _mqttConfig = normalizeMqttConfig(config);
+  try {
+    sessionStorage.removeItem(MQTT_STORAGE_KEY);
+  } catch { /* ignore */ }
 }
 
 export function clearMqttConfig(): void {

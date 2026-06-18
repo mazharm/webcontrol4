@@ -14,31 +14,61 @@ function required(name, value) {
 }
 
 function ensureParentDir(filePath) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(path.dirname(filePath), 0o700);
+  } catch {
+    // chmod is best-effort on Windows.
+  }
 }
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function requestText(url) {
+function requestText(url, timeoutMs = 30000, maxBytes = 64 * 1024) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    function done(err, value) {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err);
+      else resolve(value);
+    }
+
     const req = https.get(url, (res) => {
       let body = "";
+      let total = 0;
       res.setEncoding("utf8");
       res.on("data", (chunk) => {
+        total += Buffer.byteLength(chunk, "utf8");
+        if (total > maxBytes) {
+          req.destroy(new Error("Response body too large"));
+          return;
+        }
         body += chunk;
       });
       res.on("end", () => {
         if ((res.statusCode || 0) >= 400) {
-          reject(new Error(`HTTP ${res.statusCode}: ${body}`));
+          done(new Error(`HTTP ${res.statusCode}: ${body.slice(0, 500)}`));
           return;
         }
-        resolve(body.trim());
+        done(null, body.trim());
       });
     });
-    req.on("error", reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error("Request timed out")));
+    req.on("error", done);
   });
+}
+
+function writePrivateFile(filePath, data) {
+  ensureParentDir(filePath);
+  fs.writeFileSync(filePath, data, { mode: 0o600 });
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch {
+    // chmod is best-effort on Windows.
+  }
 }
 
 async function main() {
@@ -94,8 +124,14 @@ async function main() {
     : await acme.crypto.createPrivateRsaKey();
 
   if (!fs.existsSync(accountKeyFile)) {
-    fs.writeFileSync(accountKeyFile, accountKey, { mode: 0o600 });
+    writePrivateFile(accountKeyFile, accountKey);
     console.log(`[cert] Created ACME account key at ${accountKeyFile}`);
+  } else {
+    try {
+      fs.chmodSync(accountKeyFile, 0o600);
+    } catch {
+      // chmod is best-effort on Windows.
+    }
   }
 
   console.log(`[cert] Updating DuckDNS A record for ${publicHostname}`);
@@ -136,10 +172,8 @@ async function main() {
     },
   });
 
-  ensureParentDir(certFile);
-  ensureParentDir(keyFile);
-  fs.writeFileSync(certFile, certificate, { mode: 0o600 });
-  fs.writeFileSync(keyFile, certificateKey, { mode: 0o600 });
+  writePrivateFile(certFile, certificate);
+  writePrivateFile(keyFile, certificateKey);
 
   const firstCert = certificate.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/);
   const parsed = new crypto.X509Certificate(firstCert ? firstCert[0] : certificate);

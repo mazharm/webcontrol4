@@ -47,9 +47,25 @@ async function handleCommand(payload, topic) {
   const prefix = `wc4/${homeId}/cmd/`;
 
   if (!topic.startsWith(prefix)) return;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    console.warn(`[mqtt-cmd] Rejected non-object command payload: ${topic}`);
+    return;
+  }
+
+  // Signature verification is opt-in (only when a signing secret is
+  // configured).  Timestamp-based replay protection below always applies, and
+  // publishing to the command topic already requires authenticated broker
+  // (TLS + username/password) access.
+  if (mqttClient.isSigningEnabled()) {
+    const auth = mqttClient.verifySignedPayload(payload, topic);
+    if (!auth.ok) {
+      console.warn(`[mqtt-cmd] Rejected unauthenticated command (${auth.reason}): ${topic}`);
+      return;
+    }
+  }
 
   // Reject commands without timestamp (replay protection)
-  if (!payload || !payload.ts) {
+  if (!payload.ts) {
     console.warn(`[mqtt-cmd] Rejected command without timestamp: ${topic}`);
     return;
   }
@@ -69,17 +85,19 @@ async function handleCommand(payload, topic) {
 
   try {
     // Route: cmd/routines/{routineId}/execute
-    if (parts[0] === "routines" && parts[2] === "execute") {
+    if (parts.length === 3 && parts[0] === "routines" && parts[2] === "execute") {
       const routineId = parts[1];
+      validateTopicSegment(routineId, "routineId");
       await handleRoutineExecute(routineId, homeId);
       return;
     }
 
     // Route: cmd/{system}/{deviceId}/{action}
-    if (parts.length >= 3) {
+    if (parts.length === 3) {
       const system = parts[0];
       const deviceId = parts[1];
       const action = parts[2];
+      validateTopicSegment(deviceId, "deviceId");
 
       if (system === "control4" && action === "set") {
         await handleControl4Command(deviceId, payload);
@@ -101,7 +119,7 @@ async function handleControl4Command(deviceId, payload) {
   }
 
   const itemId = parseInt(deviceId, 10);
-  if (!Number.isFinite(itemId)) {
+  if (!/^\d+$/.test(deviceId) || !Number.isSafeInteger(itemId)) {
     throw new Error(`Invalid Control4 device ID: ${deviceId}`);
   }
 
@@ -185,7 +203,7 @@ async function handleRingCommand(deviceId, payload) {
 
   // Camera commands require a valid numeric device ID
   const numericId = Number(deviceId);
-  if (!Number.isFinite(numericId)) {
+  if (!/^\d+$/.test(deviceId) || !Number.isSafeInteger(numericId)) {
     throw new Error(`Invalid Ring device ID: ${deviceId}`);
   }
 
@@ -215,6 +233,7 @@ async function handleRoutineExecute(routineId, homeId) {
   if (!executeRoutineSteps) {
     throw new Error("executeRoutineSteps not available");
   }
+  validateTopicSegment(routineId, "routineId");
 
   const routine = loadRoutineById(routineId);
   if (!routine) {
@@ -274,6 +293,12 @@ function loadRoutineById(routineId) {
     return raw.find((r) => r.id === routineId) || null;
   } catch {
     return null;
+  }
+}
+
+function validateTopicSegment(value, label) {
+  if (!mqttClient.isSafeTopicSegment(value)) {
+    throw new Error(`Invalid ${label}: ${value}`);
   }
 }
 

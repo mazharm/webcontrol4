@@ -38,6 +38,7 @@ const ALERT_TEMP_RANGE_F = 3;
 
 const MOTION_RECENT_MS = 15 * 60 * 1000;   // 15 min
 const AWAY_INACTIVE_MS = 60 * 60 * 1000;   // 60 min
+const MAX_VAR_NAME_LENGTH = 128;
 
 class StateMachine extends EventEmitter {
   /**
@@ -54,6 +55,7 @@ class StateMachine extends EventEmitter {
     this._devices = new Map();
     /** @type {Map<number, object>}  roomId → room state */
     this._rooms = new Map();
+    this._totalLights = 0;
 
     this._home = {
       mode: "unknown",       // home | away | sleeping | entertaining | unknown
@@ -80,35 +82,45 @@ class StateMachine extends EventEmitter {
     this._devices.clear();
     this._rooms.clear();
     this._roomMotion.clear();
+    this._totalLights = 0;
 
     for (const [typeName, typeInfo] of Object.entries(DEVICE_TYPES)) {
       try {
         const items = await this._apiFn(`api/v1/categories/${typeInfo.category}`);
         if (!Array.isArray(items)) continue;
 
+        let discoveredTypeCount = 0;
         for (const item of items) {
-          if (this._devices.has(item.id)) {
-            this._logger("discover-duplicate-skip", { itemId: item.id, keptType: this._devices.get(item.id).type, skippedType: typeName });
+          if (!item || typeof item !== "object") continue;
+          const itemId = this._coercePositiveInteger(item.id);
+          if (!itemId) continue;
+          const roomId = this._coerceNonNegativeInteger(item.roomParentId) || 0;
+
+          if (this._devices.has(itemId)) {
+            this._logger("discover-duplicate-skip", { itemId, keptType: this._devices.get(itemId).type, skippedType: typeName });
             continue;
           }
 
-          this._devices.set(item.id, {
-            itemId: item.id,
+          this._devices.set(itemId, {
+            itemId,
             name: item.name,
             type: typeName,
             room: item.roomName || "",
-            roomId: item.roomParentId || 0,
+            roomId,
             floor: item.floorName || "",
-            variables: {},
-            variableTimestamps: {},
+            variables: Object.create(null),
+            variableTimestamps: Object.create(null),
             lastChanged: null,
             lastChangedVariable: null,
             previousValue: null,
             changeCount: 0,
+            lastReadAt: null,
           });
+          discoveredTypeCount++;
+          if (typeName === "light") this._totalLights++;
 
           // Accumulate rooms
-          const rid = item.roomParentId;
+          const rid = roomId;
           if (rid && !this._rooms.has(rid)) {
             this._rooms.set(rid, {
               roomId: rid,
@@ -119,16 +131,16 @@ class StateMachine extends EventEmitter {
           }
           if (rid) {
             const room = this._rooms.get(rid);
-            if (!room.devices.includes(item.id)) {
-              room.devices.push(item.id);
+            if (!room.devices.includes(itemId)) {
+              room.devices.push(itemId);
             }
           }
         }
 
-        this._logger(`discover-${typeName}`, `found ${[...this._devices.values()].filter(d => d.type === typeName).length} devices`);
+        this._logger(`discover-${typeName}`, `found ${discoveredTypeCount} devices`);
       } catch (err) {
         // Category may not exist on this Director — that's OK
-        this._logger(`discover-${typeName}-skip`, err.message);
+        this._logger(`discover-${typeName}-skip`, this._errorMessage(err));
       }
     }
 
@@ -144,14 +156,14 @@ class StateMachine extends EventEmitter {
     this._logger("init-state-complete", { devices: this._devices.size });
   }
 
-  /** Refresh only devices whose lastChanged is older than maxAgeMs (or never
-   *  changed).  Cheap substitute for readInitialState() when running the
+  /** Refresh only devices whose lastReadAt is older than maxAgeMs (or never
+   *  read).  Cheap substitute for readInitialState() when running the
    *  fallback polling loop — avoids re-fetching hundreds of idle devices. */
   async readStaleDeviceStates(maxAgeMs = 120_000) {
     const now = Date.now();
     const stale = [...this._devices.values()].filter((d) => {
-      if (!d.lastChanged) return true;
-      return now - d.lastChanged > maxAgeMs;
+      if (!d.lastReadAt) return true;
+      return now - d.lastReadAt > maxAgeMs;
     });
     if (stale.length === 0) return 0;
     await this._readStateForDevices(stale);
@@ -171,20 +183,28 @@ class StateMachine extends EventEmitter {
           const vars = await this._apiFn(
             `api/v1/items/${device.itemId}/variables?varnames=${typeInfo.vars.join(",")}`
           );
+          const readAt = Date.now();
           if (Array.isArray(vars)) {
             for (const v of vars) {
-              device.variables[v.varName] = v.value;
+              if (!v || typeof v !== "object") continue;
+              const varName = this._normalizeVarName(v.varName);
+              if (!varName) continue;
+              if (!this._valuesEqual(device.variables[varName], v.value) || !device.variableTimestamps[varName]) {
+                device.variableTimestamps[varName] = readAt;
+              }
+              device.variables[varName] = v.value;
             }
           }
+          device.lastReadAt = readAt;
         } catch (err) {
-          this._logger("read-state-error", { itemId: device.itemId, error: err.message });
+          this._logger("read-state-error", { itemId: device.itemId, error: this._errorMessage(err) });
         }
       }));
     }
 
     // Recompute derived state after a batch refresh.
     try { this._deriveHomeState(); } catch (err) {
-      this._logger("derive-home-state-error", err.message);
+      this._logger("derive-home-state-error", this._errorMessage(err));
     }
   }
 
@@ -193,32 +213,39 @@ class StateMachine extends EventEmitter {
   // -----------------------------------------------------------------------
 
   /** Called for every incoming WebSocket variable-change event. */
-  handleDeviceEvent({ itemId, varName, value }) {
-    const device = this._devices.get(Number(itemId));
+  handleDeviceEvent(event) {
+    if (!event || typeof event !== "object") return;
+    const itemId = this._coercePositiveInteger(event.itemId);
+    const varName = this._normalizeVarName(event.varName);
+    if (!itemId || !varName) return;
+    const value = event.value;
+    const device = this._devices.get(itemId);
     if (!device) return; // unknown device — ignore
 
     const oldValue = device.variables[varName];
     // Coerce for comparison (Director sends strings)
-    if (String(oldValue) === String(value)) return; // no actual change
+    if (this._valuesEqual(oldValue, value)) return; // no actual change
 
+    const now = Date.now();
     device.previousValue = oldValue;
     device.lastChangedVariable = varName;
     device.variables[varName] = value;
-    device.lastChanged = Date.now();
-    device.variableTimestamps = device.variableTimestamps || {};
-    device.variableTimestamps[varName] = Date.now();
+    device.lastChanged = now;
+    device.variableTimestamps = device.variableTimestamps || Object.create(null);
+    device.variableTimestamps[varName] = now;
+    device.lastReadAt = now;
     device.changeCount++;
 
     // Track motion per room
     if ((varName === "MOTION_STATE" || varName === "MOTION_DETECTED") && this._isTruthy(value)) {
-      this._roomMotion.set(device.roomId, Date.now());
+      this._roomMotion.set(device.roomId, now);
     }
 
-    this._home.lastActivityTime = Date.now();
+    this._home.lastActivityTime = now;
 
     // Re-derive global state
     try { this._deriveHomeState(); } catch (err) {
-      this._logger("derive-home-state-error", err.message);
+      this._logger("derive-home-state-error", this._errorMessage(err));
     }
 
     // Notify listeners
@@ -228,11 +255,11 @@ class StateMachine extends EventEmitter {
       value,
       oldValue,
       device,
-      timestamp: Date.now(),
+      timestamp: now,
     };
-    this.emit("stateChange", change);
+    this._emitSafely("stateChange", change);
     for (const cb of this._changeListeners) {
-      try { cb(change); } catch (err) { this._logger("listener-error", err.message); }
+      this._invokeListener(cb, change, "listener-error");
     }
   }
 
@@ -269,7 +296,13 @@ class StateMachine extends EventEmitter {
   }
 
   getHomeState() {
-    return { ...this._home };
+    return {
+      ...this._home,
+      signals: [...this._home.signals],
+      occupiedRooms: [...this._home.occupiedRooms],
+      alerts: this._home.alerts.map((alert) => ({ ...alert })),
+      lastTransition: this._home.lastTransition ? { ...this._home.lastTransition } : null,
+    };
   }
 
   /** Compact, LLM-friendly text summary of the entire home — <500 tokens. */
@@ -355,6 +388,7 @@ class StateMachine extends EventEmitter {
 
   /** Subscribe to every state change. */
   onStateChange(cb) {
+    if (typeof cb !== "function") return;
     this._changeListeners.add(cb);
   }
 
@@ -382,7 +416,7 @@ class StateMachine extends EventEmitter {
     // --- Home mode ---
     const signals = [];
     const lightsOnCount = this._countLightsOn();
-    const totalLights = [...this._devices.values()].filter(d => d.type === "light").length;
+    const totalLights = this._totalLights;
     const timeSinceActivity = this._home.lastActivityTime
       ? now - this._home.lastActivityTime
       : Infinity;
@@ -571,6 +605,70 @@ class StateMachine extends EventEmitter {
     if (diff < 3600000) return `${Math.round(diff / 60000)}m ago`;
     if (diff < 86400000) return `${Math.round(diff / 3600000)}h ago`;
     return `${Math.round(diff / 86400000)}d ago`;
+  }
+
+  _coercePositiveInteger(value) {
+    const id = Number(value);
+    return Number.isSafeInteger(id) && id > 0 ? id : null;
+  }
+
+  _coerceNonNegativeInteger(value) {
+    const id = Number(value);
+    return Number.isSafeInteger(id) && id >= 0 ? id : null;
+  }
+
+  _normalizeVarName(varName) {
+    if (varName === null || varName === undefined) return null;
+    const name = String(varName);
+    if (name.length === 0 || name.length > MAX_VAR_NAME_LENGTH) return null;
+    if (name === "__proto__" || name === "prototype" || name === "constructor") return null;
+    if (/[\u0000-\u001f\u007f]/.test(name)) return null;
+    return name;
+  }
+
+  _valuesEqual(a, b) {
+    try {
+      return String(a) === String(b);
+    } catch {
+      return Object.is(a, b);
+    }
+  }
+
+  _invokeListener(cb, arg, logEvent) {
+    if (typeof cb !== "function") return;
+    try {
+      const result = cb(arg);
+      if (result && typeof result.then === "function") {
+        result.catch((err) => this._logger(logEvent, this._errorMessage(err)));
+      }
+    } catch (err) {
+      this._logger(logEvent, this._errorMessage(err));
+    }
+  }
+
+  _emitSafely(eventName, ...args) {
+    const listeners = this.rawListeners(eventName);
+    for (const listener of listeners) {
+      try {
+        const result = listener.apply(this, args);
+        if (result && typeof result.then === "function") {
+          result.catch((err) => this._logger("emitter-listener-error", {
+            event: eventName,
+            error: this._errorMessage(err),
+          }));
+        }
+      } catch (err) {
+        this._logger("emitter-listener-error", {
+          event: eventName,
+          error: this._errorMessage(err),
+        });
+      }
+    }
+    return listeners.length > 0;
+  }
+
+  _errorMessage(err) {
+    return err && err.message ? err.message : String(err);
   }
 }
 

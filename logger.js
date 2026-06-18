@@ -18,34 +18,44 @@
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 const DEFAULT_LEVEL = process.env.LOG_LEVEL?.toLowerCase() || "info";
 const FORMAT = process.env.LOG_FORMAT?.toLowerCase() === "json" ? "json" : "text";
+const SENSITIVE_KEY_RE = /(?:password|passwd|secret|token|authorization|cookie|api[_-]?key|refresh[_-]?token|private[_-]?key)/i;
 
 function shouldLog(level) {
   return (LEVELS[level] || 20) >= (LEVELS[DEFAULT_LEVEL] || 20);
 }
 
+function sanitizeForLog(value, key = "", seen = new WeakSet()) {
+  if (SENSITIVE_KEY_RE.test(key)) return "[Redacted]";
+  if (typeof value === "bigint") return value.toString();
+  if (!value || typeof value !== "object") return value;
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+    };
+  }
+  if (Array.isArray(value)) return value.map((item) => sanitizeForLog(item, "", seen));
+  const out = {};
+  for (const [childKey, childValue] of Object.entries(value)) {
+    out[childKey] = sanitizeForLog(childValue, childKey, seen);
+  }
+  return out;
+}
+
 function safeStringify(obj) {
   try {
-    return JSON.stringify(obj);
+    return JSON.stringify(sanitizeForLog(obj));
   } catch {
-    try {
-      const seen = new WeakSet();
-      return JSON.stringify(obj, (_k, v) => {
-        if (typeof v === "bigint") return v.toString();
-        if (v && typeof v === "object") {
-          if (seen.has(v)) return "[Circular]";
-          seen.add(v);
-        }
-        return v;
-      });
-    } catch {
-      return JSON.stringify({
-        ts: obj && obj.ts,
-        level: obj && obj.level,
-        module: obj && obj.module,
-        event: obj && obj.event,
-        _logError: "unserializable record",
-      });
-    }
+    return JSON.stringify({
+      ts: obj && obj.ts,
+      level: obj && obj.level,
+      module: obj && obj.module,
+      event: obj && obj.event,
+      _logError: "unserializable record",
+    });
   }
 }
 
@@ -54,7 +64,7 @@ function emit(rec) {
     process.stdout.write(safeStringify(rec) + "\n");
     return;
   }
-  const { ts, level, module: mod, event, ...rest } = rec;
+  const { ts, level, module: mod, event, ...rest } = sanitizeForLog(rec);
   const keys = Object.keys(rest);
   const tail = keys.length
     ? " " + keys.map((k) => {

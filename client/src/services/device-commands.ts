@@ -6,6 +6,16 @@ import { isRemoteMode, getMqttConfig } from "../config/transport";
 import { publish } from "./mqtt-client";
 import { sendCommand, type DirectorOptions } from "../api/director";
 
+const MQTT_TOPIC_SEGMENT_RE = /^[A-Za-z0-9._:-]+$/;
+
+function assertSafeTopicSegment(value: string | number, label: string): string {
+  const segment = String(value);
+  if (!MQTT_TOPIC_SEGMENT_RE.test(segment)) {
+    throw new Error(`Invalid MQTT ${label}.`);
+  }
+  return segment;
+}
+
 /**
  * Send a device command via the appropriate transport.
  * In local mode: calls REST API via director.ts
@@ -19,7 +29,8 @@ export async function sendDeviceCommand(
 ): Promise<void> {
   if (isRemoteMode()) {
     const config = getMqttConfig();
-    const topic = `wc4/${config.homeId}/cmd/${system}/${deviceId}/set`;
+    const safeDeviceId = assertSafeTopicSegment(deviceId, "device id");
+    const topic = `wc4/${config.homeId}/cmd/${system}/${safeDeviceId}/set`;
     const published = publish(topic, { ...command, ts: new Date().toISOString() });
     if (!published) {
       throw new Error("MQTT client is not connected");
@@ -67,6 +78,7 @@ export async function sendDeviceCommand(
 export function executeRoutine(routineId: string): void {
   if (!isRemoteMode()) return;
   const config = getMqttConfig();
-  const topic = `wc4/${config.homeId}/cmd/routines/${routineId}/execute`;
+  const safeRoutineId = assertSafeTopicSegment(routineId, "routine id");
+  const topic = `wc4/${config.homeId}/cmd/routines/${safeRoutineId}/execute`;
   publish(topic, { ts: new Date().toISOString() });
 }

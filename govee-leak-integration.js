@@ -4,6 +4,24 @@
 
 const GoveeLeak = require("./govee-leak");
 
+let activeGoveeInstance = null;
+
+function safeLog(log, level, message, ...args) {
+  try {
+    (log[level] || log.info || console.log).call(log, message, ...args);
+  } catch {
+    // Logging must never break sensor polling.
+  }
+}
+
+function safeBroadcast(broadcast, log, eventType, data) {
+  try {
+    broadcast(eventType, data);
+  } catch (err) {
+    safeLog(log, "error", `[govee] Broadcast failed: ${err?.message || String(err)}`);
+  }
+}
+
 /**
  * Initialize Govee leak sensor polling with a pre-authenticated token.
  *
@@ -15,6 +33,13 @@ const GoveeLeak = require("./govee-leak");
 function initGoveeLeak(app, broadcast, config) {
   const log = config.log || console;
 
+  if (activeGoveeInstance) {
+    activeGoveeInstance.stop().catch((err) =>
+      safeLog(log, "error", `[govee] Failed to stop previous poller: ${err?.message || String(err)}`)
+    );
+    activeGoveeInstance = null;
+  }
+
   const govee = new GoveeLeak({
     email: config.goveeEmail,
     token: config.goveeToken,
@@ -22,22 +47,26 @@ function initGoveeLeak(app, broadcast, config) {
     pollInterval: config.goveePollInterval,
     log,
     onDevicesReady(sensors) {
-      log.info(`[govee] ${sensors.length} leak sensor(s) ready`);
-      broadcast("govee:status", { connected: true, sensorCount: sensors.length });
+      safeLog(log, "info", `[govee] ${sensors.length} leak sensor(s) ready`);
+      safeBroadcast(broadcast, log, "govee:status", { connected: true, sensorCount: sensors.length });
     },
     onTokenExpired() {
-      log.warn("[govee] Token expired — user must re-authenticate via Settings");
-      broadcast("govee:status", { connected: false, needsReauth: true });
-      if (config.onTokenExpired) config.onTokenExpired();
+      safeLog(log, "warn", "[govee] Token expired — user must re-authenticate via Settings");
+      safeBroadcast(broadcast, log, "govee:status", { connected: false, needsReauth: true });
+      if (config.onTokenExpired) {
+        try { config.onTokenExpired(); } catch (err) {
+          safeLog(log, "error", `[govee] onTokenExpired handler failed: ${err?.message || String(err)}`);
+        }
+      }
     },
     onLeakEvent(event) {
       // Broadcast to SSE clients
-      broadcast("govee:leak", event);
+      safeBroadcast(broadcast, log, "govee:leak", event);
 
       if (event.leakDetected) {
-        log.warn(`[govee] 🚨 LEAK DETECTED: ${event.name} (${event.device})`);
+        safeLog(log, "warn", `[govee] 🚨 LEAK DETECTED: ${event.name} (${event.device})`);
       } else {
-        log.info(`[govee] ✅ Clear: ${event.name} (${event.device})`);
+        safeLog(log, "info", `[govee] ✅ Clear: ${event.name} (${event.device})`);
       }
 
       // Future: state machine integration
@@ -54,7 +83,8 @@ function initGoveeLeak(app, broadcast, config) {
   });
 
   // Start polling (async, non-blocking — errors logged internally)
-  govee.start().catch((err) => log.error("[govee] Start failed:", err.message));
+  activeGoveeInstance = govee;
+  govee.start().catch((err) => safeLog(log, "error", "[govee] Start failed:", err.message));
 
   return govee;
 }
@@ -128,12 +158,15 @@ function getGoveeLeakMCPTools(govee) {
         required: ["query"],
       },
       handler: async ({ query }) => {
+        if (typeof query !== "string" || !query.trim()) {
+          return { error: "query must be a non-empty string" };
+        }
         const state = govee.getState();
         const q = query.toLowerCase();
         const match = state.sensors.find(
           (s) =>
-            s.id.toLowerCase() === q ||
-            s.name.toLowerCase().includes(q)
+            String(s.id).toLowerCase() === q ||
+            String(s.name).toLowerCase().includes(q)
         );
         if (!match) {
           const names = state.sensors.map((s) => s.name).join(", ");

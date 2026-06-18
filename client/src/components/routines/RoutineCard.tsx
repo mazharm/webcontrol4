@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import {
   makeStyles,
   tokens,
@@ -64,13 +64,21 @@ export function RoutineCard({ routine, onEdit, onDeleted, remote }: RoutineCardP
   const styles = useStyles();
   const { state: auth } = useAuth();
   const [running, setRunning] = useState(false);
+  const runningTimerRef = useRef<ReturnType<typeof setTimeout>>();
+
+  useEffect(() => () => clearTimeout(runningTimerRef.current), []);
 
   const run = useCallback(async () => {
+    clearTimeout(runningTimerRef.current);
     setRunning(true);
     if (remote) {
-      mqttExecuteRoutine(routine.id);
-      // Brief delay to show feedback since MQTT is fire-and-forget
-      setTimeout(() => setRunning(false), 1500);
+      try {
+        mqttExecuteRoutine(routine.id);
+      } catch {
+        setRunning(false);
+        return;
+      }
+      runningTimerRef.current = setTimeout(() => setRunning(false), 1500);
       return;
     }
     const opts = { ip: auth.controllerIp || "", token: auth.directorToken || "" };

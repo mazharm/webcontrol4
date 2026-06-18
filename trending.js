@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS device_events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_item_date ON device_events(item_id, date);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON device_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_date_item_var ON device_events(date, item_id, var_name);
+CREATE INDEX IF NOT EXISTS idx_events_item_ts ON device_events(item_id, timestamp DESC);
 
 CREATE TABLE IF NOT EXISTS daily_summaries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,6 +42,7 @@ CREATE TABLE IF NOT EXISTS daily_summaries (
   UNIQUE(item_id, var_name, date)
 );
 CREATE INDEX IF NOT EXISTS idx_daily_item ON daily_summaries(item_id, date);
+CREATE INDEX IF NOT EXISTS idx_daily_date_item_var ON daily_summaries(date, item_id, var_name);
 
 CREATE TABLE IF NOT EXISTS home_mode_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,6 +84,8 @@ class TrendingEngine {
 
     // Prepared statements (set in init)
     this._insertStmt = null;
+    this._insertManyTx = null;
+    this._closed = true;
 
     // Track current home mode for mode-log
     this._currentMode = null;
@@ -92,35 +97,63 @@ class TrendingEngine {
   // -----------------------------------------------------------------------
 
   init() {
+    if (this._db || this._bufferTimer || this._rollupTimer) {
+      this.close();
+    }
+    this._closed = false;
+
     // Ensure parent directory exists
     const dir = path.dirname(this._dbPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    this._db = new Database(this._dbPath);
-    this._db.pragma("journal_mode = WAL");
-    this._db.pragma("synchronous = NORMAL");
-    this._db.exec(SCHEMA_SQL);
+    try {
+      this._db = new Database(this._dbPath);
+      this._db.pragma("journal_mode = WAL");
+      this._db.pragma("synchronous = NORMAL");
+      this._db.exec(SCHEMA_SQL);
 
-    this._insertStmt = this._db.prepare(
-      "INSERT INTO device_events (item_id, var_name, value, old_value, timestamp, date) VALUES (?, ?, ?, ?, ?, ?)"
-    );
+      this._insertStmt = this._db.prepare(
+        "INSERT INTO device_events (item_id, var_name, value, old_value, timestamp, date) VALUES (?, ?, ?, ?, ?, ?)"
+      );
+      this._insertManyTx = this._db.transaction((rows) => {
+        for (const e of rows) {
+          const dateStr = this._dateString(e.timestamp);
+          if (!dateStr) continue;
+          this._insertStmt.run(e.itemId, e.varName, e.value, e.oldValue, e.timestamp, dateStr);
+        }
+      });
 
-    this._startBufferTimer();
-    this._scheduleDailyRollup();
+      this._startBufferTimer();
+      this._scheduleDailyRollup();
 
-    this._logger("trending-init", this._dbPath);
+      this._logger("trending-init", this._dbPath);
+    } catch (err) {
+      this._closed = true;
+      this._clearTimers();
+      if (this._db) {
+        try { this._db.close(); } catch { /* ignore close failure during init cleanup */ }
+        this._db = null;
+      }
+      this._insertStmt = null;
+      this._insertManyTx = null;
+      throw err;
+    }
   }
 
   close() {
-    this.flush();
+    this._closed = true;
     this._clearTimers();
+    this.flush();
     if (this._db) {
-      this._db.close();
+      try { this._db.close(); } catch (err) {
+        this._logger("trending-close-error", err?.message || String(err));
+      }
       this._db = null;
     }
     this._insertStmt = null;
+    this._insertManyTx = null;
   }
 
   // -----------------------------------------------------------------------
@@ -128,13 +161,21 @@ class TrendingEngine {
   // -----------------------------------------------------------------------
 
   /** Buffer a device event for batch writing. */
-  recordEvent({ itemId, varName, value, oldValue, timestamp }) {
+  recordEvent({ itemId, varName, value, oldValue, timestamp } = {}) {
+    const id = Number(itemId);
+    const ts = Number(timestamp ?? Date.now());
+    const name = String(varName ?? "").trim();
+    if (!Number.isFinite(id) || !name || !this._dateString(ts)) {
+      this._logger("trending-event-dropped", { itemId, varName, timestamp });
+      return;
+    }
+
     this._buffer.push({
-      itemId: Number(itemId),
-      varName: String(varName),
+      itemId: id,
+      varName: name,
       value: String(value ?? ""),
       oldValue: String(oldValue ?? ""),
-      timestamp: timestamp || Date.now(),
+      timestamp: ts,
     });
 
     // If flush is failing repeatedly (DB locked, closed, etc.) the buffer
@@ -157,19 +198,12 @@ class TrendingEngine {
 
   /** Flush buffer to SQLite in a single transaction. */
   flush() {
-    if (!this._db || !this._insertStmt || this._buffer.length === 0) return;
+    if (!this._db || !this._insertManyTx || this._buffer.length === 0) return;
 
     const events = this._buffer.slice(0);
 
-    const insertMany = this._db.transaction((rows) => {
-      for (const e of rows) {
-        const dateStr = new Date(e.timestamp).toISOString().slice(0, 10);
-        this._insertStmt.run(e.itemId, e.varName, e.value, e.oldValue, e.timestamp, dateStr);
-      }
-    });
-
     try {
-      insertMany(events);
+      this._insertManyTx(events);
       this._buffer.splice(0, events.length);
     } catch (err) {
       this._logger("trending-flush-error", err.message);
@@ -216,9 +250,11 @@ class TrendingEngine {
     if (!Number.isFinite(id)) return [];
     const h = Math.max(1, Math.min(Number(hours) || 24, 720));
     const cutoff = Date.now() - h * 3600 * 1000;
-    return this._db.prepare(
-      "SELECT item_id, var_name, value, old_value, timestamp FROM device_events WHERE item_id = ? AND timestamp > ? ORDER BY timestamp DESC LIMIT 1000"
-    ).all(id, cutoff);
+    return this._safeRead("trending-history-error", [], () =>
+      this._db.prepare(
+        "SELECT item_id, var_name, value, old_value, timestamp FROM device_events WHERE item_id = ? AND timestamp > ? ORDER BY timestamp DESC LIMIT 1000"
+      ).all(id, cutoff)
+    );
   }
 
   /** Daily summaries for a device. */
@@ -228,9 +264,11 @@ class TrendingEngine {
     if (!Number.isFinite(id)) return [];
     const d = Math.max(1, Math.min(Number(days) || 7, 90));
     const cutoffDate = new Date(Date.now() - d * 86400000).toISOString().slice(0, 10);
-    return this._db.prepare(
-      "SELECT * FROM daily_summaries WHERE item_id = ? AND date >= ? ORDER BY date DESC"
-    ).all(id, cutoffDate);
+    return this._safeRead("trending-summary-error", [], () =>
+      this._db.prepare(
+        "SELECT * FROM daily_summaries WHERE item_id = ? AND date >= ? ORDER BY date DESC"
+      ).all(id, cutoffDate)
+    );
   }
 
   /** Trend data: daily values for a specific variable. */
@@ -238,11 +276,15 @@ class TrendingEngine {
     if (!this._db) return [];
     const id = Number(itemId);
     if (!Number.isFinite(id)) return [];
+    const varName = String(variable ?? "").trim();
+    if (!varName) return [];
     const d = Math.max(1, Math.min(Number(days) || 14, 90));
     const cutoffDate = new Date(Date.now() - d * 86400000).toISOString().slice(0, 10);
-    return this._db.prepare(
-      "SELECT date, event_count, min_value, max_value, avg_value, total_on_minutes FROM daily_summaries WHERE item_id = ? AND var_name = ? AND date >= ? ORDER BY date ASC"
-    ).all(id, variable, cutoffDate);
+    return this._safeRead("trending-trend-error", [], () =>
+      this._db.prepare(
+        "SELECT date, event_count, min_value, max_value, avg_value, total_on_minutes FROM daily_summaries WHERE item_id = ? AND var_name = ? AND date >= ? ORDER BY date ASC"
+      ).all(id, varName, cutoffDate)
+    );
   }
 
   /** Detect anomalies in recent events (values > 2σ from baseline). */
@@ -254,9 +296,11 @@ class TrendingEngine {
     // Get recent daily summaries within the requested time range
     const cutoffDate = new Date(cutoff).toISOString().slice(0, 10);
     const todayStr = new Date().toISOString().slice(0, 10);
-    const recentSummaries = this._db.prepare(
-      "SELECT item_id, var_name, AVG(avg_value) as avg_value, SUM(event_count) as event_count FROM daily_summaries WHERE date >= ? AND date <= ? AND avg_value IS NOT NULL GROUP BY item_id, var_name"
-    ).all(cutoffDate, todayStr);
+    const recentSummaries = this._safeRead("trending-anomaly-query-error", [], () =>
+      this._db.prepare(
+        "SELECT item_id, var_name, AVG(avg_value) as avg_value, SUM(event_count) as event_count FROM daily_summaries WHERE date >= ? AND date <= ? AND avg_value IS NOT NULL GROUP BY item_id, var_name"
+      ).all(cutoffDate, todayStr)
+    );
 
     const anomalies = [];
     const baselineCache = new Map();
@@ -295,13 +339,15 @@ class TrendingEngine {
     if (!Number.isFinite(id)) return {};
 
     // Get all variable names for this device
-    const varNames = this._db.prepare(
-      "SELECT DISTINCT var_name FROM daily_summaries WHERE item_id = ?"
-    ).all(id);
+    const varNames = this._safeRead("trending-baseline-vars-error", [], () =>
+      this._db.prepare(
+        "SELECT DISTINCT var_name FROM daily_summaries WHERE item_id = ?"
+      ).all(id)
+    );
 
     const result = {};
     for (const { var_name } of varNames) {
-      result[var_name] = this._computeBaseline(Number(itemId), var_name);
+      result[var_name] = this._computeBaseline(id, var_name);
     }
     return result;
   }
@@ -310,9 +356,11 @@ class TrendingEngine {
     const cutoffDate = new Date(Date.now() - BASELINE_DAYS * 86400000).toISOString().slice(0, 10);
     const todayStr = new Date().toISOString().slice(0, 10);
 
-    const rows = this._db.prepare(
-      "SELECT avg_value, event_count FROM daily_summaries WHERE item_id = ? AND var_name = ? AND date >= ? AND date < ? AND avg_value IS NOT NULL"
-    ).all(itemId, varName, cutoffDate, todayStr);
+    const rows = this._safeRead("trending-baseline-error", [], () =>
+      this._db.prepare(
+        "SELECT avg_value, event_count FROM daily_summaries WHERE item_id = ? AND var_name = ? AND date >= ? AND date < ? AND avg_value IS NOT NULL"
+      ).all(itemId, varName, cutoffDate, todayStr)
+    );
 
     if (rows.length === 0) return null;
 
@@ -336,9 +384,11 @@ class TrendingEngine {
     if (!this._db) return [];
     const h = Math.max(1, Math.min(Number(hours) || 24, 720));
     const cutoff = Date.now() - h * 3600 * 1000;
-    return this._db.prepare(
-      "SELECT * FROM home_mode_log WHERE started_at > ? ORDER BY started_at DESC"
-    ).all(cutoff);
+    return this._safeRead("trending-mode-history-error", [], () =>
+      this._db.prepare(
+        "SELECT * FROM home_mode_log WHERE started_at > ? ORDER BY started_at DESC"
+      ).all(cutoff)
+    );
   }
 
   /** DB stats for health endpoint. */
@@ -359,7 +409,22 @@ class TrendingEngine {
   // Maintenance
   // -----------------------------------------------------------------------
 
+  _dateString(timestamp) {
+    const d = new Date(timestamp);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  }
+
+  _safeRead(label, fallback, fn) {
+    try {
+      return fn();
+    } catch (err) {
+      this._logger(label, err?.message || String(err));
+      return fallback;
+    }
+  }
+
   _startBufferTimer() {
+    if (this._bufferTimer) clearInterval(this._bufferTimer);
     // A thrown flush() (e.g. DB temporarily locked) must never escape the
     // interval callback — uncaughtException would kill the whole process.
     this._bufferTimer = setInterval(() => {
@@ -371,7 +436,12 @@ class TrendingEngine {
   }
 
   _scheduleDailyRollup() {
+    if (this._rollupTimer) {
+      clearTimeout(this._rollupTimer);
+      this._rollupTimer = null;
+    }
     const scheduleNext = () => {
+      if (this._closed) return;
       try {
         const now = new Date();
         const midnight = new Date(now);
@@ -390,7 +460,7 @@ class TrendingEngine {
           } catch (err) {
             this._logger("trending-rollup-tick-error", err?.message || String(err));
           } finally {
-            scheduleNext(); // always re-schedule, even if this tick threw
+            if (!this._closed) scheduleNext(); // always re-schedule, even if this tick threw
           }
         }, msUntilMidnight);
 
@@ -401,6 +471,7 @@ class TrendingEngine {
         // bad system clock could trip something), retry in an hour so we
         // don't silently stop rolling up forever.
         this._logger("trending-rollup-schedule-error", err?.message || String(err));
+        if (this._closed) return;
         this._rollupTimer = setTimeout(scheduleNext, ROLLUP_RETRY_DELAY_MS);
         if (this._rollupTimer.unref) this._rollupTimer.unref();
       }
@@ -422,70 +493,95 @@ class TrendingEngine {
     this._logger("trending-rollup", dateStr);
 
     try {
-      // Get distinct item_id + var_name combos for yesterday
-      const combos = this._db.prepare(
-        "SELECT DISTINCT item_id, var_name FROM device_events WHERE date = ?"
+      const rows = this._db.prepare(
+        "SELECT item_id, var_name, value, timestamp FROM device_events WHERE date = ? ORDER BY item_id, var_name, timestamp ASC"
       ).all(dateStr);
 
       const upsert = this._db.prepare(`
-        INSERT OR REPLACE INTO daily_summaries
+        INSERT INTO daily_summaries
           (item_id, var_name, date, event_count, min_value, max_value, avg_value, total_on_minutes, first_value, last_value)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(item_id, var_name, date) DO UPDATE SET
+          event_count = excluded.event_count,
+          min_value = excluded.min_value,
+          max_value = excluded.max_value,
+          avg_value = excluded.avg_value,
+          total_on_minutes = excluded.total_on_minutes,
+          first_value = excluded.first_value,
+          last_value = excluded.last_value
       `);
 
+      let comboCount = 0;
       const rollup = this._db.transaction(() => {
-        for (const { item_id, var_name } of combos) {
-          const events = this._db.prepare(
-            "SELECT value, timestamp FROM device_events WHERE item_id = ? AND var_name = ? AND date = ? ORDER BY timestamp ASC"
-          ).all(item_id, var_name, dateStr);
+        let currentItem = null;
+        let currentVar = null;
+        let events = [];
 
-          if (events.length === 0) continue;
-
-          const numericValues = events.map(e => parseFloat(e.value)).filter(v => Number.isFinite(v));
-          const minVal = numericValues.length > 0 ? numericValues.reduce((a, b) => Math.min(a, b), Infinity) : null;
-          const maxVal = numericValues.length > 0 ? numericValues.reduce((a, b) => Math.max(a, b), -Infinity) : null;
-          const avgVal = numericValues.length > 0
-            ? numericValues.reduce((a, b) => a + b, 0) / numericValues.length
-            : null;
-
-          // Calculate total on-time for binary states (lights, HVAC)
-          let totalOnMinutes = null;
-          if (var_name === "LIGHT_STATE" || var_name === "HVAC_STATE" || var_name === "POWER_STATE") {
-            totalOnMinutes = 0;
-            let lastOnTs = null;
-            for (const e of events) {
-              const isOn = e.value === "1" || e.value === "Running" || e.value === "true";
-              if (isOn && lastOnTs === null) {
-                lastOnTs = e.timestamp;
-              } else if (!isOn && lastOnTs !== null) {
-                totalOnMinutes += (e.timestamp - lastOnTs) / 60000;
-                lastOnTs = null;
-              }
-            }
-            // If still on at end of day, count up to midnight
-            if (lastOnTs !== null) {
-              const endOfDay = new Date(dateStr + "T23:59:59.999Z").getTime();
-              totalOnMinutes += (endOfDay - lastOnTs) / 60000;
-            }
-            totalOnMinutes = Math.round(totalOnMinutes * 10) / 10;
-          }
-
+        const flushGroup = () => {
+          if (events.length === 0) return;
+          comboCount++;
+          const summary = this._summarizeEvents(currentVar, dateStr, events);
           upsert.run(
-            item_id, var_name, dateStr,
+            currentItem, currentVar, dateStr,
             events.length,
-            minVal, maxVal, avgVal,
-            totalOnMinutes,
+            summary.minVal, summary.maxVal, summary.avgVal,
+            summary.totalOnMinutes,
             events[0].value,
             events[events.length - 1].value
           );
+        };
+
+        for (const row of rows) {
+          if (currentItem !== row.item_id || currentVar !== row.var_name) {
+            flushGroup();
+            currentItem = row.item_id;
+            currentVar = row.var_name;
+            events = [];
+          }
+          events.push(row);
         }
+
+        flushGroup();
       });
 
       rollup();
-      this._logger("trending-rollup-complete", { date: dateStr, combos: combos.length });
+      this._logger("trending-rollup-complete", { date: dateStr, combos: comboCount });
     } catch (err) {
       this._logger("trending-rollup-error", err.message);
     }
+  }
+
+  _summarizeEvents(varName, dateStr, events) {
+    const numericValues = events.map(e => parseFloat(e.value)).filter(v => Number.isFinite(v));
+    const minVal = numericValues.length > 0 ? numericValues.reduce((a, b) => Math.min(a, b), Infinity) : null;
+    const maxVal = numericValues.length > 0 ? numericValues.reduce((a, b) => Math.max(a, b), -Infinity) : null;
+    const avgVal = numericValues.length > 0
+      ? numericValues.reduce((a, b) => a + b, 0) / numericValues.length
+      : null;
+
+    // Calculate total on-time for binary states (lights, HVAC)
+    let totalOnMinutes = null;
+    if (varName === "LIGHT_STATE" || varName === "HVAC_STATE" || varName === "POWER_STATE") {
+      totalOnMinutes = 0;
+      let lastOnTs = null;
+      for (const e of events) {
+        const isOn = e.value === "1" || e.value === "Running" || e.value === "true";
+        if (isOn && lastOnTs === null) {
+          lastOnTs = e.timestamp;
+        } else if (!isOn && lastOnTs !== null) {
+          totalOnMinutes += (e.timestamp - lastOnTs) / 60000;
+          lastOnTs = null;
+        }
+      }
+      // If still on at end of day, count up to midnight
+      if (lastOnTs !== null) {
+        const endOfDay = new Date(dateStr + "T23:59:59.999Z").getTime();
+        totalOnMinutes += (endOfDay - lastOnTs) / 60000;
+      }
+      totalOnMinutes = Math.round(totalOnMinutes * 10) / 10;
+    }
+
+    return { minVal, maxVal, avgVal, totalOnMinutes };
   }
 
   _pruneOldEvents() {

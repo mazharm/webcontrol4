@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 const https = require("https");
+const crypto = require("crypto");
 
 // --- Priority constants ---
 const Priority = {
@@ -67,7 +68,11 @@ function getLog(limit = 20) {
 // Core send function
 // ---------------------------------------------------------------------------
 
-async function send(opts) {
+async function send(opts = {}) {
+  if (!opts || typeof opts !== "object") {
+    opts = { message: String(opts ?? "") };
+  }
+
   if (process.env.PUSHOVER_ENABLED === "false") {
     return { success: true, skipped: true };
   }
@@ -107,7 +112,7 @@ async function send(opts) {
   }
 
   // Encode as multipart/form-data
-  const boundary = `----WebControl4-${Date.now()}`;
+  const boundary = `----WebControl4-${crypto.randomBytes(12).toString("hex")}`;
   const parts = [];
 
   for (const [key, value] of Object.entries(fields)) {
@@ -119,7 +124,7 @@ async function send(opts) {
   }
 
   if (opts.image && Buffer.isBuffer(opts.image) && opts.image.length <= 5 * 1024 * 1024) {
-    const mime = opts.imageMime || "image/jpeg";
+    const mime = sanitizeImageMime(opts.imageMime);
     const ext = mime.includes("png") ? "png" : "jpg";
     parts.push(
       `--${boundary}\r\n` +
@@ -152,6 +157,13 @@ async function send(opts) {
 
 function doRequest(body, boundary) {
   return new Promise((resolve) => {
+    let settled = false;
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    }
+
     const req = https.request(
       {
         hostname: "api.pushover.net",
@@ -166,24 +178,34 @@ function doRequest(body, boundary) {
       },
       (res) => {
         let data = "";
-        res.on("data", (chunk) => (data += chunk));
+        let total = 0;
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          total += Buffer.byteLength(chunk, "utf8");
+          if (total > 64 * 1024) {
+            req.destroy(new Error("Pushover response too large"));
+            return;
+          }
+          data += chunk;
+        });
         res.on("end", () => {
           // Handle 429 rate limit
           if (res.statusCode === 429) {
-            backoffUntil = Date.now() + 60_000;
-            resolve({ success: false, errors: ["Rate limited by Pushover"] });
+            const reset = Number(res.headers["x-limit-app-reset"]);
+            backoffUntil = Number.isFinite(reset) ? Math.max(Date.now() + 60_000, reset * 1000) : Date.now() + 60_000;
+            finish({ success: false, errors: ["Rate limited by Pushover"] });
             return;
           }
           try {
             const json = JSON.parse(data);
             if (json.status === 1) {
-              resolve({ success: true, receipt: json.receipt });
+              finish({ success: true, receipt: json.receipt });
             } else {
               console.error("[Notify] Pushover error:", json.errors);
-              resolve({ success: false, errors: json.errors });
+              finish({ success: false, errors: json.errors });
             }
           } catch {
-            resolve({ success: false, errors: [`Parse error: ${data.slice(0, 200)}`], _retryable: true });
+            finish({ success: false, errors: [`Parse error: ${data.slice(0, 200)}`], _retryable: true });
           }
         });
       }
@@ -191,7 +213,7 @@ function doRequest(body, boundary) {
 
     req.on("error", (err) => {
       console.error("[Notify] Pushover request failed:", err.message);
-      resolve({ success: false, errors: [err.message], _retryable: true });
+      finish({ success: false, errors: [err.message], _retryable: true });
     });
 
     req.on("timeout", () => {
@@ -201,6 +223,12 @@ function doRequest(body, boundary) {
     req.write(body);
     req.end();
   });
+}
+
+function sanitizeImageMime(value) {
+  const mime = String(value || "image/jpeg").toLowerCase();
+  if (mime === "image/png" || mime === "image/jpeg" || mime === "image/jpg") return mime === "image/jpg" ? "image/jpeg" : mime;
+  return "image/jpeg";
 }
 
 // ---------------------------------------------------------------------------

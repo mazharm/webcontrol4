@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import {
   makeStyles,
   tokens,
@@ -109,6 +109,13 @@ export function ControllerPicker() {
   const [selectedCN, setSelectedCN] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [discovering, setDiscovering] = useState(true);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const selectController = useCallback(async (ctrl: Controller & { localIP?: string }) => {
     setLoading(true);
@@ -131,11 +138,14 @@ export function ControllerPicker() {
         accountToken: auth.accountToken,
         controllerCommonName: ctrl.commonName,
       });
+      if (!mountedRef.current) return;
       dispatch({ type: "SET_DIRECTOR", payload: { ip, token } });
     } catch (err) {
-      dispatch({ type: "SET_ERROR", payload: err instanceof Error ? err.message : "Connection failed" });
+      if (mountedRef.current) {
+        dispatch({ type: "SET_ERROR", payload: err instanceof Error ? err.message : "Connection failed" });
+      }
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }, [auth.accountToken, dispatch]);
 

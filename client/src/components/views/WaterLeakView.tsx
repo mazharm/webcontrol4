@@ -217,12 +217,17 @@ export function WaterLeakView() {
   }, [floorTree]);
 
   useEffect(() => {
+    let active = true;
     getSettings()
       .then((s) => {
+        if (!active) return;
         setSettings(s);
         setRooms(s.goveeSensorRooms || {});
       })
       .catch(() => {});
+    return () => {
+      active = false;
+    };
   }, []);
 
   const handleRoomChange = useCallback(
@@ -233,7 +238,7 @@ export function WaterLeakView() {
       try {
         await saveGoveeSensorRooms(updated);
       } catch {
-        setRooms(prev);
+        setRooms((current) => (current === updated ? prev : current));
       }
     },
     [rooms]

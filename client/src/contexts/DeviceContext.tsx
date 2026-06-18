@@ -138,13 +138,12 @@ function deviceReducer(state: DeviceContextState, action: DeviceAction): DeviceC
     case "UPDATE_DEVICE": {
       const newDevices = new Map(state.devices);
       const existing = newDevices.get(action.payload.id);
-      if (existing) {
-        newDevices.set(action.payload.id, {
-          ...existing,
-          state: { ...existing.state, ...action.payload.state } as UnifiedDevice["state"],
-          lastUpdated: Date.now(),
-        });
-      }
+      if (!existing) return state;
+      newDevices.set(action.payload.id, {
+        ...existing,
+        state: { ...existing.state, ...action.payload.state } as UnifiedDevice["state"],
+        lastUpdated: Date.now(),
+      });
       return { ...state, devices: newDevices };
     }
     case "UPDATE_DEVICE_VAR":

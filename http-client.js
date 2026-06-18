@@ -2,6 +2,11 @@ const http = require("http");
 const https = require("https");
 const net = require("net");
 
+const MAX_REDIRECTS = 5;
+const DEFAULT_TIMEOUT_MS = 30000;
+const DEFAULT_MAX_RESPONSE_SIZE = 10 * 1024 * 1024;
+const REDIRECT_STATUSES = [301, 302, 303, 307, 308];
+
 function isPrivateIPv4(ip) {
   const parts = ip.split(".");
   if (
@@ -74,22 +79,51 @@ function filterRedirectHeaders(headers, fromUrl, toUrl) {
   return filtered;
 }
 
+function validateHttpUrl(parsed) {
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Unsupported protocol: ${parsed.protocol}`);
+  }
+}
+
+function shouldBlockRedirect(initialIsPrivate, redirectUrl) {
+  return Boolean(initialIsPrivate) !== isPrivateOrLocalHost(redirectUrl.hostname);
+}
+
+function removeHeader(headers, headerName) {
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === headerName) delete headers[key];
+  }
+}
+
+function buildRedirectOptions(options, headers, parsed, redirectUrl, statusCode) {
+  const nextHeaders = filterRedirectHeaders(headers, parsed, redirectUrl);
+  const nextOptions = { ...options, headers: nextHeaders };
+  const method = String(options.method || "GET").toUpperCase();
+  if ([301, 302, 303].includes(statusCode) && method !== "GET" && method !== "HEAD") {
+    nextOptions.method = "GET";
+    delete nextOptions.body;
+    removeHeader(nextHeaders, "content-length");
+    removeHeader(nextHeaders, "content-type");
+  }
+  return nextOptions;
+}
+
 function requestText(url, options = {}, redirectCount = 0) {
-  // Track whether the initial request targeted a private host.
-  // Only enforce the SSRF redirect guard for requests that started on
-  // private/local networks — external API calls (Anthropic, C4 cloud, etc.)
-  // must be allowed to follow redirects to other external hosts.
+  // Track whether the initial request targeted a private host. Redirects may
+  // follow within the same private/public trust boundary, but not across it.
   if (redirectCount === 0) {
     const initialParsed = new URL(url);
+    validateHttpUrl(initialParsed);
     options = { ...options, _initialIsPrivate: isPrivateOrLocalHost(initialParsed.hostname) };
   }
 
   return new Promise((resolve, reject) => {
-    if (redirectCount > 5) {
+    if (redirectCount > MAX_REDIRECTS) {
       return reject(new Error("Too many redirects"));
     }
 
     const parsed = new URL(url);
+    validateHttpUrl(parsed);
     const headers = { ...(options.headers || {}) };
     const bodyBuf =
       typeof options.body === "string" || Buffer.isBuffer(options.body)
@@ -104,7 +138,7 @@ function requestText(url, options = {}, redirectCount = 0) {
     const reqOptions = {
       method: options.method || "GET",
       headers,
-      timeout: options.timeout || 30000,
+      timeout: options.timeout ?? DEFAULT_TIMEOUT_MS,
       rejectUnauthorized: parsed.protocol === "https:" ? !isPrivateOrLocalHost(parsed.hostname) : undefined,
     };
     if (options.agent !== undefined) reqOptions.agent = options.agent;
@@ -112,28 +146,33 @@ function requestText(url, options = {}, redirectCount = 0) {
       parsed,
       reqOptions,
       (res) => {
-        if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
-          const redirectUrl = new URL(res.headers.location, parsed);
-          // Prevent SSRF: only block redirects to non-private hosts when the
-          // initial request targeted a private/local host
-          if (options._initialIsPrivate && !isPrivateOrLocalHost(redirectUrl.hostname)) {
+        if (REDIRECT_STATUSES.includes(res.statusCode) && res.headers.location) {
+          let redirectUrl;
+          try {
+            redirectUrl = new URL(res.headers.location, parsed);
+            validateHttpUrl(redirectUrl);
+          } catch (err) {
             res.resume();
-            return resolve({ statusCode: 403, body: "Redirect to non-private host blocked" });
+            return reject(err);
+          }
+          // Prevent SSRF / credential exfiltration across trust boundaries:
+          // local/private requests may only redirect to local/private targets,
+          // and public requests may not be bounced into private networks.
+          if (shouldBlockRedirect(options._initialIsPrivate, redirectUrl)) {
+            res.resume();
+            return resolve({ statusCode: 403, body: "Redirect across private/public boundary blocked" });
           }
           res.resume();
           return resolve(
             requestText(
               redirectUrl.href,
-              {
-                ...options,
-                headers: filterRedirectHeaders(headers, parsed, redirectUrl),
-              },
+              buildRedirectOptions(options, headers, parsed, redirectUrl, res.statusCode),
               redirectCount + 1
             )
           );
         }
 
-        const maxResponseSize = options.maxResponseSize || 10 * 1024 * 1024; // 10 MB default
+        const maxResponseSize = options.maxResponseSize ?? DEFAULT_MAX_RESPONSE_SIZE;
         let body = "";
         let totalSize = 0;
         let destroyed = false;
@@ -176,12 +215,19 @@ async function requestJson(url, options = {}) {
 }
 
 function requestBinary(url, options = {}, redirectCount = 0) {
+  if (redirectCount === 0) {
+    const initialParsed = new URL(url);
+    validateHttpUrl(initialParsed);
+    options = { ...options, _initialIsPrivate: isPrivateOrLocalHost(initialParsed.hostname) };
+  }
+
   return new Promise((resolve, reject) => {
-    if (redirectCount > 5) {
+    if (redirectCount > MAX_REDIRECTS) {
       return reject(new Error("Too many redirects"));
     }
 
     const parsed = new URL(url);
+    validateHttpUrl(parsed);
     const headers = { ...(options.headers || {}) };
     const bodyBuf =
       typeof options.body === "string" || Buffer.isBuffer(options.body)
@@ -196,7 +242,7 @@ function requestBinary(url, options = {}, redirectCount = 0) {
     const reqOptions = {
       method: options.method || "GET",
       headers,
-      timeout: options.timeout || 30000,
+      timeout: options.timeout ?? DEFAULT_TIMEOUT_MS,
       rejectUnauthorized: parsed.protocol === "https:" ? !isPrivateOrLocalHost(parsed.hostname) : undefined,
     };
     if (options.agent !== undefined) reqOptions.agent = options.agent;
@@ -204,9 +250,16 @@ function requestBinary(url, options = {}, redirectCount = 0) {
       parsed,
       reqOptions,
       (res) => {
-        if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
-          const redirectUrl = new URL(res.headers.location, parsed);
-          if (!isPrivateOrLocalHost(redirectUrl.hostname)) {
+        if (REDIRECT_STATUSES.includes(res.statusCode) && res.headers.location) {
+          let redirectUrl;
+          try {
+            redirectUrl = new URL(res.headers.location, parsed);
+            validateHttpUrl(redirectUrl);
+          } catch (err) {
+            res.resume();
+            return reject(err);
+          }
+          if (shouldBlockRedirect(options._initialIsPrivate, redirectUrl)) {
             res.resume();
             return resolve({ statusCode: 403, body: Buffer.alloc(0) });
           }
@@ -214,16 +267,13 @@ function requestBinary(url, options = {}, redirectCount = 0) {
           return resolve(
             requestBinary(
               redirectUrl.href,
-              {
-                ...options,
-                headers: filterRedirectHeaders(headers, parsed, redirectUrl),
-              },
+              buildRedirectOptions(options, headers, parsed, redirectUrl, res.statusCode),
               redirectCount + 1
             )
           );
         }
 
-        const maxResponseSize = options.maxResponseSize || 10 * 1024 * 1024;
+        const maxResponseSize = options.maxResponseSize ?? DEFAULT_MAX_RESPONSE_SIZE;
         const chunks = [];
         let totalSize = 0;
         let destroyed = false;

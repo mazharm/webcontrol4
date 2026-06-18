@@ -43,10 +43,33 @@ function init({ ring, trending, handleLlmChat, getHistoryStore, getRoutines }) {
  */
 async function handleRpcRequest(payload, topic) {
   const homeId = mqttClient.getHomeId();
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    console.warn("[mqtt-rpc] Invalid RPC request: payload must be an object");
+    return;
+  }
+
+  // Opt-in signature verification (see command-handler). Timestamp replay
+  // protection below always applies; broker access is already authenticated.
+  if (mqttClient.isSigningEnabled()) {
+    const auth = mqttClient.verifySignedPayload(payload, topic);
+    if (!auth.ok) {
+      console.warn(`[mqtt-rpc] Rejected unauthenticated RPC (${auth.reason})`);
+      return;
+    }
+  }
+
   const { id, method, params, ts } = payload || {};
 
   if (!id || !method) {
     console.warn("[mqtt-rpc] Invalid RPC request: missing id or method");
+    return;
+  }
+  if (!mqttClient.isSafeTopicSegment(String(id))) {
+    console.warn("[mqtt-rpc] Invalid RPC request: unsafe id");
+    return;
+  }
+  if (typeof method !== "string" || method.length > 64) {
+    console.warn("[mqtt-rpc] Invalid RPC request: unsafe method");
     return;
   }
 
@@ -80,6 +103,7 @@ async function handleRpcRequest(payload, topic) {
   const timer = setTimeout(() => {
     respond({ id, error: "RPC timeout — request took too long" });
   }, timeoutMs);
+  if (timer.unref) timer.unref();
 
   try {
     let result;
@@ -116,15 +140,16 @@ async function handleRpcRequest(payload, topic) {
 
     // Check response size (skip for snapshots — they're inherently large)
     const responseStr = JSON.stringify({ id, result });
-    if (method !== "getSnapshot" && responseStr.length > MAX_RESPONSE_BYTES) {
+    const responseBytes = Buffer.byteLength(responseStr, "utf8");
+    if (method !== "getSnapshot" && responseBytes > MAX_RESPONSE_BYTES) {
       respond({
         id,
-        error: `Response too large (${Math.round(responseStr.length / 1024)}KB > ${MAX_RESPONSE_BYTES / 1024}KB limit)`,
+        error: `Response too large (${Math.round(responseBytes / 1024)}KB > ${MAX_RESPONSE_BYTES / 1024}KB limit)`,
       });
       return;
     }
-    if (responseStr.length > MAX_RESPONSE_BYTES) {
-      console.warn(`[mqtt-rpc] Large response for ${method}: ${Math.round(responseStr.length / 1024)}KB`);
+    if (responseBytes > MAX_RESPONSE_BYTES) {
+      console.warn(`[mqtt-rpc] Large response for ${method}: ${Math.round(responseBytes / 1024)}KB`);
     }
 
     respond({ id, result });
@@ -145,7 +170,7 @@ async function handleGetSnapshot(params) {
 
   // Ring camera IDs are numbers
   const numericId = Number(cameraId);
-  if (!Number.isFinite(numericId)) throw new Error(`Invalid cameraId: ${cameraId}`);
+  if (!/^\d+$/.test(String(cameraId)) || !Number.isSafeInteger(numericId)) throw new Error(`Invalid cameraId: ${cameraId}`);
 
   const buffer = await ringModule.getCameraSnapshot(numericId);
   if (!buffer) throw new Error(`No snapshot available for camera ${cameraId}`);
@@ -169,15 +194,20 @@ async function handleGetSnapshot(params) {
 async function handleGetTrending(params) {
   if (!trendingEngine) throw new Error("Trending engine not available");
   const { deviceId, variable, days } = params || {};
-  if (!deviceId) throw new Error("deviceId is required");
+  const itemId = parseDeviceId(deviceId);
+  const safeDays = clampInteger(days, 1, 90, 14);
 
   if (variable) {
-    const trend = trendingEngine.getDeviceTrend(Number(deviceId), variable, days || 14);
-    return { deviceId, variable, points: trend, ts: new Date().toISOString() };
+    if (typeof variable !== "string" || variable.length > 64 || !/^[A-Za-z0-9_:-]+$/.test(variable)) {
+      throw new Error("Invalid variable");
+    }
+    const trend = trendingEngine.getDeviceTrend(itemId, variable, safeDays);
+    return { deviceId: itemId, variable, points: trend, ts: new Date().toISOString() };
   }
 
-  const history = trendingEngine.getDeviceHistory(Number(deviceId), (days || 1) * 24);
-  return { deviceId, events: history, ts: new Date().toISOString() };
+  const historyDays = clampInteger(days, 1, 30, 1);
+  const history = trendingEngine.getDeviceHistory(itemId, historyDays * 24);
+  return { deviceId: itemId, events: history, ts: new Date().toISOString() };
 }
 
 /**
@@ -186,11 +216,13 @@ async function handleGetTrending(params) {
 async function handleGetHistory(params) {
   if (!trendingEngine) throw new Error("Trending engine not available");
   const { deviceId, hours, limit } = params || {};
-  if (!deviceId) throw new Error("deviceId is required");
+  const itemId = parseDeviceId(deviceId);
 
-  const events = trendingEngine.getDeviceHistory(Number(deviceId), hours || 24);
-  const limited = limit ? events.slice(0, limit) : events;
-  return { deviceId, events: limited, ts: new Date().toISOString() };
+  const safeHours = clampInteger(hours, 1, 168, 24);
+  const safeLimit = limit === undefined ? null : clampInteger(limit, 1, 1000, 1000);
+  const events = trendingEngine.getDeviceHistory(itemId, safeHours);
+  const limited = safeLimit ? events.slice(0, safeLimit) : events;
+  return { deviceId: itemId, events: limited, ts: new Date().toISOString() };
 }
 
 /**
@@ -199,10 +231,10 @@ async function handleGetHistory(params) {
 async function handleGetDailySummary(params) {
   if (!trendingEngine) throw new Error("Trending engine not available");
   const { deviceId, days } = params || {};
-  if (!deviceId) throw new Error("deviceId is required");
+  const itemId = parseDeviceId(deviceId);
 
-  const summary = trendingEngine.getDailySummary(Number(deviceId), days || 7);
-  return { deviceId, summary, ts: new Date().toISOString() };
+  const summary = trendingEngine.getDailySummary(itemId, clampInteger(days, 1, 90, 7));
+  return { deviceId: itemId, summary, ts: new Date().toISOString() };
 }
 
 /**
@@ -234,12 +266,33 @@ function handleGetRoutines() {
 async function handleLlmChat(params) {
   if (!llmChatFn) throw new Error("LLM chat not available");
   const { message, messages, context, mode } = params || {};
+  if (message !== undefined && typeof message !== "string") throw new Error("message must be a string");
+  if (messages !== undefined && (!Array.isArray(messages) || messages.length > 50)) {
+    throw new Error("messages must be an array with at most 50 entries");
+  }
+  if (mode !== undefined && (typeof mode !== "string" || mode.length > 32)) throw new Error("invalid mode");
   // Size limit on LLM input to prevent API credit abuse
   const inputStr = JSON.stringify({ message, messages, context });
   if (inputStr.length > 10000) {
     throw new Error(`LLM input too large (${inputStr.length} chars, max 10000)`);
   }
   return llmChatFn({ message, messages, context, mode });
+}
+
+function parseDeviceId(deviceId) {
+  if (deviceId === undefined || deviceId === null || deviceId === "") throw new Error("deviceId is required");
+  const value = Number(deviceId);
+  if (!/^\d+$/.test(String(deviceId)) || !Number.isSafeInteger(value)) {
+    throw new Error(`Invalid deviceId: ${deviceId}`);
+  }
+  return value;
+}
+
+function clampInteger(value, min, max, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(num)));
 }
 
 module.exports = { init };

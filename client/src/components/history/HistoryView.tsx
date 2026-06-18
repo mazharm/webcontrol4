@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   makeStyles,
   tokens,
@@ -51,6 +51,7 @@ export function HistoryView() {
   const [data, setData] = useState<HistoryPoint[]>([]);
   const [floorData, setFloorData] = useState<FloorHistorySeries[]>([]);
   const [loading, setLoading] = useState(false);
+  const requestSeqRef = useRef(0);
 
   const lights = useDevicesByType("light");
   const thermostats = useDevicesByType("thermostat");
@@ -66,13 +67,15 @@ export function HistoryView() {
   }, [tab, lights, thermostats, floors, selectedId]);
 
   const fetchData = useCallback(async () => {
+    const requestSeq = ++requestSeqRef.current;
+    const isCurrentRequest = () => requestSeq === requestSeqRef.current;
     const remote = isRemoteMode();
     const fetchHistory = remote ? getAppHistory : getHistory;
 
     if (tab === "floor") {
       const cacheKey = `history:floor:__all__`;
       const cached = getCached<FloorHistorySeries[]>(cacheKey);
-      if (cached) { setFloorData(cached); setData([]); }
+      if (cached && isCurrentRequest()) { setFloorData(cached); setData([]); }
       setLoading(!cached);
       try {
         const result = await Promise.all(
@@ -81,39 +84,49 @@ export function HistoryView() {
             points: await fetchHistory("floor", floor.name),
           })),
         );
+        if (!isCurrentRequest()) return;
         setFloorData(result);
         setData([]);
         setCache(cacheKey, result);
       } catch {
-        if (!cached) { setData([]); setFloorData([]); }
+        if (!cached && isCurrentRequest()) { setData([]); setFloorData([]); }
       } finally {
-        setLoading(false);
+        if (isCurrentRequest()) setLoading(false);
       }
     } else {
       if (!selectedId) {
-        setData([]);
-        setFloorData([]);
+        if (isCurrentRequest()) {
+          setData([]);
+          setFloorData([]);
+          setLoading(false);
+        }
         return;
       }
       const type = tab === "lights" ? "light" : "thermo";
       const cacheKey = `history:${type}:${selectedId}`;
       const cached = getCached<HistoryPoint[]>(cacheKey);
-      if (cached) { setData(cached); setFloorData([]); }
+      if (cached && isCurrentRequest()) { setData(cached); setFloorData([]); }
       setLoading(!cached);
       try {
         const result = await fetchHistory(type, selectedId);
+        if (!isCurrentRequest()) return;
         setData(result);
         setFloorData([]);
         setCache(cacheKey, result);
       } catch {
-        if (!cached) { setData([]); setFloorData([]); }
+        if (!cached && isCurrentRequest()) { setData([]); setFloorData([]); }
       } finally {
-        setLoading(false);
+        if (isCurrentRequest()) setLoading(false);
       }
     }
   }, [floors, selectedId, tab]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => {
+    void fetchData();
+    return () => {
+      requestSeqRef.current++;
+    };
+  }, [fetchData]);
 
   const onTabChange = (_: unknown, data: { value: unknown }) => {
     setTab(data.value as HistoryTab);

@@ -29,7 +29,11 @@ async function init(opts) {
   const brokerUrl = opts.brokerUrl || process.env.MQTT_BROKER_URL;
   const username = opts.username || process.env.MQTT_USERNAME;
   const password = opts.password || process.env.MQTT_PASSWORD;
-  const homeId = opts.homeId || process.env.MQTT_HOME_ID || "home1";
+  const homeId = mqttClient.safeTopicSegment(opts.homeId || process.env.MQTT_HOME_ID || "home1", "homeId");
+  const messageSecret = opts.messageSecret
+    || process.env.MQTT_MESSAGE_SECRET
+    || process.env.MQTT_COMMAND_SECRET
+    || "";
 
   if (!brokerUrl) {
     throw new Error("MQTT_BROKER_URL is required");
@@ -38,9 +42,9 @@ async function init(opts) {
     throw new Error("MQTT_USERNAME and MQTT_PASSWORD are required");
   }
 
-  console.log(`[mqtt] Connecting to ${brokerUrl} (home: ${homeId})...`);
+  console.log(`[mqtt] Connecting to ${redactBrokerUrl(brokerUrl)} (home: ${homeId})...`);
 
-  await mqttClient.connect({ brokerUrl, username, password, homeId });
+  await mqttClient.connect({ brokerUrl, username, password, homeId, messageSecret });
 
   // Initialize sub-modules
   statePublisher.init({
@@ -77,6 +81,17 @@ async function init(opts) {
       await mqttClient.disconnect();
     },
   };
+}
+
+function redactBrokerUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.username) url.username = "redacted";
+    if (url.password) url.password = "redacted";
+    return url.toString();
+  } catch {
+    return String(value).replace(/\/\/[^@/]+@/, "//redacted@");
+  }
 }
 
 module.exports = { init };
