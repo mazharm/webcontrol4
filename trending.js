@@ -445,7 +445,7 @@ class TrendingEngine {
       try {
         const now = new Date();
         const midnight = new Date(now);
-        midnight.setHours(24, 0, 5, 0); // 5 seconds past midnight
+        midnight.setUTCHours(24, 0, 5, 0); // Stored event dates use UTC.
         let msUntilMidnight = midnight.getTime() - now.getTime();
         // Defensive clamp against clock skew / DST jumps.
         if (!Number.isFinite(msUntilMidnight) || msUntilMidnight < 0 || msUntilMidnight > 26 * 3600_000) {
@@ -487,7 +487,7 @@ class TrendingEngine {
     this.flush();
 
     const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
     const dateStr = yesterday.toISOString().slice(0, 10);
 
     this._logger("trending-rollup", dateStr);

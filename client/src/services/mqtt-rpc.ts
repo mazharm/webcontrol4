@@ -32,15 +32,17 @@ export function rpcCall<T = unknown>(method: string, params: Record<string, unkn
     }, effectiveTimeout);
 
     const unsubscribe = subscribe(responseTopic, (payload: unknown) => {
-      clearTimeout(timeout);
-      unsubscribe();
-
       if (!payload || typeof payload !== "object") {
+        clearTimeout(timeout);
+        unsubscribe();
         reject(new Error(`RPC response malformed (method: ${method})`));
         return;
       }
       const response = payload as { id: string; result?: T; error?: string };
       if (response.id !== requestId) return;
+
+      clearTimeout(timeout);
+      unsubscribe();
       if (response.error) {
         reject(new Error(response.error));
       } else {
@@ -48,7 +50,12 @@ export function rpcCall<T = unknown>(method: string, params: Record<string, unkn
       }
     });
 
-    const published = publish(requestTopic, { id: requestId, method, params });
+    const published = publish(requestTopic, {
+      id: requestId,
+      method,
+      params,
+      ts: new Date().toISOString(),
+    });
     if (!published) {
       clearTimeout(timeout);
       unsubscribe();

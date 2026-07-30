@@ -29,7 +29,6 @@ function sanitizeForLog(value, key = "", seen = new WeakSet()) {
   if (typeof value === "bigint") return value.toString();
   if (!value || typeof value !== "object") return value;
   if (seen.has(value)) return "[Circular]";
-  seen.add(value);
   if (value instanceof Error) {
     return {
       name: value.name,
@@ -37,12 +36,20 @@ function sanitizeForLog(value, key = "", seen = new WeakSet()) {
       stack: value.stack,
     };
   }
-  if (Array.isArray(value)) return value.map((item) => sanitizeForLog(item, "", seen));
-  const out = {};
-  for (const [childKey, childValue] of Object.entries(value)) {
-    out[childKey] = sanitizeForLog(childValue, childKey, seen);
+  // `seen` tracks the current recursion path only. Without the matching
+  // delete, a value referenced twice in sibling branches (shared, not
+  // circular) was reported as "[Circular]" and dropped from the record.
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) return value.map((item) => sanitizeForLog(item, "", seen));
+    const out = {};
+    for (const [childKey, childValue] of Object.entries(value)) {
+      out[childKey] = sanitizeForLog(childValue, childKey, seen);
+    }
+    return out;
+  } finally {
+    seen.delete(value);
   }
-  return out;
 }
 
 function safeStringify(obj) {

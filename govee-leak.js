@@ -327,6 +327,7 @@ class GoveeLeak {
   }
 
   async _pollLeakStatusInner() {
+    let reachedApi = false;
     for (const [deviceId, state] of this.devices) {
       try {
         const res = await this._apiRequest(
@@ -334,6 +335,7 @@ class GoveeLeak {
           "https://app2.govee.com/leak/rest/device/v1/warnMessage",
           { device: deviceId, sku: state.sku }
         );
+        reachedApi = true;
 
         // Check rate limit headers
         const remaining = res.headers?.["x-ratelimit-remaining"];
@@ -389,8 +391,11 @@ class GoveeLeak {
       }
     }
 
-    // Reset poll interval on success
-    if (this._currentPollInterval > this.pollInterval) {
+    // Restore the normal cadence only after a cycle that actually reached the
+    // API. Resetting unconditionally cancelled the rate-limit backoff whenever
+    // every request failed (e.g. sustained HTTP 429), sending us straight back
+    // to hammering Govee at the fast interval.
+    if (reachedApi && this._currentPollInterval > this.pollInterval) {
       this._currentPollInterval = this.pollInterval;
       this._restartPollTimer();
     }

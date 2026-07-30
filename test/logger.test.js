@@ -77,3 +77,59 @@ test("child() inherits and extends bindings", () => {
   assert.equal(rec.connectionId, "a");
   assert.equal(rec.step, "reconnect");
 });
+
+test("a value shared between sibling fields is not treated as circular", () => {
+  const { createLogger } = freshLogger({ LOG_LEVEL: "info", LOG_FORMAT: "json" });
+  const log = createLogger("mod");
+  const shared = { itemId: 7 };
+  const out = captureStdout(() => log.info("evt", { before: shared, after: shared }));
+  const rec = JSON.parse(out.trim().split("\n").filter(Boolean).pop());
+  assert.deepEqual(rec.before, { itemId: 7 });
+  assert.deepEqual(rec.after, { itemId: 7 }, "sibling reference must still be serialized");
+});
+
+test("a repeated element in an array is fully serialized", () => {
+  const { createLogger } = freshLogger({ LOG_LEVEL: "info", LOG_FORMAT: "json" });
+  const log = createLogger("mod");
+  const device = { name: "Kitchen" };
+  const out = captureStdout(() => log.info("evt", { devices: [device, device] }));
+  const rec = JSON.parse(out.trim().split("\n").filter(Boolean).pop());
+  assert.deepEqual(rec.devices, [{ name: "Kitchen" }, { name: "Kitchen" }]);
+});
+
+test("genuine cycles are still broken with [Circular]", () => {
+  const { createLogger } = freshLogger({ LOG_LEVEL: "info", LOG_FORMAT: "json" });
+  const log = createLogger("mod");
+  const node = { name: "root" };
+  node.self = node;
+  const out = captureStdout(() => log.info("evt", { node }));
+  const rec = JSON.parse(out.trim().split("\n").filter(Boolean).pop());
+  assert.equal(rec.node.name, "root");
+  assert.equal(rec.node.self, "[Circular]");
+});
+
+test("mutual cycles are broken without losing shared siblings", () => {
+  const { createLogger } = freshLogger({ LOG_LEVEL: "info", LOG_FORMAT: "json" });
+  const log = createLogger("mod");
+  const a = { id: "a" };
+  const b = { id: "b", a };
+  a.b = b;
+  const out = captureStdout(() => log.info("evt", { a, alsoB: b }));
+  const rec = JSON.parse(out.trim().split("\n").filter(Boolean).pop());
+  assert.equal(rec.a.id, "a");
+  assert.equal(rec.a.b.id, "b");
+  assert.equal(rec.a.b.a, "[Circular]");
+  assert.equal(rec.alsoB.id, "b");
+});
+
+test("sensitive keys are still redacted inside shared objects", () => {
+  const { createLogger } = freshLogger({ LOG_LEVEL: "info", LOG_FORMAT: "json" });
+  const log = createLogger("mod");
+  const creds = { user: "bob", password: "hunter2", refresh_token: "abc" };
+  const out = captureStdout(() => log.info("evt", { first: creds, second: creds }));
+  const rec = JSON.parse(out.trim().split("\n").filter(Boolean).pop());
+  assert.equal(rec.first.password, "[Redacted]");
+  assert.equal(rec.second.password, "[Redacted]");
+  assert.equal(rec.second.refresh_token, "[Redacted]");
+  assert.equal(rec.second.user, "bob");
+});

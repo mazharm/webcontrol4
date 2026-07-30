@@ -9,7 +9,7 @@
     "cert:issue": "node issue-cert.js",
     "mcp:stdio": "node mcp-stdio.js",
     "mcp:http": "node mcp-http.js",
-    "test": "node --test 'test/**/*.test.js'"
+    "test": "node --test"
   },
   "keywords": [
     "control4",

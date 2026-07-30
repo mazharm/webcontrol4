@@ -55,6 +55,15 @@ function deviceToMqttPayload(device) {
 }
 
 /**
+ * Truthiness check for Control4 LIGHT_STATE values, which arrive as either
+ * numbers or strings depending on the Director firmware.
+ */
+function isLightOnValue(value) {
+  return value === 1 || value === "1" || value === true
+    || value === "true" || value === "on" || value === "On";
+}
+
+/**
  * Build the typed device state from raw Control4 variables.
  */
 function buildDeviceState(device) {
@@ -65,13 +74,18 @@ function buildDeviceState(device) {
     case "light": {
       const rawLevel = parseInt(vars.LIGHT_LEVEL, 10);
       const level = Number.isFinite(rawLevel) ? Math.max(0, Math.min(100, rawLevel)) : 0;
-      // Derive on from level – consistent with SSE-path logic in DeviceContext
-      return { type: "light", on: level > 0, level };
+      // Non-dimming switches report LIGHT_STATE without LIGHT_LEVEL, so level
+      // alone is not enough. Matches state-machine._isLightOn and the local
+      // REST/SSE mappings.
+      return { type: "light", on: level > 0 || isLightOnValue(vars.LIGHT_STATE), level };
     }
-    case "thermostat":
+    case "thermostat": {
+      const rawTempF = parseFloat(vars.TEMPERATURE_F);
       return {
         type: "thermostat",
-        currentTempF: parseFloat(vars.TEMPERATURE_F) || 0,
+        // null (not 0) when the controller has no reading, so the UI renders
+        // "--" instead of a bogus 0°F.
+        currentTempF: Number.isFinite(rawTempF) ? rawTempF : null,
         heatSetpointF: parseFloat(vars.HEAT_SETPOINT_F) || 68,
         coolSetpointF: parseFloat(vars.COOL_SETPOINT_F) || 74,
         hvacMode: vars.HVAC_MODE || "Off",
@@ -79,6 +93,7 @@ function buildDeviceState(device) {
         humidity: parseFloat(vars.HUMIDITY) || 0,
         fanMode: vars.FAN_MODE || "",
       };
+    }
     case "lock":
       return {
         type: "lock",

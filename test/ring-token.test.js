@@ -27,9 +27,11 @@ test("ring token file is written with mode 0600", () => {
   const file = path.join(tmpdir, "data", "ring-token");
   try {
     persistToken(file, "abc123");
-    const stat = fs.statSync(file);
-    // mode & 0o777 isolates the permission bits.
-    assert.equal(stat.mode & 0o777, 0o600, `expected 0600, got 0${(stat.mode & 0o777).toString(8)}`);
+    if (process.platform !== "win32") {
+      const stat = fs.statSync(file);
+      // mode & 0o777 isolates the permission bits.
+      assert.equal(stat.mode & 0o777, 0o600, `expected 0600, got 0${(stat.mode & 0o777).toString(8)}`);
+    }
     assert.equal(fs.readFileSync(file, "utf8"), "abc123");
   } finally {
     fs.rmSync(tmpdir, { recursive: true, force: true });
@@ -43,9 +45,11 @@ test("ring token directory is created with mode 0700 on first write", () => {
     persistToken(file, "xyz");
     const dirStat = fs.statSync(path.dirname(file));
     assert.ok(dirStat.isDirectory());
-    // Mode check best-effort: umask may apply on older Node versions.
-    // We only assert the world bit is not set.
-    assert.equal(dirStat.mode & 0o007, 0, `world bits set: 0${(dirStat.mode & 0o777).toString(8)}`);
+    if (process.platform !== "win32") {
+      // Mode check best-effort: umask may apply on older Node versions.
+      // We only assert the world bit is not set.
+      assert.equal(dirStat.mode & 0o007, 0, `world bits set: 0${(dirStat.mode & 0o777).toString(8)}`);
+    }
   } finally {
     fs.rmSync(tmpdir, { recursive: true, force: true });
   }
