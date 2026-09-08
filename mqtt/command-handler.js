@@ -7,6 +7,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const mqttClient = require("./mqtt-client");
 
 let executeScheduledCommand = null;
@@ -14,6 +15,9 @@ let executeRoutineSteps = null;
 let ringModule = null;
 let routinesFile = null;
 let stateMachine = null;
+const commandReplayCache = new Map();
+const COMMAND_REPLAY_TTL_MS = 60_000;
+const COMMAND_REPLAY_MAX = 2000;
 
 /**
  * Initialize the command handler.
@@ -79,6 +83,10 @@ async function handleCommand(payload, topic) {
     console.warn(`[mqtt-cmd] Rejected stale command (age=${Math.round(age / 1000)}s): ${topic}`);
     return;
   }
+  if (isDuplicateCommand(topic, payload)) {
+    console.warn(`[mqtt-cmd] Ignoring duplicate QoS command: ${topic}`);
+    return;
+  }
 
   const remainder = topic.slice(prefix.length); // e.g. "control4/42/set" or "routines/morning/execute"
   const parts = remainder.split("/");
@@ -99,15 +107,45 @@ async function handleCommand(payload, topic) {
       const action = parts[2];
       validateTopicSegment(deviceId, "deviceId");
 
-      if (system === "control4" && action === "set") {
-        await handleControl4Command(deviceId, payload);
-      } else if (system === "ring" && action === "set") {
-        await handleRingCommand(deviceId, payload);
+      if (action === "set") {
+        await executeDeviceCommand(system, deviceId, payload);
       }
     }
   } catch (err) {
     console.error(`[mqtt-cmd] Command failed (${topic}):`, err.message);
   }
+}
+
+function isDuplicateCommand(topic, payload) {
+  const now = Date.now();
+  for (const [key, seenAt] of commandReplayCache) {
+    if (now - seenAt > COMMAND_REPLAY_TTL_MS || commandReplayCache.size > COMMAND_REPLAY_MAX) {
+      commandReplayCache.delete(key);
+    }
+  }
+  const digest = crypto
+    .createHash("sha256")
+    .update(`${topic}\n${JSON.stringify(payload)}`)
+    .digest("hex");
+  if (commandReplayCache.has(digest)) return true;
+  commandReplayCache.set(digest, now);
+  return false;
+}
+
+async function executeDeviceCommand(system, deviceId, payload) {
+  validateTopicSegment(String(deviceId), "deviceId");
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("command payload must be an object");
+  }
+  if (system === "control4") {
+    await handleControl4Command(String(deviceId), payload);
+    return;
+  }
+  if (system === "ring") {
+    await handleRingCommand(String(deviceId), payload);
+    return;
+  }
+  throw new Error(`Unsupported device system: ${system}`);
 }
 
 /**
@@ -123,64 +161,95 @@ async function handleControl4Command(deviceId, payload) {
     throw new Error(`Invalid Control4 device ID: ${deviceId}`);
   }
 
-  // Map MQTT command fields to Director commands.
-  // Apply state change optimistically BEFORE sending to Director so that
-  // SSE listeners (local web client) update instantly.
-  if (payload.level !== undefined) {
-    const level = Number(payload.level);
+  const deviceType = stateMachine?.getDeviceState(itemId)?.type || null;
+  const operation = resolveControl4Command(payload, deviceType);
+  await executeScheduledCommand(itemId, operation.command, operation.tParams);
+
+  console.log(`[mqtt-cmd] Control4 command executed: device=${itemId}, command=${operation.command}`);
+}
+
+function resolveControl4Command(payload, deviceType) {
+  const commandFields = [
+    "level", "on", "hvacMode", "heatSetpointF", "coolSetpointF",
+    "fanMode", "locked", "power", "activate", "volume",
+  ].filter((field) => payload[field] !== undefined);
+  if (commandFields.length !== 1) {
+    throw new Error("Control4 command must contain exactly one supported command field");
+  }
+
+  const field = commandFields[0];
+  const requireType = (expected) => {
+    if (deviceType && deviceType !== expected) {
+      throw new Error(`${field} is not valid for Control4 device type ${deviceType}`);
+    }
+  };
+
+  if (field === "level" || field === "on") {
+    requireType("light");
+    const level = field === "on" ? (payload.on ? 100 : 0) : Number(payload.level);
+    if (field === "on" && typeof payload.on !== "boolean") {
+      throw new Error(`Invalid on value: ${payload.on}`);
+    }
     if (!Number.isFinite(level) || level < 0 || level > 100) {
       throw new Error(`Invalid light level: ${payload.level}`);
     }
-    applyStateChange(itemId, "LIGHT_STATE", level > 0 ? "1" : "0");
-    applyStateChange(itemId, "LIGHT_LEVEL", String(level));
-    await executeScheduledCommand(itemId, "SET_LEVEL", { LEVEL: level });
+    return { command: "SET_LEVEL", tParams: { LEVEL: level } };
   }
-  if (payload.on !== undefined) {
-    if (typeof payload.on !== "boolean") {
-      throw new Error(`Invalid on value: ${payload.on}`);
-    }
-    const level = payload.on ? 100 : 0;
-    applyStateChange(itemId, "LIGHT_STATE", payload.on ? "1" : "0");
-    applyStateChange(itemId, "LIGHT_LEVEL", String(level));
-    await executeScheduledCommand(itemId, "SET_LEVEL", { LEVEL: level });
-  }
-  if (payload.hvacMode !== undefined) {
+
+  if (field === "hvacMode") {
+    requireType("thermostat");
     const allowedModes = ["Off", "Heat", "Cool", "Auto"];
     if (!allowedModes.includes(payload.hvacMode)) {
       throw new Error(`Invalid hvacMode: ${payload.hvacMode}`);
     }
-    applyStateChange(itemId, "HVAC_MODE", String(payload.hvacMode));
-    await executeScheduledCommand(itemId, "SET_MODE_HVAC", { MODE: payload.hvacMode });
-  }
-  if (payload.heatSetpointF !== undefined) {
-    const temp = Number(payload.heatSetpointF);
-    if (!Number.isFinite(temp) || temp < 32 || temp > 120) {
-      throw new Error(`Invalid heatSetpointF: ${payload.heatSetpointF}`);
-    }
-    applyStateChange(itemId, "HEAT_SETPOINT_F", String(temp));
-    await executeScheduledCommand(itemId, "SET_SETPOINT_HEAT", { FAHRENHEIT: temp });
-  }
-  if (payload.coolSetpointF !== undefined) {
-    const temp = Number(payload.coolSetpointF);
-    if (!Number.isFinite(temp) || temp < 32 || temp > 120) {
-      throw new Error(`Invalid coolSetpointF: ${payload.coolSetpointF}`);
-    }
-    applyStateChange(itemId, "COOL_SETPOINT_F", String(temp));
-    await executeScheduledCommand(itemId, "SET_SETPOINT_COOL", { FAHRENHEIT: temp });
-  }
-  if (payload.fanMode !== undefined) {
-    const allowedFanModes = ["Auto", "Low", "Medium", "High", "On", "Off"];
-    if (typeof payload.fanMode !== "string" || payload.fanMode.length > 20) {
-      throw new Error(`Invalid fanMode: ${payload.fanMode}`);
-    }
-    if (!allowedFanModes.includes(payload.fanMode)) {
-      throw new Error(`Invalid fanMode: "${payload.fanMode}". Allowed: ${allowedFanModes.join(", ")}`);
-    }
-    applyStateChange(itemId, "FAN_MODE", String(payload.fanMode));
-    await executeScheduledCommand(itemId, "SET_FAN_MODE", { MODE: payload.fanMode });
+    return { command: "SET_MODE_HVAC", tParams: { MODE: payload.hvacMode } };
   }
 
-  console.log(`[mqtt-cmd] Control4 command executed: device=${itemId}`);
+  if (field === "heatSetpointF" || field === "coolSetpointF") {
+    requireType("thermostat");
+    const temp = Number(payload[field]);
+    if (!Number.isFinite(temp) || temp < 32 || temp > 120) {
+      throw new Error(`Invalid ${field}: ${payload[field]}`);
+    }
+    return {
+      command: field === "heatSetpointF" ? "SET_SETPOINT_HEAT" : "SET_SETPOINT_COOL",
+      tParams: { FAHRENHEIT: temp },
+    };
+  }
+
+  if (field === "fanMode") {
+    requireType("thermostat");
+    const allowedFanModes = ["Auto", "Low", "Medium", "High", "On", "Off"];
+    if (typeof payload.fanMode !== "string" || !allowedFanModes.includes(payload.fanMode)) {
+      throw new Error(`Invalid fanMode: ${payload.fanMode}`);
+    }
+    return { command: "SET_FAN_MODE", tParams: { MODE: payload.fanMode } };
+  }
+
+  if (field === "locked") {
+    requireType("lock");
+    if (typeof payload.locked !== "boolean") throw new Error("locked must be a boolean");
+    return { command: payload.locked ? "LOCK" : "UNLOCK", tParams: {} };
+  }
+
+  if (field === "power") {
+    requireType("media");
+    if (typeof payload.power !== "boolean") throw new Error("power must be a boolean");
+    return { command: payload.power ? "ON" : "OFF", tParams: {} };
+  }
+
+  if (field === "volume") {
+    requireType("media");
+    const volume = Number(payload.volume);
+    if (!Number.isFinite(volume) || volume < 0 || volume > 100) {
+      throw new Error(`Invalid volume: ${payload.volume}`);
+    }
+    return { command: "SET_VOLUME_LEVEL", tParams: { LEVEL: volume } };
+  }
+
+  if (deviceType) throw new Error(`activate is not valid for Control4 device type ${deviceType}`);
+  if (payload.activate !== true) throw new Error("activate must be true");
+  return { command: "ACTIVATE", tParams: {} };
 }
 
 /**
@@ -191,7 +260,13 @@ async function handleRingCommand(deviceId, payload) {
     throw new Error("Ring module not available");
   }
 
-  if (deviceId === "alarm" && payload.mode !== undefined) {
+  const commandFields = ["mode", "light", "siren"].filter((field) => payload[field] !== undefined);
+  if (commandFields.length !== 1) {
+    throw new Error("Ring command must contain exactly one supported command field");
+  }
+
+  if (deviceId === "alarm") {
+    if (commandFields[0] !== "mode") throw new Error("Ring alarm only supports mode commands");
     const validModes = ["away", "home", "disarm"];
     if (!validModes.includes(payload.mode)) {
       throw new Error(`Invalid Ring alarm mode: ${payload.mode}`);
@@ -199,6 +274,9 @@ async function handleRingCommand(deviceId, payload) {
     await ringModule.setAlarmMode(payload.mode);
     console.log(`[mqtt-cmd] Ring alarm mode set to: ${payload.mode}`);
     return;
+  }
+  if (commandFields[0] === "mode") {
+    throw new Error("Ring camera devices do not support alarm mode commands");
   }
 
   // Camera commands require a valid numeric device ID
@@ -208,16 +286,23 @@ async function handleRingCommand(deviceId, payload) {
   }
 
   // Camera light toggle
-  if (payload.light !== undefined && ringModule.setCameraLight) {
+  if (commandFields[0] === "light") {
+    if (typeof ringModule.setCameraLight !== "function") {
+      throw new Error("Ring camera light control is not available");
+    }
     if (typeof payload.light !== "boolean") {
       throw new Error(`Invalid light value: expected boolean, got ${typeof payload.light}`);
     }
     await ringModule.setCameraLight(numericId, payload.light);
     console.log(`[mqtt-cmd] Ring camera ${deviceId} light: ${payload.light}`);
+    return;
   }
 
   // Camera siren toggle
-  if (payload.siren !== undefined && ringModule.setCameraSiren) {
+  if (typeof ringModule.setCameraSiren !== "function") {
+    throw new Error("Ring camera siren control is not available");
+  }
+  if (commandFields[0] === "siren") {
     if (typeof payload.siren !== "boolean") {
       throw new Error(`Invalid siren value: expected boolean, got ${typeof payload.siren}`);
     }
@@ -264,25 +349,6 @@ async function handleRoutineExecute(routineId, homeId) {
 }
 
 /**
- * Immediately apply a state change to the StateMachine so that SSE listeners
- * (local web client) and MQTT state publishers (remote client) are notified
- * without waiting for the Control4 WebSocket round-trip.
- */
-function applyStateChange(itemId, varName, value) {
-  if (!stateMachine) {
-    console.warn(`[mqtt-cmd] applyStateChange: stateMachine is NULL, skipping`);
-    return;
-  }
-  console.log(`[mqtt-cmd] applyStateChange: itemId=${itemId}, varName=${varName}, value=${value}`);
-  try {
-    stateMachine.handleDeviceEvent({ itemId, varName, value });
-    console.log(`[mqtt-cmd] applyStateChange: handleDeviceEvent completed`);
-  } catch (err) {
-    console.error(`[mqtt-cmd] applyStateChange failed: ${err.message}`);
-  }
-}
-
-/**
  * Load a routine by ID from the routines file.
  */
 function loadRoutineById(routineId) {
@@ -302,4 +368,4 @@ function validateTopicSegment(value, label) {
   }
 }
 
-module.exports = { init };
+module.exports = { init, executeDeviceCommand, resolveControl4Command, isDuplicateCommand };

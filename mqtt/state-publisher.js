@@ -11,6 +11,7 @@ const { deviceToMqttPayload, ringCameraToMqttPayload, ringAlarmToMqttPayload, ri
 let heartbeatTimer = null;
 let unsubReconnect = null;
 let stateChangeHandler = null;
+let homeStateChangeHandler = null;
 let currentStateMachine = null;
 const retainedCache = new Map();
 
@@ -58,10 +59,10 @@ function init({ stateMachine, ring, goveeInstance, getRoutines, getScenes }) {
       const topic = `wc4/${homeId}/state/control4/${safeSegment(change.itemId, "Control4 device ID")}`;
       publishRetainedIfChanged(topic, payload);
 
-      // Also publish updated home state
-      publishHomeState(stateMachine, homeId);
     };
     stateMachine.on("stateChange", stateChangeHandler);
+    homeStateChangeHandler = () => publishHomeState(stateMachine, homeId);
+    stateMachine.on("homeStateChange", homeStateChangeHandler);
   }
 
   // -------------------------------------------------------------------------
@@ -337,6 +338,10 @@ function stop(stateMachine) {
   if (stateChangeHandler && stateMachine) {
     stateMachine.removeListener("stateChange", stateChangeHandler);
     stateChangeHandler = null;
+  }
+  if (homeStateChangeHandler && stateMachine) {
+    stateMachine.removeListener("homeStateChange", homeStateChangeHandler);
+    homeStateChangeHandler = null;
   }
   if (unsubReconnect) {
     unsubReconnect();

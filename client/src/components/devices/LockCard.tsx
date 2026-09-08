@@ -60,7 +60,7 @@ export function LockCard({ device }: { device: UnifiedDevice }) {
     dispatch({ type: "UPDATE_DEVICE", payload: { id: device.id, state: { ...ls, locked: newLocked } } });
     try {
       if (remote) {
-        await sendDeviceCommand("control4", c4Id, { on: !newLocked });
+        await sendDeviceCommand("control4", c4Id, { locked: newLocked });
       } else {
         await sendCommand(
           { ip: auth.controllerIp || "", token: auth.directorToken || "" },

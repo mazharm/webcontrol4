@@ -65,7 +65,7 @@ export function MediaCard({ device }: { device: UnifiedDevice }) {
     dispatch({ type: "UPDATE_DEVICE", payload: { id: device.id, state: newState } });
     try {
       if (remote) {
-        await sendDeviceCommand("control4", c4Id, { on: !ms.powerOn });
+        await sendDeviceCommand("control4", c4Id, { power: !ms.powerOn });
       } else {
         await sendCommand(directorOpts, c4Id, ms.powerOn ? "OFF" : "ON");
       }

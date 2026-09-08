@@ -6,16 +6,22 @@
 // ---------------------------------------------------------------------------
 
 const mqttClient = require("./mqtt-client");
+const crypto = require("crypto");
 
 const RPC_TIMEOUT_MS = 10_000;
 const LLM_TIMEOUT_MS = 60_000; // LLM calls can take longer
+const DEVICE_COMMAND_TIMEOUT_MS = 35_000; // Director requests may use the 30s HTTP timeout
 const MAX_RESPONSE_BYTES = 256 * 1024; // HiveMQ free tier limit
+const RPC_IDEMPOTENCY_TTL_MS = 2 * 60 * 1000;
+const RPC_IDEMPOTENCY_MAX = 2000;
+const rpcIdempotencyCache = new Map();
 
 let ringModule = null;
 let trendingEngine = null;
 let llmChatFn = null;
 let historyStoreFn = null;
 let getRoutinesFn = null;
+let executeDeviceCommandFn = null;
 
 /**
  * Initialize the RPC handler.
@@ -25,12 +31,13 @@ let getRoutinesFn = null;
  * @param {object} [opts.trending] - TrendingEngine instance (optional)
  * @param {function} [opts.handleLlmChat] - async (body) => result (optional)
  */
-function init({ ring, trending, handleLlmChat, getHistoryStore, getRoutines }) {
+function init({ ring, trending, handleLlmChat, getHistoryStore, getRoutines, executeDeviceCommand }) {
   ringModule = ring;
   trendingEngine = trending;
   llmChatFn = handleLlmChat || null;
   historyStoreFn = getHistoryStore || null;
   getRoutinesFn = getRoutines || null;
+  executeDeviceCommandFn = executeDeviceCommand || null;
 
   const homeId = mqttClient.getHomeId();
   mqttClient.subscribe(`wc4/${homeId}/rpc/request`, handleRpcRequest);
@@ -90,16 +97,46 @@ async function handleRpcRequest(payload, topic) {
   }
 
   const responseTopic = `wc4/${homeId}/rpc/response/${id}`;
+  const fingerprint = crypto
+    .createHash("sha256")
+    .update(JSON.stringify({ method, params, ts }))
+    .digest("hex");
+  pruneRpcIdempotencyCache();
+  const cached = rpcIdempotencyCache.get(id);
+  if (cached) {
+    if (cached.fingerprint !== fingerprint) {
+      console.warn(`[mqtt-rpc] Rejected reused RPC id with different payload: ${id}`);
+      return;
+    }
+    const cachedResponse = await cached.responsePromise;
+    mqttClient.publish(responseTopic, cachedResponse);
+    return;
+  }
+
+  let resolveCachedResponse;
+  const responsePromise = new Promise((resolve) => {
+    resolveCachedResponse = resolve;
+  });
+  rpcIdempotencyCache.set(id, {
+    fingerprint,
+    createdAt: Date.now(),
+    responsePromise,
+  });
 
   let responded = false;
   function respond(payload) {
     if (responded) return;
     responded = true;
+    resolveCachedResponse(payload);
     mqttClient.publish(responseTopic, payload);
   }
 
   // Use longer timeout for LLM calls
-  const timeoutMs = method === "llmChat" ? LLM_TIMEOUT_MS : RPC_TIMEOUT_MS;
+  const timeoutMs = method === "llmChat"
+    ? LLM_TIMEOUT_MS
+    : method === "deviceCommand"
+      ? DEVICE_COMMAND_TIMEOUT_MS
+      : RPC_TIMEOUT_MS;
   const timer = setTimeout(() => {
     respond({ id, error: "RPC timeout — request took too long" });
   }, timeoutMs);
@@ -130,6 +167,9 @@ async function handleRpcRequest(payload, topic) {
       case "llmChat":
         result = await handleLlmChat(params);
         break;
+      case "deviceCommand":
+        result = await handleDeviceCommand(params);
+        break;
       default:
         clearTimeout(timer);
         respond({ id, error: `Unknown method: ${method}` });
@@ -157,6 +197,16 @@ async function handleRpcRequest(payload, topic) {
     clearTimeout(timer);
     respond({ id, error: err.message });
     console.error(`[mqtt-rpc] RPC ${method} failed:`, err.message);
+  }
+}
+
+function pruneRpcIdempotencyCache() {
+  const now = Date.now();
+  for (const [id, entry] of rpcIdempotencyCache) {
+    if (now - entry.createdAt > RPC_IDEMPOTENCY_TTL_MS ||
+        rpcIdempotencyCache.size > RPC_IDEMPOTENCY_MAX) {
+      rpcIdempotencyCache.delete(id);
+    }
   }
 }
 
@@ -277,6 +327,28 @@ async function handleLlmChat(params) {
     throw new Error(`LLM input too large (${inputStr.length} chars, max 10000)`);
   }
   return llmChatFn({ message, messages, context, mode });
+}
+
+async function handleDeviceCommand(params) {
+  if (!executeDeviceCommandFn) throw new Error("Device command handler not available");
+  if (!params || typeof params !== "object" || Array.isArray(params)) {
+    throw new Error("Device command parameters must be an object");
+  }
+  const { system, deviceId, command } = params;
+  if (system !== "control4" && system !== "ring") {
+    throw new Error("Unsupported device system");
+  }
+  if (!mqttClient.isSafeTopicSegment(String(deviceId || ""))) {
+    throw new Error("Invalid deviceId");
+  }
+  if (!command || typeof command !== "object" || Array.isArray(command)) {
+    throw new Error("command must be an object");
+  }
+  if (JSON.stringify(command).length > 2048) {
+    throw new Error("command payload too large");
+  }
+  await executeDeviceCommandFn(system, String(deviceId), command);
+  return { success: true };
 }
 
 function parseDeviceId(deviceId) {

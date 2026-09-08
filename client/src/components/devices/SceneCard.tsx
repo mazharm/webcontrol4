@@ -24,7 +24,7 @@ export function SceneCard({ scene }: SceneCardProps) {
     setRunning(true);
     try {
       if (remote) {
-        await sendDeviceCommand("control4", scene.id, { on: true });
+        await sendDeviceCommand("control4", scene.id, { activate: true });
       } else {
         await sendCommand(
           { ip: auth.controllerIp || "", token: auth.directorToken || "" },

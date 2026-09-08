@@ -122,8 +122,16 @@ function getSettingsEncryptionKey() {
 
   try {
     if (!fs.existsSync(SETTINGS_KEY_FILE)) {
-      settingsKeyCache = crypto.randomBytes(32);
-      fs.writeFileSync(SETTINGS_KEY_FILE, settingsKeyCache.toString("base64"), { mode: 0o600 });
+      const generatedKey = crypto.randomBytes(32);
+      const tmpPath = `${SETTINGS_KEY_FILE}.${process.pid}.${Date.now()}.tmp`;
+      try {
+        fs.writeFileSync(tmpPath, generatedKey.toString("base64"), { mode: 0o600 });
+        fs.renameSync(tmpPath, SETTINGS_KEY_FILE);
+      } catch (err) {
+        try { fs.unlinkSync(tmpPath); } catch {}
+        throw err;
+      }
+      settingsKeyCache = generatedKey;
       return settingsKeyCache;
     }
 
@@ -135,6 +143,7 @@ function getSettingsEncryptionKey() {
     settingsKeyCache = decoded;
     return settingsKeyCache;
   } catch (err) {
+    settingsKeyCache = null;
     console.error("Failed to load settings encryption key:", err.message);
     return null;
   }
@@ -274,13 +283,16 @@ function clearEnvVar(name) {
 }
 
 function persistSettings() {
+  const tmpPath = SETTINGS_FILE + ".tmp";
   try {
-    const tmpPath = SETTINGS_FILE + ".tmp";
     fs.writeFileSync(tmpPath, JSON.stringify(serializeSettings(), null, 2), { mode: 0o600 });
     fs.renameSync(tmpPath, SETTINGS_FILE);
     settingsMigrationNeeded = false;
+    return true;
   } catch (err) {
     console.error("Failed to save settings:", err.message);
+    try { fs.unlinkSync(tmpPath); } catch {}
+    return false;
   }
 }
 
@@ -381,12 +393,15 @@ try {
 }
 
 function persistRoutines() {
+  const tmpPath = ROUTINES_FILE + ".tmp";
   try {
-    const tmpPath = ROUTINES_FILE + ".tmp";
     fs.writeFileSync(tmpPath, JSON.stringify(routinesStore, null, 2), { mode: 0o600 });
     fs.renameSync(tmpPath, ROUTINES_FILE);
+    return true;
   } catch (err) {
     console.error("Failed to save routines:", err.message);
+    try { fs.unlinkSync(tmpPath); } catch {}
+    return false;
   }
 }
 
@@ -534,6 +549,7 @@ function onStateChangeForConditions() {
 async function executeRoutineSteps(routine) {
   if (!routine.steps || routine.steps.length === 0) return;
 
+  const failures = [];
   for (const step of routine.steps) {
     try {
       const compatibilityError = getRoutineStepCompatibilityError(step);
@@ -560,7 +576,11 @@ async function executeRoutineSteps(routine) {
       }
     } catch (err) {
       console.error(`[Scheduler] Step failed (${step.type} device ${step.deviceId}):`, err.message);
+      failures.push(`${step.type} device ${step.deviceId}: ${err.message}`);
     }
+  }
+  if (failures.length > 0) {
+    throw new Error(`${failures.length}/${routine.steps.length} routine step(s) failed: ${failures.join("; ")}`);
   }
 }
 
@@ -574,6 +594,7 @@ let directorSession = {
   accountToken: null,
   controllerCommonName: null,
 };
+let directorTokenRefreshPromise = null;
 
 function computeTokenExpiry(validSeconds) {
   return Number.isFinite(validSeconds) && validSeconds > 0
@@ -583,6 +604,7 @@ function computeTokenExpiry(validSeconds) {
 
 function setDirectorSessionInfo({ ip, token, validSeconds, accountToken = null, controllerCommonName = null }) {
   if (!ip || !token) return;
+  directorTokenRefreshPromise = null;
   directorSession = {
     ip,
     token,
@@ -621,11 +643,24 @@ async function ensureDirectorSessionTokenValid({ forceRefresh = false } = {}) {
     return directorSession;
   }
 
-  const refreshed = await requestDirectorToken(
-    directorSession.accountToken,
-    directorSession.controllerCommonName
-  );
-  updateDirectorSessionToken(refreshed.directorToken, refreshed.validSeconds);
+  if (!directorTokenRefreshPromise) {
+    const sessionAtStart = directorSession;
+    const refreshPromise = requestDirectorToken(
+      sessionAtStart.accountToken,
+      sessionAtStart.controllerCommonName
+    ).then((refreshed) => {
+      if (directorSession === sessionAtStart) {
+        updateDirectorSessionToken(refreshed.directorToken, refreshed.validSeconds);
+      }
+      return directorSession;
+    }).finally(() => {
+      if (directorTokenRefreshPromise === refreshPromise) {
+        directorTokenRefreshPromise = null;
+      }
+    });
+    directorTokenRefreshPromise = refreshPromise;
+  }
+  await directorTokenRefreshPromise;
   return directorSession;
 }
 
@@ -636,11 +671,19 @@ async function executeScheduledCommand(deviceId, command, tParams) {
   // Mock mode — execute directly against in-memory mock state
   if (ip === "mock") {
     const mockReq = { method: "POST", body: { command, tParams }, query: {} };
+    let handled = false;
+    let statusCode = 200;
     const mockRes = {
-      json: () => {},
-      status: () => ({ json: () => {} }),
+      json: () => { handled = true; return mockRes; },
+      status: (code) => {
+        statusCode = code;
+        return { json: () => { handled = true; return mockRes; } };
+      },
     };
     handleMockRequest(mockReq, mockRes, `/api/v1/items/${deviceId}/commands`);
+    if (!handled || statusCode >= 400) {
+      throw new Error(`Mock command failed for device ${deviceId}`);
+    }
     return;
   }
 
@@ -1850,21 +1893,29 @@ app.post("/api/settings", settingsWriteRateLimit, (req, res) => {
   if (!isPlainRecord(req.body)) {
     return res.status(400).json({ error: "invalid payload" });
   }
+  const previousSettings = appSettings;
+  appSettings = { ...appSettings };
+  const rejectSettings = (message) => {
+    appSettings = previousSettings;
+    return res.status(400).json({ error: message });
+  };
+  let clearPushoverAppToken = false;
+  let clearPushoverUserKey = false;
   const { anthropicKey, anthropicModel } = req.body;
   if (anthropicKey !== undefined) {
     if (typeof anthropicKey !== "string") {
-      return res.status(400).json({ error: "anthropicKey must be a string" });
+      return rejectSettings("anthropicKey must be a string");
     }
     const keyStr = anthropicKey.trim();
     if (keyStr && keyStr.length > 256) {
-      return res.status(400).json({ error: "anthropicKey is too long" });
+      return rejectSettings("anthropicKey is too long");
     }
     appSettings.anthropicKey = keyStr;
   }
   if (anthropicModel) {
     const validModel = ANTHROPIC_MODELS.find((m) => m.id === String(anthropicModel));
     if (!validModel) {
-      return res.status(400).json({ error: "invalid anthropicModel" });
+      return rejectSettings("invalid anthropicModel");
     }
     appSettings.anthropicModel = validModel.id;
   }
@@ -1872,34 +1923,34 @@ app.post("/api/settings", settingsWriteRateLimit, (req, res) => {
   const { pushoverAppToken, pushoverUserKey } = req.body;
   if (pushoverAppToken !== undefined) {
     if (typeof pushoverAppToken !== "string") {
-      return res.status(400).json({ error: "pushoverAppToken must be a string" });
+      return rejectSettings("pushoverAppToken must be a string");
     }
     const tokenStr = pushoverAppToken.trim();
     if (tokenStr.length > 100) {
-      return res.status(400).json({ error: "pushoverAppToken is too long" });
+      return rejectSettings("pushoverAppToken is too long");
     }
     appSettings.pushoverAppToken = tokenStr;
     // If the user explicitly blanked the field, also drop any env override
     // so the change actually takes effect.
-    if (!tokenStr) clearEnvVar("PUSHOVER_APP_TOKEN");
+    clearPushoverAppToken = !tokenStr;
   }
   if (pushoverUserKey !== undefined) {
     if (typeof pushoverUserKey !== "string") {
-      return res.status(400).json({ error: "pushoverUserKey must be a string" });
+      return rejectSettings("pushoverUserKey must be a string");
     }
     const keyStr = pushoverUserKey.trim();
     if (keyStr.length > 100) {
-      return res.status(400).json({ error: "pushoverUserKey is too long" });
+      return rejectSettings("pushoverUserKey is too long");
     }
     appSettings.pushoverUserKey = keyStr;
-    if (!keyStr) clearEnvVar("PUSHOVER_USER_KEY");
+    clearPushoverUserKey = !keyStr;
   }
   if (req.body.deviceMappings !== undefined) {
     const dm = req.body.deviceMappings;
     if (typeof dm === "object" && dm !== null && !Array.isArray(dm)) {
       const entries = Object.entries(dm);
       if (entries.length > 1000) {
-        return res.status(400).json({ error: "too many device mappings" });
+        return rejectSettings("too many device mappings");
       }
       const clean = Object.create(null);
       for (const [k, v] of entries) {
@@ -1909,10 +1960,15 @@ app.post("/api/settings", settingsWriteRateLimit, (req, res) => {
       }
       appSettings.deviceMappings = clean;
     } else {
-      return res.status(400).json({ error: "deviceMappings must be an object" });
+      return rejectSettings("deviceMappings must be an object");
     }
   }
-  persistSettings();
+  if (!persistSettings()) {
+    appSettings = previousSettings;
+    return res.status(500).json({ error: "Failed to persist settings" });
+  }
+  if (clearPushoverAppToken) clearEnvVar("PUSHOVER_APP_TOKEN");
+  if (clearPushoverUserKey) clearEnvVar("PUSHOVER_USER_KEY");
   applyPushoverEnv();
   res.json({ ok: true });
 });
@@ -1956,12 +2012,18 @@ app.post("/api/mqtt/connect", credentialWriteRateLimit, async (req, res) => {
     mqttModule = null;
   }
 
-  // Store credentials
-  appSettings.mqttBrokerUrl = brokerUrl.trim();
-  appSettings.mqttUsername = username.trim();
-  appSettings.mqttPassword = password;
-  appSettings.mqttHomeId = cleanHomeId;
-  persistSettings();
+  const previousSettings = appSettings;
+  appSettings = {
+    ...appSettings,
+    mqttBrokerUrl: brokerUrl.trim(),
+    mqttUsername: username.trim(),
+    mqttPassword: password,
+    mqttHomeId: cleanHomeId,
+  };
+  if (!persistSettings()) {
+    appSettings = previousSettings;
+    return res.status(500).json({ error: "Failed to persist MQTT settings" });
+  }
 
   try {
     const mqttBridge = require("./mqtt");
@@ -1985,6 +2047,10 @@ app.post("/api/mqtt/connect", credentialWriteRateLimit, async (req, res) => {
   } catch (err) {
     console.error("[mqtt] Connect via settings failed:", err.message);
     mqttModule = null;
+    appSettings = previousSettings;
+    if (!persistSettings()) {
+      console.error("[mqtt] Failed to restore previous MQTT settings after connection failure");
+    }
     res.status(500).json({ error: err.message || "MQTT connection failed" });
   }
 });
@@ -1994,10 +2060,18 @@ app.post("/api/mqtt/disconnect", async (_req, res) => {
     try { await mqttModule.disconnect(); } catch {}
     mqttModule = null;
   }
-  appSettings.mqttBrokerUrl = "";
-  appSettings.mqttUsername = "";
-  appSettings.mqttPassword = "";
-  appSettings.mqttHomeId = "";
+  const previousSettings = appSettings;
+  appSettings = {
+    ...appSettings,
+    mqttBrokerUrl: "",
+    mqttUsername: "",
+    mqttPassword: "",
+    mqttHomeId: "",
+  };
+  if (!persistSettings()) {
+    appSettings = previousSettings;
+    return res.status(500).json({ error: "Failed to persist MQTT disconnect" });
+  }
   // Also clear env — otherwise a subsequent realtime init would resurrect
   // the old env values and reconnect to the broker the operator just
   // disabled.
@@ -2005,7 +2079,6 @@ app.post("/api/mqtt/disconnect", async (_req, res) => {
   clearEnvVar("MQTT_USERNAME");
   clearEnvVar("MQTT_PASSWORD");
   clearEnvVar("MQTT_HOME_ID");
-  persistSettings();
   res.json({ ok: true });
 });
 
@@ -2169,11 +2242,10 @@ app.post("/api/routines", (req, res) => {
     cleanRoutine.conditionLogic = routine.conditionLogic === "any" ? "any" : "all";
     cleanRoutine.conditionsEnabled = routine.conditionsEnabled !== false;
     cleanRoutine.cooldown = Number.isFinite(Number(routine.cooldown)) ? Number(routine.cooldown) : DEFAULT_COOLDOWN;
-    // Reset condition tracking when routine is saved/updated
-    conditionMetSince.delete(routine.id);
-    lastTriggered.delete(routine.id);
   }
 
+  const previousRoutines = routinesStore;
+  routinesStore = [...routinesStore];
   const idx = routinesStore.findIndex((r) => r.id === cleanRoutine.id);
   if (idx !== -1) {
     routinesStore[idx] = cleanRoutine;
@@ -2183,17 +2255,26 @@ app.post("/api/routines", (req, res) => {
     }
     routinesStore.push(cleanRoutine);
   }
-  persistRoutines();
+  if (!persistRoutines()) {
+    routinesStore = previousRoutines;
+    return res.status(500).json({ error: "Failed to persist routine" });
+  }
+  conditionMetSince.delete(routine.id);
+  lastTriggered.delete(routine.id);
   if (mqttModule) mqttModule.onRoutinesChanged();
   res.json({ ok: true });
 });
 
 app.delete("/api/routines/:id", (req, res) => {
   const { id } = req.params;
+  const previousRoutines = routinesStore;
   routinesStore = routinesStore.filter((r) => r.id !== id);
+  if (!persistRoutines()) {
+    routinesStore = previousRoutines;
+    return res.status(500).json({ error: "Failed to persist routine deletion" });
+  }
   conditionMetSince.delete(id);
   lastTriggered.delete(id);
-  persistRoutines();
   if (mqttModule) mqttModule.onRoutinesChanged();
   res.json({ ok: true });
 });
@@ -2747,6 +2828,13 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
     controllerCommonName,
   });
 
+  if (c4ws) {
+    try { c4ws.disconnect(); } catch {}
+    c4ws = null;
+  }
+  stopFallbackPolling();
+  stopMockEventEmitter();
+
   // 1. Trending engine (idempotent — keep existing if already running)
   if (TrendingEngine && !trending) {
     try {
@@ -2762,14 +2850,15 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
         trendingUnavailableReason = err.message;
         console.warn("Trending disabled:", err.message);
       } else {
-        throw err;
+        trendingUnavailableReason = err.message;
+        console.warn("Trending disabled:", err.message);
       }
     }
   }
 
   // 2. State machine — always re-create on new connection
   if (stateMachine) {
-    stateMachine.removeAllListeners();
+    stateMachine.destroy();
   }
   stateMachine = new StateMachine({
     apiFn: async (apiPath) => {
@@ -2787,8 +2876,16 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
     logger: (...args) => console.log("[state]", ...args),
   });
 
-  await stateMachine.discover();
-  await stateMachine.readInitialState();
+  let initializationIncomplete = false;
+  try {
+    await stateMachine.discover();
+    const readStats = await stateMachine.readInitialState();
+    initializationIncomplete = stateMachine.getAllDeviceStates().size === 0
+      || (readStats.attempted > 0 && readStats.succeeded === 0);
+  } catch (err) {
+    initializationIncomplete = true;
+    console.error("[realtime] Initial discovery/state read failed:", err?.message || String(err));
+  }
 
   // 2b. Server-side history recording (every 10s)
   startHistoryRecording();
@@ -2811,18 +2908,21 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
         });
       }
 
-      // Track home-mode transitions
-      const homeState = stateMachine.getHomeState();
+      broadcastSSE("state", change);
+      onStateChangeForConditions();
+    } catch (err) {
+      console.error("[realtime] stateChange handler error:", err?.stack || err?.message || err);
+    }
+  });
+  stateMachine.on("homeStateChange", (homeState) => {
+    try {
       if (trending && homeState.mode !== prevMode) {
         trending.recordModeChange(homeState.mode, homeState.confidence);
         prevMode = homeState.mode;
       }
-
-      broadcastSSE("state", change);
       broadcastSSE("homeState", homeState);
-      onStateChangeForConditions();
     } catch (err) {
-      console.error("[realtime] stateChange handler error:", err?.stack || err?.message || err);
+      console.error("[realtime] homeStateChange handler error:", err?.stack || err?.message || err);
     }
   });
 
@@ -2859,17 +2959,6 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
       mqttModule = null;
     }
   }
-
-  // 4. Realtime transport — always tear down any previously-running transport
-  // first.  Without this, switching modes (mock ↔ real) or reconnecting leaves
-  // an orphaned mock timer, websocket, or fallback poller alive that keeps
-  // mutating the freshly-created state machine with stale/foreign events.
-  if (c4ws) {
-    try { c4ws.disconnect(); } catch {}
-    c4ws = null;
-  }
-  stopFallbackPolling();
-  stopMockEventEmitter();
 
   if (controllerIp !== "mock") {
     const refreshTokenFn = accountToken && controllerCommonName
@@ -2913,7 +3002,10 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
       try {
         // After a reconnect the Director may have updated many devices
         // while we were offline — do a full re-read once.
-        await stateMachine.readInitialState();
+        const readStats = await stateMachine.readInitialState();
+        if (readStats.attempted > 0 && readStats.succeeded === 0) {
+          throw new Error("all reconnect catch-up reads failed");
+        }
       } catch (err) {
         wsLog.error("reconnect-catchup-failed", { error: err?.message || String(err) });
         // Keep fallback polling on if the catch-up read failed.
@@ -2933,6 +3025,9 @@ async function initializeRealtime({ controllerIp, directorToken, accountToken, c
       await connectWithRetry(c4ws);
     } catch {
       console.log("[ws] Initial connection failed, using fallback polling");
+      startFallbackPolling(controllerIp, directorToken);
+    }
+    if (initializationIncomplete) {
       startFallbackPolling(controllerIp, directorToken);
     }
   } else {
@@ -2981,10 +3076,18 @@ function startFallbackPolling(controllerIp, directorToken) {
     _fallbackPollInFlight = true;
     try {
       _fallbackPollTicks++;
+      if (stateMachine.getAllDeviceStates().size === 0) {
+        await stateMachine.discover();
+      }
+      let readStats = null;
       if (_fallbackPollTicks % FALLBACK_FULL_REFRESH_EVERY_N === 1) {
-        await stateMachine.readInitialState();
+        readStats = await stateMachine.readInitialState();
       } else {
         await stateMachine.readStaleDeviceStates(FALLBACK_STALE_AGE_MS);
+      }
+      if (c4ws?.isConnected() && stateMachine.getAllDeviceStates().size > 0 &&
+          (!readStats || readStats.attempted === 0 || readStats.succeeded > 0)) {
+        stopFallbackPolling();
       }
     } catch (err) {
       console.error("[resilience] Fallback poll error:", err.message);
@@ -3318,10 +3421,17 @@ app.post("/api/govee/leak/login", credentialWriteRateLimit, async (req, res) => 
     const auth = await GoveeLeak.login(cleanEmail, password);
     console.log("[govee] Login succeeded");
     // Persist token only — password is discarded
-    appSettings.goveeEmail = auth.email;
-    appSettings.goveeToken = auth.token;
-    appSettings.goveeTokenTimestamp = auth.tokenTimestamp;
-    persistSettings();
+    const previousSettings = appSettings;
+    appSettings = {
+      ...appSettings,
+      goveeEmail: auth.email,
+      goveeToken: auth.token,
+      goveeTokenTimestamp: auth.tokenTimestamp,
+    };
+    if (!persistSettings()) {
+      appSettings = previousSettings;
+      return res.status(500).json({ error: "Failed to persist Govee credentials" });
+    }
 
     // (Re-)start Govee polling with the new token
     if (goveeInstance) goveeInstance.stop();
@@ -3354,10 +3464,17 @@ app.post("/api/govee/leak/disconnect", (_req, res) => {
     goveeInstance = null;
   }
   broadcastSSE("govee:status", { connected: false });
-  appSettings.goveeEmail = "";
-  appSettings.goveeToken = "";
-  appSettings.goveeTokenTimestamp = 0;
-  persistSettings();
+  const previousSettings = appSettings;
+  appSettings = {
+    ...appSettings,
+    goveeEmail: "",
+    goveeToken: "",
+    goveeTokenTimestamp: 0,
+  };
+  if (!persistSettings()) {
+    appSettings = previousSettings;
+    return res.status(500).json({ error: "Failed to persist Govee disconnect" });
+  }
   res.json({ ok: true });
 });
 
@@ -3377,8 +3494,12 @@ app.post("/api/govee/leak/rooms", (req, res) => {
   }
   const clean = Object.create(null);
   for (const [k, v] of entries) clean[k] = v.trim();
-  appSettings.goveeSensorRooms = clean;
-  persistSettings();
+  const previousSettings = appSettings;
+  appSettings = { ...appSettings, goveeSensorRooms: clean };
+  if (!persistSettings()) {
+    appSettings = previousSettings;
+    return res.status(500).json({ error: "Failed to persist Govee room assignments" });
+  }
   res.json({ ok: true });
 });
 
@@ -3497,6 +3618,10 @@ async function cleanup() {
   stopHistoryRecording();
   stopFallbackPolling();
   stopMockEventEmitter();
+  if (stateMachine) {
+    stateMachine.destroy();
+    stateMachine = null;
+  }
   if (mqttModule) {
     try { await mqttModule.disconnect(); } catch {}
   }

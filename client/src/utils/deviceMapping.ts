@@ -235,36 +235,34 @@ export function mapC4Scene(item: C4SceneItem): Scene {
 }
 
 /** Map state machine snapshot devices into UnifiedDevice[] */
-export function mapStateDevices(snapshot: StateSnapshot): UnifiedDevice[] {
-  const devices: UnifiedDevice[] = [];
-  for (const [, dev] of Object.entries(snapshot.devices)) {
-    const vars = dev.variables || {};
-    switch (dev.type) {
-      case "light":
-        devices.push(mapC4Light(
-          { id: dev.itemId, name: dev.name, type: 7, roomName: dev.room, roomParentId: dev.roomId, floorName: dev.floor },
-          vars
-        ));
-        break;
-      case "thermostat":
-        devices.push(mapC4Thermostat(
-          { id: dev.itemId, name: dev.name, type: 7, roomName: dev.room, roomParentId: dev.roomId, floorName: dev.floor },
-          vars
-        ));
-        break;
-      case "lock":
-        devices.push(mapC4Lock(dev.itemId, dev.name, dev.room, dev.roomId, dev.floor, vars));
-        break;
-      case "sensor":
-        devices.push(mapC4Sensor(dev.itemId, dev.name, dev.room, dev.roomId, dev.floor, vars));
-        break;
-      case "security":
-        devices.push(mapC4Security(dev.itemId, dev.name, dev.room, dev.roomId, dev.floor, vars));
-        break;
-      case "media":
-        devices.push(mapC4Media(dev.itemId, dev.name, dev.room, dev.roomId, dev.floor, vars));
-        break;
-    }
+export function mapStateDevice(dev: StateSnapshot["devices"][string]): UnifiedDevice | null {
+  const vars = dev.variables || {};
+  switch (dev.type) {
+    case "light":
+      return mapC4Light(
+        { id: dev.itemId, name: dev.name, type: 7, roomName: dev.room, roomParentId: dev.roomId, floorName: dev.floor },
+        vars
+      );
+    case "thermostat":
+      return mapC4Thermostat(
+        { id: dev.itemId, name: dev.name, type: 7, roomName: dev.room, roomParentId: dev.roomId, floorName: dev.floor },
+        vars
+      );
+    case "lock":
+      return mapC4Lock(dev.itemId, dev.name, dev.room, dev.roomId, dev.floor, vars);
+    case "sensor":
+      return mapC4Sensor(dev.itemId, dev.name, dev.room, dev.roomId, dev.floor, vars);
+    case "security":
+      return mapC4Security(dev.itemId, dev.name, dev.room, dev.roomId, dev.floor, vars);
+    case "media":
+      return mapC4Media(dev.itemId, dev.name, dev.room, dev.roomId, dev.floor, vars);
+    default:
+      return null;
   }
-  return devices;
+}
+
+export function mapStateDevices(snapshot: StateSnapshot): UnifiedDevice[] {
+  return Object.values(snapshot.devices)
+    .map(mapStateDevice)
+    .filter((device): device is UnifiedDevice => device !== null);
 }

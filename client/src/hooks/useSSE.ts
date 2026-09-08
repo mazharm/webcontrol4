@@ -2,6 +2,8 @@ import { useEffect } from "react";
 import { acquireEventSource, releaseEventSource } from "../services/sse-singleton";
 import type { DeviceAction } from "../contexts/DeviceContext";
 import type { Alert } from "../types/devices";
+import type { StateSnapshot } from "../types/api";
+import { mapStateDevice } from "../utils/deviceMapping";
 
 export function useSSE(dispatch: React.Dispatch<DeviceAction>) {
   useEffect(() => {
@@ -13,6 +15,13 @@ export function useSSE(dispatch: React.Dispatch<DeviceAction>) {
         data = JSON.parse((e as MessageEvent).data);
       } catch {
         return; // ignore malformed SSE
+      }
+      if (data.device && typeof data.device === "object") {
+        const device = mapStateDevice(data.device as StateSnapshot["devices"][string]);
+        if (device) {
+          dispatch({ type: "UPSERT_DEVICE", payload: device });
+          return;
+        }
       }
       if (data.itemId && data.varName !== undefined) {
         dispatch({

@@ -15,6 +15,7 @@ export interface DeviceContextState {
 export type DeviceAction =
   | { type: "SET_DEVICES"; payload: UnifiedDevice[] }
   | { type: "UPDATE_DEVICE"; payload: { id: string; state: Partial<UnifiedDevice["state"]> } }
+  | { type: "UPSERT_DEVICE"; payload: UnifiedDevice }
   | { type: "UPDATE_DEVICE_VAR"; payload: { itemId: number; varName: string; value: string; deviceName?: string; room?: string; roomId?: number; floor?: string; deviceType?: string } }
   | { type: "SET_SCENES"; payload: Scene[] }
   | { type: "SET_ALERTS"; payload: Alert[] }
@@ -114,14 +115,16 @@ function deviceReducer(state: DeviceContextState, action: DeviceAction): DeviceC
       const zoneMap = new Map<string, Zone>();
 
       for (const d of action.payload) {
-        devices.set(d.id, d);
-        if (d.roomId != null) {
-          rooms.set(d.roomId, { id: d.roomId, name: d.roomName, floorName: d.floorName });
+        const existing = state.devices.get(d.id);
+        const device = existing && existing.lastUpdated > d.lastUpdated ? existing : d;
+        devices.set(device.id, device);
+        if (device.roomId != null) {
+          rooms.set(device.roomId, { id: device.roomId, name: device.roomName, floorName: device.floorName });
         }
-        if (d.floorName) floorSet.add(d.floorName);
-        if (d.zoneName) {
-          if (!zoneMap.has(d.zoneName)) {
-            zoneMap.set(d.zoneName, { name: d.zoneName, rooms: [] });
+        if (device.floorName) floorSet.add(device.floorName);
+        if (device.zoneName) {
+          if (!zoneMap.has(device.zoneName)) {
+            zoneMap.set(device.zoneName, { name: device.zoneName, rooms: [] });
           }
         }
       }
@@ -145,6 +148,38 @@ function deviceReducer(state: DeviceContextState, action: DeviceAction): DeviceC
         lastUpdated: Date.now(),
       });
       return { ...state, devices: newDevices };
+    }
+    case "UPSERT_DEVICE": {
+      const existing = state.devices.get(action.payload.id);
+      const newDevices = new Map(state.devices);
+      newDevices.set(action.payload.id, action.payload);
+      const metadataChanged = !existing
+        || existing.name !== action.payload.name
+        || existing.type !== action.payload.type
+        || existing.roomId !== action.payload.roomId
+        || existing.roomName !== action.payload.roomName
+        || existing.floorName !== action.payload.floorName
+        || existing.zoneName !== action.payload.zoneName;
+      if (!metadataChanged) return { ...state, devices: newDevices };
+
+      const rooms = new Map<number, Room>();
+      const floorSet = new Set<string>();
+      for (const device of newDevices.values()) {
+        if (device.roomId != null) {
+          rooms.set(device.roomId, {
+            id: device.roomId,
+            name: device.roomName,
+            floorName: device.floorName,
+          });
+        }
+        if (device.floorName) floorSet.add(device.floorName);
+      }
+      return {
+        ...state,
+        devices: newDevices,
+        rooms,
+        floors: Array.from(floorSet).sort(),
+      };
     }
     case "UPDATE_DEVICE_VAR":
       return updateDeviceVar(state, action.payload);

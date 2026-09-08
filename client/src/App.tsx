@@ -104,8 +104,12 @@ function LocalConnectedApp() {
   useSSE(dispatch);
 
   const loadC4Snapshot = useCallback(async (): Promise<{ devices: UnifiedDevice[]; alerts: Alert[] | null }> => {
+    const requestStartedAt = Date.now();
     const snapshot: StateSnapshot = await getState();
-    const c4Devices = mapStateDevices(snapshot);
+    const c4Devices = mapStateDevices(snapshot).map((device) => ({
+      ...device,
+      lastUpdated: requestStartedAt,
+    }));
     const alerts = snapshot.alerts
       ? snapshot.alerts.map((a) => ({
           id: `${a.type}-${a.itemId}-${a.timestamp}`,

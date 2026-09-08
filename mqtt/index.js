@@ -69,6 +69,7 @@ async function init(opts) {
     handleLlmChat: opts.handleLlmChat,
     getHistoryStore: opts.getHistoryStore,
     getRoutines: opts.getRoutines,
+    executeDeviceCommand: commandHandler.executeDeviceCommand,
   });
 
   console.log("[mqtt] All modules initialized");
